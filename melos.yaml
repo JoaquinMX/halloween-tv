@@ -1,0 +1,11 @@
+name: halloween-tv
+packages:
+  - packages/**
+  - apps/**
+scripts:
+  bootstrap: melos bootstrap
+  analyze: melos exec -c 5 -- "dart analyze"
+  format: melos exec -- "dart format ."
+  test: melos exec -c 3 --dir-exists="test" -- "flutter test --no-pub"
+  goldens: melos exec --flutter --dir-exists="test" -- "flutter test --update-goldens"
+  size: melos exec --scope="apps/tv_app" -- "flutter build apk --analyze-size"
