@@ -3,10 +3,9 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:infra_settings/infra_settings.dart';
 
 void main() {
-  test('adds one to input values', () {
-    final calculator = Calculator();
-    expect(calculator.addOne(2), 3);
-    expect(calculator.addOne(-7), -6);
-    expect(calculator.addOne(0), 1);
+  test('LocalSettingsAdapter returns provided settings', () async {
+    const settings = AppSettings(effectsEnabled: false, allowHighResolution: true);
+    final adapter = LocalSettingsAdapter(settings: settings);
+    expect(await adapter.load(), settings);
   });
 }

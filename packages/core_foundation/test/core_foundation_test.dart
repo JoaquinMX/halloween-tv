@@ -1,12 +1,18 @@
-import 'package:flutter_test/flutter_test.dart';
+import 'package:test/test.dart';
 
 import 'package:core_foundation/core_foundation.dart';
 
 void main() {
-  test('adds one to input values', () {
-    final calculator = Calculator();
-    expect(calculator.addOne(2), 3);
-    expect(calculator.addOne(-7), -6);
-    expect(calculator.addOne(0), 1);
+  test('Result success unwraps value', () {
+    const result = Success<int>(42);
+    expect(result.isSuccess, isTrue);
+    expect(result.valueOrNull, 42);
+  });
+
+  test('Result failure provides failure', () {
+    const failure = ValidationFailure('oops');
+    const Result<int> result = FailureResult<int>(failure);
+    expect(result.isFailure, isTrue);
+    expect(result.failureOrNull, failure);
   });
 }

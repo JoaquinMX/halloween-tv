@@ -1,5 +1,3 @@
-/// A Calculator.
-class Calculator {
-  /// Returns [value] plus 1.
-  int addOne(int value) => value + 1;
-}
+library infra_signed_urls;
+
+export 'src/signed_url_fetcher.dart';
