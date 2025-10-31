@@ -1,5 +1,6 @@
-/// A Calculator.
-class Calculator {
-  /// Returns [value] plus 1.
-  int addOne(int value) => value + 1;
-}
+library testing_toolkit;
+
+export 'src/fake_cache_port.dart';
+export 'src/fake_media_fetch_port.dart';
+export 'src/fake_playlist_port.dart';
+export 'src/fake_settings_port.dart';

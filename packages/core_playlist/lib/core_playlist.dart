@@ -1,5 +1,5 @@
-/// A Calculator.
-class Calculator {
-  /// Returns [value] plus 1.
-  int addOne(int value) => value + 1;
-}
+library core_playlist;
+
+export 'src/entities.dart';
+export 'src/ports.dart';
+export 'src/prepare_playback_use_case.dart';

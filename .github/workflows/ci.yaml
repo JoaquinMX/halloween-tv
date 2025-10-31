@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - name: Install Melos
+        run: flutter pub global activate melos
+      - name: Bootstrap workspace
+        run: melos bootstrap
+      - name: Format check
+        run: melos format -- --set-exit-if-changed
+      - name: Analyze
+        run: melos analyze
+      - name: Run tests
+        run: melos test
+      - name: Golden tests
+        run: melos goldens
+      - name: Enforce boundaries
+        run: melos run check_boundaries
