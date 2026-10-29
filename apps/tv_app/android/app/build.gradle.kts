@@ -30,11 +30,31 @@ android {
         versionName = flutter.versionName
     }
 
+    signingConfigs {
+        create("release") {
+            // Q4-signing (done): party keystore, driven ENTIRELY by env vars — no secrets in this file.
+            // Passwords live only in a local secure note outside the repo; never commit them.
+            storeFile = file(System.getenv("KEYSTORE_PATH") ?: "../../../../halloween-party.jks")
+            storePassword = System.getenv("KEYSTORE_PASSWORD")
+            keyAlias = System.getenv("KEY_ALIAS")
+            keyPassword = System.getenv("KEY_PASSWORD")
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            // TODO (Q4-signing, updated): party `release` signingConfig above is wired when env vars resolve AND the keystore file exists; otherwise falls back to debug signing so `flutter run --release` and debug builds keep working. What remains: owner keeps passwords in secure note; rotation = new keystore = reinstall (see docs/RELEASE-SIGNING.md).
+            val keystoreFile = file(System.getenv("KEYSTORE_PATH") ?: "../../../../halloween-party.jks")
+            val hasReleaseKeys = System.getenv("KEYSTORE_PASSWORD") != null
+                && System.getenv("KEY_ALIAS") != null
+                && System.getenv("KEY_PASSWORD") != null
+                && keystoreFile.exists()
+            signingConfig = if (hasReleaseKeys) {
+                signingConfigs.getByName("release")
+            } else {
+                logger.warn("WARNING: release signing env vars (KEYSTORE_PATH, KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD) not fully set or keystore file missing at ${keystoreFile} — falling back to debug signing. Release APK will NOT be party-signed.")
+                signingConfigs.getByName("debug")
+            }
         }
     }
 }

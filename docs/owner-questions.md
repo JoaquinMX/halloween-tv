@@ -14,6 +14,8 @@ OWNER QUESTION: Can I get 30 minutes with the actual TV box before the party to 
 - Q4 Party keystore vs debug key: PENDING.
 - Q5 30-min soak on actual TV box Wi-Fi off: PENDING.
 
+- Q4 decision (2026-10-29): party keystore `halloween-party.jks` generated (alias `halloween-party`); release signing env-driven with debug fallback kept.
+
 ## Q4 follow-up (2026-10-29) — explanation sent to owner
 
 - A debug key is like a "test copy" sticker: the TV installs it fine for the party, but Android will not accept future updates to it and no app store will take it.
