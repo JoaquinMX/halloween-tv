@@ -54,7 +54,8 @@ class CameraTile extends StatefulWidget {
 }
 
 class _CameraTileState extends State<CameraTile> {
-  late final TileVideoController _controller;
+  TileVideoController? _controller;
+  int _generation = 0;
   bool _initialized = false;
   bool _failed = false;
   String? _error;
@@ -63,12 +64,13 @@ class _CameraTileState extends State<CameraTile> {
   @override
   void initState() {
     super.initState();
-    _controller = widget.controllerFactory(
+    final TileVideoController controller = widget.controllerFactory(
       cameraId: widget.cameraId,
       assetPath: widget.assetPath,
     );
-    _controller.addListener(_onControllerUpdate);
-    unawaited(_start());
+    _controller = controller;
+    controller.addListener(_onControllerUpdate);
+    unawaited(_start(controller, _generation));
     if (widget.autofocus) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted && widget.focusNode.context != null) {
@@ -78,23 +80,65 @@ class _CameraTileState extends State<CameraTile> {
     }
   }
 
+  @override
+  void didUpdateWidget(CameraTile oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Asset swap for a reconfigured slot (same stable tile key, new camera
+    // feed): dispose-before-create keeps the decoder budget at one live
+    // controller per tile (four wall-wide) instead of transiently doubling.
+    if (oldWidget.cameraId != widget.cameraId ||
+        oldWidget.assetPath != widget.assetPath) {
+      _swapController();
+    }
+  }
+
+  /// Releases the old decoder before allocating its replacement.
+  Future<void> _swapController() async {
+    final int generation = ++_generation;
+    final TileVideoController? old = _controller;
+    _controller = null;
+    setState(() {
+      _initialized = false;
+      _failed = false;
+      _error = null;
+    });
+    if (old != null) {
+      old.removeListener(_onControllerUpdate);
+      try {
+        await old.dispose();
+      } catch (_) {
+        // A failing teardown must not block the replacement feed.
+      }
+    }
+    if (!mounted || generation != _generation) {
+      return;
+    }
+    final TileVideoController next = widget.controllerFactory(
+      cameraId: widget.cameraId,
+      assetPath: widget.assetPath,
+    );
+    _controller = next;
+    next.addListener(_onControllerUpdate);
+    await _start(next, generation);
+  }
   /// Initialize -> loop -> mute -> autoplay. Every step is guarded: a
   /// decoder/platform failure marks this tile lost but never rethrows.
-  Future<void> _start() async {
+  /// [generation] guards against a stale async start after a swap/dispose.
+  Future<void> _start(TileVideoController controller, int generation) async {
     try {
-      await _controller.initialize();
-      if (!mounted) {
+      await controller.initialize();
+      if (!mounted || generation != _generation) {
         return;
       }
-      await _controller.setLooping(true);
-      await _controller.setVolume(0);
-      await _controller.play();
-      if (!mounted) {
+      await controller.setLooping(true);
+      await controller.setVolume(0);
+      await controller.play();
+      if (!mounted || generation != _generation) {
         return;
       }
       setState(() => _initialized = true);
     } catch (error) {
-      if (!mounted) {
+      if (!mounted || generation != _generation) {
         return;
       }
       setState(() {
@@ -109,19 +153,36 @@ class _CameraTileState extends State<CameraTile> {
     if (!mounted || _failed) {
       return;
     }
-    if (_controller.hasError) {
+    final TileVideoController? controller = _controller;
+    if (controller != null && controller.hasError) {
       setState(() {
         _failed = true;
-        _error = _controller.errorDescription ?? 'playback error';
+        _error = controller.errorDescription ?? 'playback error';
       });
     }
   }
 
   @override
   void dispose() {
-    _controller.removeListener(_onControllerUpdate);
-    unawaited(_controller.dispose());
+    _generation++;
+    final TileVideoController? controller = _controller;
+    _controller = null;
+    if (controller != null) {
+      controller.removeListener(_onControllerUpdate);
+      // Never let a teardown failure escape dispose (would crash the wall);
+      // the decoder is released best-effort.
+      unawaited(_disposeQuietly(controller));
+    }
     super.dispose();
+  }
+
+  /// Best-effort controller teardown that swallows decoder errors.
+  static Future<void> _disposeQuietly(TileVideoController controller) async {
+    try {
+      await controller.dispose();
+    } catch (_) {
+      // Intentionally ignored: dispose must never throw.
+    }
   }
 
   Widget _surface(BuildContext context) {
@@ -130,10 +191,11 @@ class _CameraTileState extends State<CameraTile> {
         key: ValueKey<String>('signal-lost-${widget.cameraId}'),
       );
     }
-    if (!_initialized) {
+    final TileVideoController? controller = _controller;
+    if (!_initialized || controller == null) {
       return const _ConnectingFeed();
     }
-    return _controller.buildSurface(context);
+    return controller.buildSurface(context);
   }
 
   @override

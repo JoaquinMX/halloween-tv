@@ -267,6 +267,63 @@ void main() {
       expect(find.text('SIGNAL LOST'), findsNWidgets(4));
       expect(tester.takeException(), isNull);
     });
+
+    testWidgets('build applies wall config from ChannelContext.settings',
+        (WidgetTester tester) async {
+      // Constructor leaves effects on, but the host disables them via the
+      // channel contract: settings win without re-instantiating the plugin.
+      final HauntedSurveillancePlugin plugin = HauntedSurveillancePlugin(
+        tileBuilder: _fakeSurface,
+        clock: _FakeClock(DateTime(2026, 10, 31, 20)),
+      );
+      final ChannelContext ctx = ChannelContext(
+        partyId: PartyId('party-1'),
+        playbackHandle: _FakeHandle(),
+        settings: const ChannelSettings(<String, Object?>{
+          'effectsDisabled': true,
+          'manifestVersion': 7,
+          'overscanSafe': true,
+          'labels': <String, String>{'CAM-01': 'PORCH · custom'},
+        }),
+      );
+      await tester.pumpWidget(MaterialApp(home: plugin.build(ctx)));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byWidgetPredicate(
+          (Widget w) => w is CustomPaint && w.painter is ScanlinesPainter,
+        ),
+        findsNothing,
+        reason: 'settings effectsDisabled must drop overlays',
+      );
+      expect(find.text('PORCH · custom'), findsOneWidget);
+      expect(find.text('CAM-02 · kitchen'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('constructor wall config still applies with empty settings',
+        (WidgetTester tester) async {
+      final HauntedSurveillancePlugin plugin = HauntedSurveillancePlugin(
+        disableEffects: true,
+        tileBuilder: _fakeSurface,
+        clock: _FakeClock(DateTime(2026, 10, 31, 20)),
+      );
+      final ChannelContext ctx = ChannelContext(
+        partyId: PartyId('party-1'),
+        playbackHandle: _FakeHandle(),
+      );
+      await tester.pumpWidget(MaterialApp(home: plugin.build(ctx)));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byWidgetPredicate(
+          (Widget w) => w is CustomPaint && w.painter is ScanlinesPainter,
+        ),
+        findsNothing,
+      );
+      expect(find.text('CAM-01 · hallway'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
   });
 }
 

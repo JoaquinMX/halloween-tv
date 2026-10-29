@@ -107,7 +107,6 @@ class _WallScreenState extends State<WallScreen> {
   bool _recoveryVisible = false;
   bool _okHeld = false;
   bool _activatedHandle = false;
-  int _wallGeneration = 0;
   String? _status;
   String? _recoveryStatus;
   Timer? _okHoldTimer;
@@ -159,17 +158,24 @@ class _WallScreenState extends State<WallScreen> {
     );
   }
 
-  /// Builds the resolved channel with this app's surfaces + current config.
+  /// Builds the resolved channel with this app's surfaces.
   ///
-  /// The registry holds the channel; the app re-creates the CCTV plugin with
-  /// its own `tileBuilder` and current effect/recovery state. Other channels
-  /// are built exactly as registered.
+  /// The registry owns the channel (descriptor, profile, clock, glitch
+  /// configuration); the app must inject its decoder surfaces
+  /// ([CctvTileBuilder]), so a shallow copy preserving the registry
+  /// object's configuration is built. Live wall state (effects flag,
+  /// manifest version, overscan safety) additionally travels via
+  /// [ChannelContext.settings], which [HauntedSurveillancePlugin.build]
+  /// honors — registry object and copy can never diverge on wall config.
+  /// Tile widgets keep stable cameraId-based keys and swap feeds in place
+  /// ([CameraTile.didUpdateWidget] disposes before creating), so a cached
+  /// retry never transiently doubles the decoder count.
   ChannelPlugin _configuredChannel() {
     final ChannelPlugin resolved = widget.plugin;
     if (resolved is HauntedSurveillancePlugin) {
       return HauntedSurveillancePlugin(
         tileBuilder: _buildTile,
-        profile: widget.profile ?? cctvProfile(),
+        profile: widget.profile ?? resolved.profile,
         manifest: _manifest,
         clock: widget.clock,
         disableEffects: _effectsDisabled,
@@ -228,7 +234,6 @@ class _WallScreenState extends State<WallScreen> {
         _status = 'NO CACHED WALL · KEEPING CURRENT FEED';
       } else {
         _manifest = reloaded;
-        _wallGeneration++;
         _recoveryVisible = false;
         _recoveryStatus = null;
         _status = 'WALL RESTORED · v${reloaded.version}';
@@ -299,10 +304,13 @@ class _WallScreenState extends State<WallScreen> {
     final ChannelContext channelContext = ChannelContext(
       partyId: PartyId(widget.partyId),
       playbackHandle: _handle,
+      // Wall config travels through the channel contract so
+      // HauntedSurveillancePlugin.build applies it without the host
+      // discarding the registry object.
       settings: ChannelSettings(<String, Object?>{
-        'effectsDisabled': _effectsDisabled,
-        'manifestVersion': _manifest.version,
-        'overscanSafe': true,
+        CctvWallSettingsKeys.effectsDisabled: _effectsDisabled,
+        CctvWallSettingsKeys.manifestVersion: _manifest.version,
+        CctvWallSettingsKeys.overscanSafe: true,
       }),
     );
 
@@ -320,10 +328,11 @@ class _WallScreenState extends State<WallScreen> {
               onKeyEvent: _onWallKey,
               child: SafeArea(
                 minimum: widget.overscanPadding,
+                // Stable key: tiles keep cameraId-based keys across retries
+                // and swap feeds in place instead of remounting (which would
+                // transiently double the decoder count).
                 child: KeyedSubtree(
-                  key: ValueKey<String>(
-                    'wall-${_manifest.version}-$_wallGeneration',
-                  ),
+                  key: ValueKey<String>('wall-${widget.partyId}'),
                   child: channel.build(channelContext),
                 ),
               ),
