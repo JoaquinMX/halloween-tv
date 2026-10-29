@@ -9,6 +9,8 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  core_effects:
+    path: ../core_effects
   core_foundation:
     path: ../core_foundation
 

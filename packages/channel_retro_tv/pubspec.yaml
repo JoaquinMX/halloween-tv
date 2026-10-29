@@ -11,16 +11,6 @@ dependencies:
     sdk: flutter
   channel_api:
     path: ../channel_api
-  core_foundation:
-    path: ../core_foundation
-  core_playlist:
-    path: ../core_playlist
-  core_cache:
-    path: ../core_cache
-  core_effects:
-    path: ../core_effects
-  core_ui:
-    path: ../core_ui
 
 dev_dependencies:
   flutter_test:

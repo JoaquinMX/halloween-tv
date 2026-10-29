@@ -1,5 +1,4 @@
-/// A Calculator.
-class Calculator {
-  /// Returns [value] plus 1.
-  int addOne(int value) => value + 1;
-}
+/// Retro-horror placeholder channel.
+library;
+
+export 'src/retro_plugin.dart';
