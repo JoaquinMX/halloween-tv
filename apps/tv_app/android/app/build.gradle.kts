@@ -34,7 +34,7 @@ android {
         create("release") {
             // Q4-signing (done): party keystore, driven ENTIRELY by env vars — no secrets in this file.
             // Passwords live only in a local secure note outside the repo; never commit them.
-            storeFile = file(System.getenv("KEYSTORE_PATH") ?: "../../../../halloween-party.jks")
+            storeFile = file(System.getenv("KEYSTORE_PATH") ?: "../../../halloween-party.jks")
             storePassword = System.getenv("KEYSTORE_PASSWORD")
             keyAlias = System.getenv("KEY_ALIAS")
             keyPassword = System.getenv("KEY_PASSWORD")
@@ -44,7 +44,7 @@ android {
     buildTypes {
         release {
             // TODO (Q4-signing, updated): party `release` signingConfig above is wired when env vars resolve AND the keystore file exists; otherwise falls back to debug signing so `flutter run --release` and debug builds keep working. What remains: owner keeps passwords in secure note; rotation = new keystore = reinstall (see docs/RELEASE-SIGNING.md).
-            val keystoreFile = file(System.getenv("KEYSTORE_PATH") ?: "../../../../halloween-party.jks")
+            val keystoreFile = file(System.getenv("KEYSTORE_PATH") ?: "../../../halloween-party.jks")
             val hasReleaseKeys = System.getenv("KEYSTORE_PASSWORD") != null
                 && System.getenv("KEY_ALIAS") != null
                 && System.getenv("KEY_PASSWORD") != null
