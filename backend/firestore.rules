@@ -1,0 +1,30 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function activeParty(partyId) {
+      return exists(/databases/$(database)/documents/parties/$(partyId))
+        && get(/databases/$(database)/documents/parties/$(partyId)).data.status == 'active';
+    }
+
+    function registeredDevice(partyId, deviceId) {
+      let devicePath = /databases/$(database)/documents/parties/$(partyId)/devices/$(deviceId);
+      return activeParty(partyId)
+        && exists(devicePath)
+        && get(devicePath).data.partyId == partyId
+        && get(devicePath).data.status == 'active';
+    }
+
+    // These non-secret registration records are the only direct client reads.
+    // Operational data is served through callable functions that check both IDs.
+    match /parties/{partyId}/devices/{deviceId} {
+      allow get: if registeredDevice(partyId, deviceId);
+      allow list, create, update, delete: if false;
+    }
+
+    // Callable functions use the Admin SDK. Clients cannot read or mutate jobs,
+    // manifests, channels, acknowledgements, or cost logs directly.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

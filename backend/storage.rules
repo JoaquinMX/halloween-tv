@@ -1,0 +1,7 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o/{object=**} {
+    // Media is served only through short-lived URLs minted after callable checks.
+    allow read, write: if false;
+  }
+}
