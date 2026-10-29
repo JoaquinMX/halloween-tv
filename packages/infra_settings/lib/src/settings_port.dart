@@ -26,6 +26,8 @@ library;
 import 'package:channel_api/channel_api.dart' show SettingsPort;
 import 'package:core_foundation/core_foundation.dart';
 
+export 'shared_preferences_settings.dart' show SharedPreferencesSettings;
+
 @Deprecated(
   'SettingsPort moved to the contracts layer (finding D-08): import it from '
   'package:channel_api/channel_api.dart. This infra re-export is kept only '

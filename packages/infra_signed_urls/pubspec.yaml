@@ -7,10 +7,15 @@ environment:
   sdk: ^3.8.1
 
 dependencies:
+  cloud_functions: ^5.6.2
   flutter:
     sdk: flutter
+  core_cache:
+    path: ../core_cache
   core_playlist:
     path: ../core_playlist
+  infra_firestore:
+    path: ../infra_firestore
 
 dev_dependencies:
   flutter_test:

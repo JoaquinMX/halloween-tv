@@ -13,6 +13,7 @@ dependencies:
     path: ../channel_api
   core_foundation:
     path: ../core_foundation
+  shared_preferences: ^2.5.3
 
 dev_dependencies:
   flutter_test:

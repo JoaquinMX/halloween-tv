@@ -115,7 +115,10 @@ class StaticManifestSource implements ManifestSource<PlaybackManifest> {
 /// Semantic rules (4 CCTV cameras, digests, durations) live in
 /// `core_playlist`'s `validateCctvManifest`; mapping stays shape-only so it
 /// can also carry manifests for non-CCTV channels.
-PlaybackManifest manifestFromFirestore(Map<String, Object?> doc) {
+PlaybackManifest manifestFromFirestore(
+  Map<String, Object?> doc, {
+  DateTime Function()? now,
+}) {
   final version = _schemaVersionOf(doc['schemaVersion']);
   if (version != kManifestSchemaVersion) {
     throw ManifestSchemaException(
@@ -124,14 +127,76 @@ PlaybackManifest manifestFromFirestore(Map<String, Object?> doc) {
     );
   }
 
-  // Drop the envelope field; the rest is the manifest payload, which
-  // core_playlist owns. Copying keeps the caller's map untouched.
-  final payload = <String, Object?>{...doc}..remove('schemaVersion');
+  // The deployed backend v1 shape uses `cameraClips` and storage `objectPath`
+  // fields. Translate that envelope into the core_playlist wire model while
+  // leaving the legacy PlaybackManifest-shaped fixture path intact.
+  final Map<String, Object?> payload;
+  try {
+    payload =
+        doc.containsKey('cameraClips')
+              ? _playbackPayloadFromBackend(doc, now: now ?? DateTime.now)
+              : <String, Object?>{...doc}
+          ..remove('schemaVersion');
+  } on ManifestSchemaException {
+    rethrow;
+  } on Object catch (error) {
+    throw ManifestSchemaException('invalid manifest payload: $error');
+  }
+  if (payload['publishedAt'] is DateTime) {
+    payload['publishedAt'] = (payload['publishedAt']! as DateTime)
+        .toUtc()
+        .toIso8601String();
+  }
   try {
     return parseManifest(payload);
   } on FormatException catch (error) {
     throw ManifestSchemaException('invalid manifest payload: ${error.message}');
   }
+}
+
+Map<String, Object?> _playbackPayloadFromBackend(
+  Map<String, Object?> doc, {
+  required DateTime Function() now,
+}) {
+  final rawClips = doc['cameraClips'];
+  if (rawClips is! List) {
+    throw const ManifestSchemaException('cameraClips must be a list');
+  }
+  final clips = <Map<String, Object?>>[];
+  for (final Object? rawClip in rawClips) {
+    if (rawClip is! Map) {
+      throw const ManifestSchemaException('cameraClips entries must be maps');
+    }
+    final clip = Map<String, Object?>.from(rawClip);
+    clips.add(<String, Object?>{
+      'id': clip['cameraId'],
+      'cameraId': clip['cameraId'],
+      'storageObjectId': clip['objectPath'],
+      'sha256': clip['sha256'],
+      'sizeBytes': clip['sizeBytes'],
+      'durationMs': clip['durationMs'],
+      'mimeType': clip['mimeType'] ?? 'video/mp4',
+    });
+  }
+
+  // Backend v1 records the publication timestamp as `createdAt`. Seeded
+  // emulator fixtures may omit it; in that case the observation time is the
+  // best timestamp available to the domain model.
+  final Object? publishedAt = doc['publishedAt'] ?? doc['createdAt'];
+  final String timestamp = switch (publishedAt) {
+    final DateTime value => value.toUtc().toIso8601String(),
+    final String value => value,
+    _ => now().toUtc().toIso8601String(),
+  };
+
+  return <String, Object?>{
+    'partyId': doc['partyId'],
+    'channelId': doc['channelId'],
+    'version': doc['version'],
+    'clips': clips,
+    'publishedAt': timestamp,
+    'overlay': doc['overlay'],
+  };
 }
 
 int _schemaVersionOf(Object? raw) {
