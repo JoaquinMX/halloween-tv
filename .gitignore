@@ -3,3 +3,8 @@
 .flutter-plugins
 .flutter-plugins-dependencies
 build/
+# Secrets / local env (p5 hygiene): never commit real credentials.
+**/.env*
+!**/.env.example
+*.jks
+key.properties

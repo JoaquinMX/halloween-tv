@@ -69,6 +69,29 @@ void main() {
       expect(find.text('REC'), findsOneWidget);
       expect(tester.takeException(), isNull);
     });
+
+    testWidgets('120-char label at 960x540 neither overflows nor wraps',
+        (WidgetTester tester) async {
+      tester.view.physicalSize = const Size(960, 540);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final String longLabel = List<String>.filled(120, 'A').join();
+      expect(longLabel, hasLength(120));
+      await tester.pumpWidget(
+        MaterialApp(
+          home: HudOverlay(
+            label: longLabel,
+            timestamp: DateTime(2026, 10, 31, 20),
+            recBlink: false,
+          ),
+        ),
+      );
+      expect(tester.takeException(), isNull);
+      final Text label = tester.widget<Text>(find.text(longLabel));
+      expect(label.maxLines, 1);
+      expect(label.overflow, TextOverflow.ellipsis);
+    });
   });
 
   group('CctvTile', () {

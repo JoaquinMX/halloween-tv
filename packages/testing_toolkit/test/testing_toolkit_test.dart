@@ -23,6 +23,13 @@ void main() {
       expect(validateCctvManifest(parsed).isOk, isTrue);
     });
 
+    test('distinct equal fixtures share equality and hashCode', () {
+      final a = manifestFixture();
+      final b = manifestFixture();
+      expect(a, equals(b));
+      expect(a.hashCode, b.hashCode);
+    });
+
     test('honours overrides', () {
       final published = DateTime.utc(2027, 1, 1);
       final m = manifestFixture(
@@ -123,20 +130,21 @@ void main() {
   });
 
   group('FakeChannelPlugin', () {
-    test('exposes descriptor and builds its widget with the context', () {
+    test('exposes descriptor and returns its build widget', () {
       const descriptor = ChannelDescriptor(
         id: 'cctv',
         title: 'CCTV',
         version: 1,
         capabilities: ChannelCapability(videoPlayback: true),
       );
-      final plugin = FakeChannelPlugin(descriptor);
+      const marker = Text('cctv-marker', textDirection: TextDirection.ltr);
+      final plugin = FakeChannelPlugin(descriptor, marker);
       expect(plugin.descriptor, descriptor);
       final ctx = ChannelContext(
         partyId: PartyId('party-1'),
         playbackHandle: FakePlaybackHandle(),
       );
-      expect(plugin.build(ctx), isA<Widget>());
+      expect(plugin.build(ctx), same(marker));
     });
 
     testWidgets('widget is rendered by the test tree', (tester) async {
