@@ -1,5 +1,5 @@
 name: kernel_app
-description: "kernel_app — Halloween TV (Haunted Surveillance) Melos package. Microkernel: channel registry and composition root (design: app_kernel). Wires infra_* adapters behind contract ports; channels never import infra_*."
+description: "kernel_app — Halloween TV (Haunted Surveillance) Melos package. Microkernel: channel registry (design: app_kernel). Depends only on contracts; tv_app composes channels and infra adapters."
 version: 0.0.1
 publish_to: none
 
@@ -11,26 +11,8 @@ dependencies:
     sdk: flutter
   channel_api:
     path: ../channel_api
-  channel_cctv:
-    path: ../channel_cctv
-  channel_retro_tv:
-    path: ../channel_retro_tv
   core_foundation:
     path: ../core_foundation
-  core_playlist:
-    path: ../core_playlist
-  core_cache:
-    path: ../core_cache
-  core_effects:
-    path: ../core_effects
-  core_ui:
-    path: ../core_ui
-  infra_firestore:
-    path: ../infra_firestore
-  infra_settings:
-    path: ../infra_settings
-  infra_signed_urls:
-    path: ../infra_signed_urls
 
 dev_dependencies:
   flutter_test:
