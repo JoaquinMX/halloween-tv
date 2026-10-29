@@ -28,6 +28,8 @@ dependencies:
     path: ../../packages/channel_retro_tv
 
   # Shared core.
+  core_cache:
+    path: ../../packages/core_cache
   core_foundation:
     path: ../../packages/core_foundation
   core_playlist:
@@ -36,11 +38,6 @@ dependencies:
     path: ../../packages/core_effects
   core_ui:
     path: ../../packages/core_ui
-
-  # Offline manifest fixture (`manifestFixture()`) used as the Phase 1
-  # fallback when no cached wall exists yet.
-  testing_toolkit:
-    path: ../../packages/testing_toolkit
 
   # Playback + local persistence.
   video_player: ^2.10.0
@@ -53,6 +50,11 @@ dev_dependencies:
     sdk: flutter
   flutter_lints: ^5.0.0
 
+  # Test-only fakes/fixtures (`manifestFixture()`). Prod boot must load the
+  # bundled fixture_manifest.json via rootBundle instead.
+  testing_toolkit:
+    path: ../../packages/testing_toolkit
+
 flutter:
   uses-material-design: true
   assets:
@@ -60,3 +62,4 @@ flutter:
     - assets/cam02.mp4
     - assets/cam03.mp4
     - assets/cam04.mp4
+    - assets/fixture_manifest.json

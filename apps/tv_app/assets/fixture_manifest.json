@@ -1,0 +1,32 @@
+{
+  "clips": [
+    {
+      "cameraId": "CAM-01",
+      "sha256": "2fa459eaffa958c5b75f042c5c3d9e076fc207defa2368d71d1ea5c7ca24b4bd",
+      "sizeBytes": 87414,
+      "durationMs": 2000,
+      "asset": "assets/cam01.mp4"
+    },
+    {
+      "cameraId": "CAM-02",
+      "sha256": "602d494ad385c6d494405cf696c47dc1fd8ac0f18909d9ffd9ddc333770cfb4b",
+      "sizeBytes": 82103,
+      "durationMs": 2000,
+      "asset": "assets/cam02.mp4"
+    },
+    {
+      "cameraId": "CAM-03",
+      "sha256": "1ee1520de4842fe8bb1accc372eaf23c5fd69b8e9a90d47f706e2332a5504e4a",
+      "sizeBytes": 122949,
+      "durationMs": 2000,
+      "asset": "assets/cam03.mp4"
+    },
+    {
+      "cameraId": "CAM-04",
+      "sha256": "3841a62006fad192e81592460efda55590f6618d2eb21f8cb654b84fc99ae070",
+      "sizeBytes": 279282,
+      "durationMs": 2000,
+      "asset": "assets/cam04.mp4"
+    }
+  ]
+}

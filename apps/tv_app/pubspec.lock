@@ -63,7 +63,7 @@ packages:
     source: hosted
     version: "1.19.1"
   core_cache:
-    dependency: transitive
+    dependency: "direct main"
     description:
       path: "../../packages/core_cache"
       relative: true
@@ -389,7 +389,7 @@ packages:
     source: hosted
     version: "0.7.12"
   testing_toolkit:
-    dependency: "direct main"
+    dependency: "direct dev"
     description:
       path: "../../packages/testing_toolkit"
       relative: true
