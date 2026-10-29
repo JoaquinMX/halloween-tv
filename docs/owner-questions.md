@@ -13,3 +13,14 @@ OWNER QUESTION: Can I get 30 minutes with the actual TV box before the party to 
 - Q3 CAM labels hallway/kitchen/staircase/storage: YES, but labels must be easy to replace later (config-driven, no hardcode).
 - Q4 Party keystore vs debug key: PENDING.
 - Q5 30-min soak on actual TV box Wi-Fi off: PENDING.
+
+## Q4 follow-up (2026-10-29) — explanation sent to owner
+
+- A debug key is like a "test copy" sticker: the TV installs it fine for the party, but Android will not accept future updates to it and no app store will take it.
+- A party keystore is a 5-minute one-time setup that signs the app properly, so installs are cleaner and later updates just work.
+- Recommendation: stay on the debug key for the Oct 31 party unless store distribution or seamless updates matter — awaiting explicit Q4 decision.
+
+## Q5 follow-up (2026-10-29) — owner authorizes ADB-over-WiFi proposal
+
+- Owner: "We will be running tests in general. If you find a way to connect to the TV you are free to do it. Just let me know to ensure everything is ok."
+- Builder will propose discovery/ADB steps, list needs, coordinate a test window. No blind network steps; wait for owner go-ahead per step.
