@@ -429,15 +429,39 @@ void main() {
     });
 
     test('sha256Hex matches the real committed cam01 bytes', () async {
+      final manifestFile = File('assets/fixture_manifest.json');
+      expect(await manifestFile.exists(), isTrue,
+          reason: 'run from the tv_app package directory');
+      final manifestJson = jsonDecode(await manifestFile.readAsString())
+          as Map<String, Object?>;
+      final clips = (manifestJson['clips'] as List).cast<Map<String, Object?>>();
+      final cam01 = clips.singleWhere(
+        (c) => c['cameraId'] == 'CAM-01',
+        orElse: () => throw StateError('CAM-01 missing from fixture_manifest.json'),
+      );
+      final expectedSize = cam01['sizeBytes'] as int;
+      final expectedSha = cam01['sha256'] as String;
       final file = File('assets/cam01.mp4');
       expect(await file.exists(), isTrue,
           reason: 'run from the tv_app package directory');
       final bytes = await file.readAsBytes();
-      expect(bytes.length, 87414);
+      expect(bytes.length, expectedSize,
+          reason:
+              'on-disk cam01 bytes must match the committed fixture_manifest.json');
       expect(
         sha256Hex(bytes),
-        '2fa459eaffa958c5b75f042c5c3d9e076fc207defa2368d71d1ea5c7ca24b4bd',
+        expectedSha,
+        reason:
+            'on-disk cam01 bytes must match the committed fixture_manifest.json',
       );
+      // Negative control: the comparison above is not a tautology — tampered
+      // bytes must disagree with the committed manifest entry.
+      final tampered = List<int>.of(bytes);
+      tampered[0] ^= 0xff;
+      expect(sha256Hex(tampered), isNot(equals(expectedSha)),
+          reason: 'tampered bytes must mismatch the manifest sha256');
+      expect(tampered.length + 1, isNot(equals(expectedSize)),
+          reason: 'a wrong size must mismatch the manifest sizeBytes');
     });
   });
 }
