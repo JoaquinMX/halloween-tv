@@ -73,8 +73,11 @@ void main() {
 
     expect(find.text('20:00:00'), findsNWidgets(4));
     expect(find.text('REC'), findsNWidgets(4));
-    expect(find.text('CAM-01 · clip-01'), findsOneWidget);
-    expect(find.text('CAM-04 · clip-04'), findsOneWidget);
+    // Labels resolve through core_playlist: manifest clip labels when
+    // present, else the canonical slot defaults (owner Q3). manifestFixture
+    // carries no labels, so the defaults apply.
+    expect(find.text(cctvSlots[0].defaultLabel), findsOneWidget);
+    expect(find.text(cctvSlots[3].defaultLabel), findsOneWidget);
     expect(find.byType(GridView), findsOneWidget);
 
     for (final String cameraId in <String>[
@@ -167,7 +170,7 @@ void main() {
     expect(find.byKey(const ValueKey<String>('video-surface-CAM-02')),
         findsNothing);
     // ...and the failed tile keeps its HUD identity.
-    expect(find.text('CAM-02 · clip-02'), findsOneWidget);
+    expect(find.text(cctvSlots[1].defaultLabel), findsOneWidget);
 
     await teardownWall(tester);
   });

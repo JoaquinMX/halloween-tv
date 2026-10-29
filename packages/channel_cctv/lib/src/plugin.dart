@@ -4,13 +4,12 @@ library;
 import 'dart:async';
 
 import 'package:channel_api/channel_api.dart';
+import 'package:channel_cctv/src/cctv_tiles.dart';
 import 'package:core_effects/core_effects.dart';
 import 'package:core_foundation/core_foundation.dart';
 import 'package:core_playlist/core_playlist.dart';
 import 'package:core_ui/core_ui.dart';
 import 'package:flutter/material.dart';
-
-import 'cctv_tiles.dart';
 
 /// Builds the video surface for one wall tile.
 ///
@@ -208,21 +207,29 @@ class _CctvWallState extends State<CctvWall> {
     super.dispose();
   }
 
-  /// Camera ids driving the four slots: manifest clips when exactly four
-  /// are present, otherwise the static [tileFor] map.
+  /// Wall slots in canonical order, one per `core_playlist` [CctvSlot].
+  ///
+  /// Slot placement always follows camera identity (`cctvSlots` order), never
+  /// manifest clip order, so a reordered control-plane payload cannot move a
+  /// feed to the wrong tile. When the manifest carries one clip per slot, the
+  /// clip drives the tile via [tileForClip]: its `label` wins when present,
+  /// else the `core_playlist` slot default applies (owner Q3). Manifests that
+  /// are short, oversized, or name unknown cameras fall back to the static
+  /// [tileFor] defaults per slot instead of taking the wall down.
   List<({String label, String cameraId})> _slots() {
     final PlaybackManifest? manifest = widget.manifest;
-    if (manifest != null && manifest.clips.length == 4) {
-      return <({String label, String cameraId})>[
-        for (final ClipDescriptor clip in manifest.clips)
-          (label: '${clip.cameraId} · ${clip.id}', cameraId: clip.cameraId),
-      ];
+    final Map<String, ClipDescriptor> byCamera = <String, ClipDescriptor>{};
+    if (manifest != null && manifest.clips.length == cctvSlots.length) {
+      for (final ClipDescriptor clip in manifest.clips) {
+        byCamera.putIfAbsent(clip.cameraId, () => clip);
+      }
     }
     return <({String label, String cameraId})>[
-      tileFor(0),
-      tileFor(1),
-      tileFor(2),
-      tileFor(3),
+      for (final CctvSlot slot in cctvSlots)
+        if (byCamera[slot.id] case final ClipDescriptor clip)
+          tileForClip(clip)
+        else
+          tileFor(slot.index),
     ];
   }
 
