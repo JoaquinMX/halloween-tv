@@ -2,6 +2,7 @@ name: kernel_app
 description: "A new Flutter package project."
 version: 0.0.1
 homepage:
+publish_to: none
 
 environment:
   sdk: ^3.8.1
@@ -10,6 +11,10 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  channel_api:
+    path: ../channel_api
+  core_foundation:
+    path: ../core_foundation
 
 dev_dependencies:
   flutter_test:

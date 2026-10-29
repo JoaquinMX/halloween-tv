@@ -1,5 +1,6 @@
-/// A Calculator.
-class Calculator {
-  /// Returns [value] plus 1.
-  int addOne(int value) => value + 1;
-}
+/// Core value types and result plumbing shared by all Halloween TV packages.
+library;
+
+export 'src/result.dart';
+export 'src/clock.dart';
+export 'src/ids.dart';
