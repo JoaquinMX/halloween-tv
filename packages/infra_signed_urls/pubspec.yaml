@@ -9,8 +9,6 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  core_foundation:
-    path: ../core_foundation
   core_playlist:
     path: ../core_playlist
 
