@@ -241,6 +241,49 @@ void main() {
       expect(store.writes, 0, reason: 'tampered bytes must not be cached');
     });
 
+    test('fails closed when verified bytes differ from played bytes', () async {
+      // Swapped-asset manifest: CAM-01 names cam04's file and carries
+      // cam04's digest/size, so the named file verifies byte-for-byte —
+      // but tiles play assetPathForCamera (cam01), not the manifest's
+      // storage reference. Boot must reject (unavailable), not play
+      // unverified bytes.
+      final bytesByAsset = _realBytes();
+      final rest = _manifestFor(bytesByAsset).clips.skip(1);
+      final swapped = PlaybackManifest(
+        partyId: 'local-party',
+        channelId: hauntedSurveillanceChannelId,
+        version: 1,
+        clips: <ClipDescriptor>[
+          ClipDescriptor(
+            id: 'CAM-01',
+            cameraId: 'CAM-01',
+            storageObjectId: 'assets/cam04.mp4',
+            sha256: sha256Hex(bytesByAsset['assets/cam04.mp4']!),
+            sizeBytes: bytesByAsset['assets/cam04.mp4']!.length,
+            duration: const Duration(seconds: 2),
+            mimeType: 'video/mp4',
+          ),
+          ...rest,
+        ],
+        publishedAt: DateTime.utc(2026, 10, 31, 20),
+      );
+      // Sanity: the swapped manifest is contract-valid, so only the
+      // verified/played-byte identity check can reject it.
+      expect(validateCctvManifest(swapped).isOk, isTrue);
+      final store = InMemoryManifestStore();
+
+      final result = await _bootWith(
+        bytesByAsset: bytesByAsset,
+        fixtureManifest: swapped,
+        store: store,
+      ).boot();
+
+      expect(result.isReady, isFalse);
+      expect(result.unavailableReason, contains('WALL UNAVAILABLE'));
+      expect(result.manifest, isNull);
+      expect(store.writes, 0, reason: 'swapped bytes must not be cached');
+    });
+
     test('fails closed on a tampered bundled size', () async {
       final bytesByAsset = _realBytes();
       final good = _manifestFor(bytesByAsset);
@@ -462,6 +505,55 @@ void main() {
           reason: 'tampered bytes must mismatch the manifest sha256');
       expect(tampered.length + 1, isNot(equals(expectedSize)),
           reason: 'a wrong size must mismatch the manifest sizeBytes');
+    });
+
+    test('boots the real committed fixture manifest end to end', () async {
+      // Real-artifact path: the committed assets/fixture_manifest.json flows
+      // through the prod loaders (loadBundledFixtureManifest /
+      // parseFixtureManifestJson), validates, and verifies all four clips
+      // against file-backed asset bytes through the real WallBoot.boot.
+      final manifestFile = File('assets/fixture_manifest.json');
+      expect(await manifestFile.exists(), isTrue,
+          reason: 'run from the tv_app package directory');
+      final String raw = await manifestFile.readAsString();
+      final PlaybackManifest parsed = await loadBundledFixtureManifest(
+        partyId: 'local-party',
+        channelId: hauntedSurveillanceChannelId,
+        loader: (String key) async {
+          expect(key, kBundledFixtureManifestKey);
+          return raw;
+        },
+      );
+      expect(validateCctvManifest(parsed).isOk, isTrue,
+          reason: 'committed fixture must satisfy the CCTV contract');
+      expect(
+        parsed.clips.map((ClipDescriptor c) => c.cameraId),
+        <String>['CAM-01', 'CAM-02', 'CAM-03', 'CAM-04'],
+      );
+
+      Future<List<int>> fileBytes(String assetPath) =>
+          File(assetPath).readAsBytes();
+      final store = InMemoryManifestStore();
+      final boot = WallBoot(
+        store: store,
+        fixtureLoader: ({required String partyId, required String channelId}) async =>
+            parsed,
+        assetBytesLoader: fileBytes,
+      );
+      final result = await boot.boot();
+      expect(result.isReady, isTrue, reason: result.unavailableReason);
+      expect(result.manifest!.clips, hasLength(4));
+      // Every committed clip file exists and matches its manifest entry.
+      for (final ClipDescriptor clip in result.manifest!.clips) {
+        final List<int> bytes = await File(clip.storageObjectId).readAsBytes();
+        expect(bytes.length, clip.sizeBytes,
+            reason: '${clip.cameraId} on-disk size must match the manifest');
+        expect(sha256Hex(bytes), clip.sha256,
+            reason: '${clip.cameraId} on-disk sha must match the manifest');
+      }
+      // The bundle key boot loads by default is the pubspec asset entry.
+      final String pubspec = await File('pubspec.yaml').readAsString();
+      expect(pubspec, contains(kBundledFixtureManifestKey));
     });
   });
 }

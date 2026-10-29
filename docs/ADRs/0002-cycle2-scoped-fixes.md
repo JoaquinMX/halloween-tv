@@ -12,9 +12,20 @@ ADR 0001 encodes design D-08 dependency-direction rules
 (`orchestrator-cycle-2-part-p4-contracts-playlist-ports`) owns the
 contracts/playlist ports restructure.
 
-Fact at time of writing: p4 has **no landed diff** — `git log`
-from the cycle-2 base (`8f8b0d8`) to every `orchestrator-cycle-2*`
-branch is empty, so no exception is exercised yet.
+Fact (corrected at merged head): p4 **has landed** — commit `7e32d48`
+(`cycle-2 part p4-contracts-playlist-ports`), merge `72223a7`
+(`cycle-2 merge p4`). The "no landed diff" sentence above was true at the
+time of writing and is now superseded by this paragraph.
+
+Verified final p4 edge set (all point in the ADR 0001 direction; grant
+satisfied, no amendment needed):
+- `channel_api` -> `core_foundation` only;
+- `core_playlist` -> `core_foundation` only;
+- `core_cache` -> `core_foundation` + `core_playlist` only;
+- `core_effects` no longer -> `core_ui` (declared path dependency
+  removed; `core_ui` legitimately depends on `core_effects`);
+- `infra_firestore` / `infra_settings` -> `channel_api` (adapters consume
+  the contracts port; no `core_*`/`channel_*` edge points the wrong way).
 
 Decision — narrow conditional grant: p4 may relocate port
 declarations **among contract packages only**

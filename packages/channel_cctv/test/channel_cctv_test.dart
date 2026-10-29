@@ -507,6 +507,70 @@ void main() {
       expect(find.text('CAM-01 · hallway'), findsOneWidget);
       expect(tester.takeException(), isNull);
     });
+
+    testWidgets('settings label overrides win over manifest clip labels',
+        (WidgetTester tester) async {
+      // Precedence composition on one wall: the manifest carries a clip
+      // label for CAM-01 AND settings carry an override for the same
+      // camera — settings win. CAM-03 keeps its manifest label, CAM-02
+      // and CAM-04 keep slot defaults.
+      final HauntedSurveillancePlugin plugin = HauntedSurveillancePlugin(
+        disableEffects: true,
+        manifest: _manifest(
+          labels: const <String, String?>{
+            'CAM-01': 'Manifest Door',
+            'CAM-03': 'Manifest Basement',
+          },
+        ),
+        tileBuilder: _fakeSurface,
+      );
+      final ChannelContext ctx = ChannelContext(
+        partyId: PartyId('party-1'),
+        playbackHandle: _FakeHandle(),
+        settings: const ChannelSettings(<String, Object?>{
+          'labels': <String, String>{'CAM-01': 'PORCH · settings'},
+        }),
+      );
+      await tester.pumpWidget(MaterialApp(home: plugin.build(ctx)));
+      await tester.pumpAndSettle();
+
+      expect(find.text('PORCH · settings'), findsOneWidget);
+      expect(find.text('Manifest Door'), findsNothing);
+      expect(find.text('Manifest Basement'), findsOneWidget);
+      expect(find.text('CAM-02 · kitchen'), findsOneWidget);
+      expect(find.text('CAM-04 · storage room'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+
+    test('cctvLabelOverridesFromSettings filters non-Map/non-string shapes',
+        () {
+      // No `labels` key at all.
+      expect(
+        cctvLabelOverridesFromSettings(const ChannelSettings()),
+        isEmpty,
+      );
+      // Non-Map value is ignored, not thrown on.
+      expect(
+        cctvLabelOverridesFromSettings(
+          const ChannelSettings(<String, Object?>{'labels': 'PORCH'}),
+        ),
+        isEmpty,
+      );
+      // Non-string keys/values are dropped; only String->String survives.
+      expect(
+        cctvLabelOverridesFromSettings(
+          const ChannelSettings(<String, Object?>{
+            'labels': <Object?, Object?>{
+              'CAM-01': 'Porch',
+              'CAM-02': 42,
+              'CAM-03': null,
+              7: 'Attic',
+            },
+          }),
+        ),
+        <String, String>{'CAM-01': 'Porch'},
+      );
+    });
   });
 
   group('port direction (D-08)', () {

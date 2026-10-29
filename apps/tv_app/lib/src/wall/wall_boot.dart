@@ -262,12 +262,28 @@ final class WallBoot {
 
   /// Verifies every clip's sha256 + size against the bundled asset bytes.
   /// Any mismatch, unknown asset, or load failure fails closed (false).
+  ///
+  /// Fail-closed verified/played-byte identity: tiles play
+  /// `assetPathForCamera(cameraId)` ([WallScreen]), so a manifest whose
+  /// `assetPathForClip` resolves anywhere else (e.g. a swapped-asset
+  /// manifest where CAM-01 names cam04's bytes with cam04's sha) is
+  /// rejected even when its digests match the named file. Both [boot] and
+  /// [readCached] go through this check.
   Future<bool> _verifyManifestBytes(PlaybackManifest manifest) async {
     final WallAssetBytesLoader load =
         assetBytesLoader ?? defaultAssetBytesLoader;
     for (final ClipDescriptor clip in manifest.clips) {
       final String? assetPath = assetPathForClip(clip);
       if (assetPath == null) {
+        return false;
+      }
+      final String playedPath;
+      try {
+        playedPath = assetPathForCamera(clip.cameraId);
+      } on ArgumentError {
+        return false;
+      }
+      if (assetPath != playedPath) {
         return false;
       }
       late final List<int> bytes;
