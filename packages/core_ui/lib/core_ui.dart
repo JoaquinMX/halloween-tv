@@ -1,5 +1,8 @@
-/// A Calculator.
-class Calculator {
-  /// Returns [value] plus 1.
-  int addOne(int value) => value + 1;
-}
+/// CCTV wall chrome: HUD overlay, tile frame, signal-lost fallback, theme.
+library;
+
+export 'src/cctv_effects_overlay.dart';
+export 'src/cctv_theme.dart';
+export 'src/cctv_tile.dart';
+export 'src/hud_overlay.dart';
+export 'src/signal_lost.dart';
