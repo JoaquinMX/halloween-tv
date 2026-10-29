@@ -1,0 +1,35 @@
+{
+  "submit": {
+    "output": {
+      "task_id": "task-fixture-001"
+    }
+  },
+  "pending": {
+    "output": {
+      "task_status": "PENDING"
+    }
+  },
+  "running": {
+    "output": {
+      "task_status": "RUNNING"
+    }
+  },
+  "succeeded": {
+    "output": {
+      "task_status": "SUCCEEDED",
+      "video_url": "https://fixture.invalid/result.mp4"
+    },
+    "usage": {
+      "video_count": 1,
+      "duration": 2,
+      "input_video_duration": 0
+    }
+  },
+  "failed": {
+    "output": {
+      "task_status": "FAILED",
+      "code": "InvalidParameter",
+      "message": "fixture failure"
+    }
+  }
+}
