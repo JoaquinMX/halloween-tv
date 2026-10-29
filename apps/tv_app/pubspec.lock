@@ -62,6 +62,13 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.19.1"
+  core_cache:
+    dependency: transitive
+    description:
+      path: "../../packages/core_cache"
+      relative: true
+    source: path
+    version: "0.0.1"
   core_effects:
     dependency: "direct main"
     description:
