@@ -1,11 +1,50 @@
-name: halloween-tv
+# Melos monorepo configuration — Halloween TV (Haunted Surveillance).
+#
+# Resolution note (see docs/ADRs/0001-package-mapping.md): Pub Workspaces
+# (`resolution: workspace` in members) is the stated direction but is NOT
+# enabled yet, because it requires a root pubspec.yaml with a `workspace:`
+# list. That root pubspec lands in a later bootstrap step and is also what
+# melos >= 3 needs for its own local install, so `melos bootstrap` is not
+# runnable until then. Today members are linked with plain path dependencies
+# and resolve with `flutter pub get` (also `--offline`) in each directory.
+name: halloween_tv
 packages:
   - packages/**
   - apps/**
+
+ignore:
+  - "**/build/**"
+  - "**/.dart_tool/**"
+
 scripts:
-  bootstrap: melos bootstrap
-  analyze: melos exec -c 5 -- "dart analyze"
-  format: melos exec -- "dart format ."
-  test: melos exec -c 3 --dir-exists="test" -- "flutter test --no-pub"
-  goldens: melos exec --flutter --dir-exists="test" -- "flutter test --update-goldens"
-  size: melos exec --scope="apps/tv_app" -- "flutter build apk --analyze-size"
+  bootstrap:
+    description: Resolve dependencies for every package and app.
+    run: melos bootstrap
+
+  pub_get:
+    description: Resolve dependencies without Melos overrides (offline-capable).
+    run: melos exec -c 5 -- "flutter pub get"
+
+  analyze:
+    description: Static analysis across the whole monorepo.
+    run: melos exec -c 5 -- "dart analyze"
+
+  format:
+    description: Format all Dart sources.
+    run: melos exec -- "dart format ."
+
+  format_check:
+    description: Verify formatting without writing (CI gate).
+    run: melos exec -- "dart format --output=none --set-exit-if-changed ."
+
+  test:
+    description: Run Flutter tests in every package that has a test/ dir.
+    run: melos exec -c 3 --dir-exists="test" -- "flutter test --no-pub"
+
+  goldens:
+    description: Regenerate golden files.
+    run: melos exec --flutter --dir-exists="test" -- "flutter test --update-goldens"
+
+  size:
+    description: Android TV APK size analysis.
+    run: melos exec --scope="apps/tv_app" -- "flutter build apk --analyze-size"

@@ -1,6 +1,36 @@
-include: package:flutter_lints/flutter.yaml
+# Shared analyzer options for the Halloween TV (Haunted Surveillance) Melos
+# monorepo. This root file is the canonical strict-ish baseline and is
+# intentionally free of `package:` includes: the repo root is not a Dart
+# package (no root pubspec.yaml yet), so a package: include would not resolve
+# when analyzing from the root. Consumers pull in flutter_lints themselves:
+#
+#   * apps/tv_app/analysis_options.yaml  -> includes package:flutter_lints/flutter.yaml AND this file
+#   * packages/*/analysis_options.yaml   -> include package:flutter_lints/flutter.yaml (kept identical to each other)
+#
+# Keep the extra rules below additive and safe for all Dart 3.8+ code.
+analyzer:
+  exclude:
+    - "**/*.g.dart"
+    - "**/*.freezed.dart"
+    - "**/build/**"
+  language:
+    strict-casts: true
+    strict-inference: true
+    strict-raw-types: true
+  errors:
+    # Treat dead code / unused elements as errors during the bootstrap so
+    # scaffolding rot cannot accumulate silently.
+    unused_import: error
+    unused_local_variable: error
+    dead_code: error
+
 linter:
   rules:
-    prefer_final_locals: true
-    avoid_print: true
-    always_use_package_imports: true
+    - always_use_package_imports
+    - avoid_print
+    - avoid_relative_lib_imports
+    - prefer_const_constructors
+    - prefer_const_declarations
+    - prefer_final_locals
+    - require_trailing_commas
+    - unawaited_futures
