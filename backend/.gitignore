@@ -1,0 +1,8 @@
+node_modules/
+functions/lib/
+functions/coverage/
+functions/.firebase/
+*.log
+.env
+.env.*
+!.env.example
