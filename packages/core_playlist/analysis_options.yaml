@@ -1,4 +1,11 @@
-include: package:flutter_lints/flutter.yaml
+# Analyzer options — byte-identical in every packages/* directory so all
+# packages are graded by the same rules. Adds the repo-root strict baseline
+# (../../analysis_options.yaml) on top of flutter_lints.
+# See docs/ADRs/0001-package-mapping.md.
+include:
+  - package:flutter_lints/flutter.yaml
+  - ../../analysis_options.yaml
 
-# Additional information about this file can be found at
-# https://dart.dev/guides/language/analysis-options
+analyzer:
+  exclude:
+    - build/**
