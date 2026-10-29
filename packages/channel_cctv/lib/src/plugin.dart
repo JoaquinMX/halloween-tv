@@ -44,6 +44,45 @@ Widget _defaultTileSurface(
 /// Channel id for the haunted-surveillance feed.
 const String hauntedSurveillanceChannelId = 'haunted_surveillance';
 
+/// ChannelContext.settings keys honored by [HauntedSurveillancePlugin.build].
+///
+/// Wall configuration travels through the channel contract (not through
+/// plugin re-instantiation): the app publishes its live wall state here and
+/// [HauntedSurveillancePlugin.build] applies it. Constructor fields remain
+/// as defaults for direct use; settings win when present so the registry
+/// object and any app-side copy can never diverge on wall config.
+class CctvWallSettingsKeys {
+  /// When `true`, drops effect overlays and glitch ticking.
+  static const String effectsDisabled = 'effectsDisabled';
+
+  /// Wall manifest version the app currently displays (diagnostics only).
+  static const String manifestVersion = 'manifestVersion';
+
+  /// Whether the host pads HUD content into the overscan-safe area.
+  static const String overscanSafe = 'overscanSafe';
+
+  /// Optional per-camera label overrides (`{cameraId: label}`).
+  static const String labels = 'labels';
+}
+
+/// Reads per-camera label overrides from [settings].
+///
+/// Accepts any `Map` shape (the settings map is untyped) and keeps only
+/// string-keyed, string-valued entries.
+Map<String, String> cctvLabelOverridesFromSettings(ChannelSettings settings) {
+  final Object? raw = settings.values[CctvWallSettingsKeys.labels];
+  if (raw is! Map) {
+    return const <String, String>{};
+  }
+  final Map<String, String> out = <String, String>{};
+  for (final MapEntry<dynamic, dynamic> entry in raw.entries) {
+    if (entry.key is String && entry.value is String) {
+      out[entry.key as String] = entry.value as String;
+    }
+  }
+  return out;
+}
+
 /// Derives the tile effect profile from manifest [OverlaySettings].
 ///
 /// Manifest overlay values are already bounded to `0..1` by the playlist
@@ -104,18 +143,26 @@ final class HauntedSurveillancePlugin implements ChannelPlugin {
       );
 
   @override
-  Widget build(ChannelContext context) => CctvWall(
-        playbackHandle: context.playbackHandle,
-        tileBuilder: tileBuilder,
-        profile: profile ??
-            (manifest == null
-                ? cctvProfile()
-                : effectProfileFromOverlay(manifest!.overlay)),
-        manifest: manifest,
-        clock: clock,
-        disableEffects: disableEffects,
-        glitchSeed: glitchSeed,
-      );
+  Widget build(ChannelContext context) {
+    // Wall config flows through the channel contract: settings published by
+    // the host win over constructor defaults, so the registry object never
+    // needs to be discarded/re-instantiated to change wall behaviour.
+    final bool settingsDisabled = context.settings
+        .get<bool>(CctvWallSettingsKeys.effectsDisabled, false);
+    return CctvWall(
+      playbackHandle: context.playbackHandle,
+      tileBuilder: tileBuilder,
+      profile: profile ??
+          (manifest == null
+              ? cctvProfile()
+              : effectProfileFromOverlay(manifest!.overlay)),
+      manifest: manifest,
+      clock: clock,
+      disableEffects: disableEffects || settingsDisabled,
+      glitchSeed: glitchSeed,
+      labelOverrides: cctvLabelOverridesFromSettings(context.settings),
+    );
+  }
 }
 
 /// 2x2 CCTV wall shell.
@@ -136,6 +183,7 @@ class CctvWall extends StatefulWidget {
     this.disableEffects = false,
     this.glitchSeed = 0xc0ffee,
     this.glitchTick = const Duration(milliseconds: 700),
+    this.labelOverrides = const <String, String>{},
   }) : profile = profile ?? cctvProfile();
 
   /// Opaque app-owned playback control surface.
@@ -161,6 +209,10 @@ class CctvWall extends StatefulWidget {
 
   /// Cadence of glitch-controller ticks.
   final Duration glitchTick;
+
+  /// Per-camera label overrides applied on top of the slot map
+  /// (`{cameraId: label}`); empty means no overrides.
+  final Map<String, String> labelOverrides;
 
   @override
   State<CctvWall> createState() => _CctvWallState();
@@ -202,6 +254,33 @@ class _CctvWallState extends State<CctvWall> {
   }
 
   @override
+  void didUpdateWidget(CctvWall oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Reconcile the glitch ticker when effect state changes (e.g. the
+    // recovery panel toggles effects OFF -> ON): a stale timer must not
+    // keep ticking while disabled, and re-enabling must restart it.
+    if (oldWidget.disableEffects != widget.disableEffects) {
+      if (widget.disableEffects) {
+        _glitchTimer?.cancel();
+        _glitchTimer = null;
+        _glitch.reset();
+      } else {
+        _glitchTimer ??= Timer.periodic(
+          widget.glitchTick,
+          (_) => _glitch.tick(),
+        );
+      }
+    } else if (!widget.disableEffects &&
+        oldWidget.glitchTick != widget.glitchTick) {
+      _glitchTimer?.cancel();
+      _glitchTimer = Timer.periodic(
+        widget.glitchTick,
+        (_) => _glitch.tick(),
+      );
+    }
+  }
+
+  @override
   void dispose() {
     _glitchTimer?.cancel();
     _glitch.dispose();
@@ -209,20 +288,33 @@ class _CctvWallState extends State<CctvWall> {
   }
 
   /// Camera ids driving the four slots: manifest clips when exactly four
-  /// are present, otherwise the static [tileFor] map.
+  /// are present, otherwise the static [tileFor] map. Per-camera label
+  /// overrides from [ChannelContext.settings] apply on top.
   List<({String label, String cameraId})> _slots() {
     final PlaybackManifest? manifest = widget.manifest;
+    final List<({String label, String cameraId})> base;
     if (manifest != null && manifest.clips.length == 4) {
-      return <({String label, String cameraId})>[
+      base = <({String label, String cameraId})>[
         for (final ClipDescriptor clip in manifest.clips)
           (label: '${clip.cameraId} · ${clip.id}', cameraId: clip.cameraId),
       ];
+    } else {
+      base = <({String label, String cameraId})>[
+        tileFor(0),
+        tileFor(1),
+        tileFor(2),
+        tileFor(3),
+      ];
+    }
+    if (widget.labelOverrides.isEmpty) {
+      return base;
     }
     return <({String label, String cameraId})>[
-      tileFor(0),
-      tileFor(1),
-      tileFor(2),
-      tileFor(3),
+      for (final ({String label, String cameraId}) slot in base)
+        (
+          label: widget.labelOverrides[slot.cameraId] ?? slot.label,
+          cameraId: slot.cameraId,
+        ),
     ];
   }
 
@@ -231,21 +323,19 @@ class _CctvWallState extends State<CctvWall> {
     if (!_ready) {
       return const Center(child: CircularProgressIndicator());
     }
+    // 2x2 wall sized by the viewport: Column/Row of Expanded cells fills
+    // exactly the incoming constraints (720p through 1080p, including the
+    // host's overscan-safe padding) with no scrollable and no overflow.
+    // A fixed GridView cross-axis layout cannot guarantee this: without a
+    // viewport-derived childAspectRatio the bottom row renders off-screen.
     final List<({String label, String cameraId})> slots = _slots();
-    return Container(
-      color: CctvTheme.gutter,
-      child: GridView.count(
-        crossAxisCount: 2,
-        padding: const EdgeInsets.all(4),
-        mainAxisSpacing: 4,
-        crossAxisSpacing: 4,
-        physics: const NeverScrollableScrollPhysics(),
-        children: <Widget>[
-          for (int i = 0; i < 4; i++)
-            _WallTile(
-              index: i,
-              label: slots[i].label,
-              cameraId: slots[i].cameraId,
+    Widget cell(int index) => Expanded(
+          child: Padding(
+            padding: const EdgeInsets.all(2),
+            child: _WallTile(
+              index: index,
+              label: slots[index].label,
+              cameraId: slots[index].cameraId,
               tileBuilder: widget.tileBuilder,
               profile: widget.profile,
               clock: widget.clock,
@@ -253,6 +343,23 @@ class _CctvWallState extends State<CctvWall> {
               glitch: _glitch,
               bootFailed: _bootFailed,
             ),
+          ),
+        );
+    return Container(
+      color: CctvTheme.gutter,
+      padding: const EdgeInsets.all(4),
+      child: Column(
+        children: <Widget>[
+          Expanded(
+            child: Row(
+              children: <Widget>[cell(0), cell(1)],
+            ),
+          ),
+          Expanded(
+            child: Row(
+              children: <Widget>[cell(2), cell(3)],
+            ),
+          ),
         ],
       ),
     );
