@@ -296,5 +296,139 @@ void main() {
       expect(isValidSha256Hex(''), isFalse);
       expect(isValidSha256Hex('g' * 64), isFalse);
     });
+
+    test('overlong clip ids are rejected', () {
+      ClipDescriptor longId(String id) => ClipDescriptor(
+        id: id,
+        cameraId: 'CAM-01',
+        storageObjectId: 'obj-01',
+        sha256: sha('clip-01'),
+        sizeBytes: 10,
+        duration: const Duration(seconds: 5),
+        mimeType: 'video/mp4',
+      );
+      final ok = manifest(
+        clips: <ClipDescriptor>[
+          longId('c' * kMaxClipIdLength),
+          clipAt(2),
+          clipAt(3),
+          clipAt(4),
+        ],
+      );
+      expect(validateCctvManifest(ok).isOk, isTrue);
+      final bad = manifest(
+        clips: <ClipDescriptor>[
+          longId('c' * (kMaxClipIdLength + 1)),
+          clipAt(2),
+          clipAt(3),
+          clipAt(4),
+        ],
+      );
+      final r = validateCctvManifest(bad);
+      expect(r.isErr, isTrue);
+      expect((r as Err<PlaybackManifest>).message, contains('exceeds'));
+    });
+  });
+
+  group('cctvSlots (single source of truth)', () {
+    test('canonical order, ids, indices, and default rooms', () {
+      expect(
+        cctvSlots.map((s) => s.id).toList(),
+        <String>['CAM-01', 'CAM-02', 'CAM-03', 'CAM-04'],
+      );
+      expect(cctvSlots.map((s) => s.index).toList(), <int>[0, 1, 2, 3]);
+      expect(
+        cctvSlots.map((s) => s.room).toList(),
+        <String>['hallway', 'kitchen', 'staircase', 'storage room'],
+      );
+      expect(
+        cctvSlots.map((s) => s.defaultLabel).toList(),
+        <String>[
+          'CAM-01 · hallway',
+          'CAM-02 · kitchen',
+          'CAM-03 · staircase',
+          'CAM-04 · storage room',
+        ],
+      );
+    });
+
+    test('kCctvCameraIds matches the slot ids', () {
+      expect(kCctvCameraIds, cctvSlots.map((s) => s.id).toSet());
+    });
+
+    test('slotForCameraId resolves known cameras and nulls unknown ones', () {
+      expect(slotForCameraId('CAM-01')!.index, 0);
+      expect(slotForCameraId('CAM-04')!.room, 'storage room');
+      expect(slotForCameraId('CAM-05'), isNull);
+      expect(slotForCameraId(''), isNull);
+    });
+  });
+
+  group('clip labels (config-driven, owner Q3)', () {
+    ClipDescriptor labeled(int i, String? label) => ClipDescriptor(
+      id: 'clip-0$i',
+      cameraId: 'CAM-0$i',
+      storageObjectId: 'obj-0$i',
+      sha256: sha('clip-0$i'),
+      sizeBytes: 1000 + i,
+      duration: const Duration(seconds: 10),
+      mimeType: 'video/mp4',
+      label: label,
+    );
+
+    test('label round-trips through json and equality', () {
+      final clip = labeled(1, 'Front Door');
+      final back = ClipDescriptor.fromJson(clip.toJson());
+      expect(back, equals(clip));
+      expect(back.hashCode, clip.hashCode);
+      expect(back.label, 'Front Door');
+      expect(clip.toJson()['label'], 'Front Door');
+    });
+
+    test('absent label stays null and keeps the old wire shape', () {
+      final clip = labeled(2, null);
+      expect(clip.label, isNull);
+      expect(clip.toJson().containsKey('label'), isFalse);
+      expect(ClipDescriptor.fromJson(clip.toJson()), equals(clip));
+    });
+
+    test('resolveCctvLabel prefers custom labels, else slot defaults', () {
+      expect(resolveCctvLabel(labeled(1, 'Front Door')), 'Front Door');
+      expect(resolveCctvLabel(labeled(2, null)), 'CAM-02 · kitchen');
+      expect(resolveCctvLabel(labeled(3, '   ')), 'CAM-03 · staircase');
+    });
+
+    test('custom-label manifest drives wall slot labels end-to-end', () {
+      // Manifest -> validate -> JSON round-trip -> per-clip label
+      // resolution, all on prod code. The channel-level counterpart lives in
+      // channel_cctv (tileForClip + wall widget test), so this covers the
+      // domain half of the path with wall-slot ordering preserved.
+      final m = manifest(
+        clips: <ClipDescriptor>[
+          labeled(1, 'Front Door'),
+          labeled(2, null),
+          labeled(3, 'Basement'),
+          labeled(4, 'Attic'),
+        ],
+      );
+      expect(validateCctvManifest(m).isOk, isTrue);
+      final reparsed = parseManifest(m.toJson());
+      expect(validateCctvManifest(reparsed).isOk, isTrue);
+      final labels = <String>[
+        for (var i = 0; i < 4; i++)
+          resolveCctvLabel(reparsed.clips[i]),
+      ];
+      expect(labels, <String>[
+        'Front Door',
+        'CAM-02 · kitchen',
+        'Basement',
+        'Attic',
+      ]);
+      // Slot placement still follows camera identity, not clip order.
+      expect(
+        reparsed.clips.map((c) => slotForCameraId(c.cameraId)!.index).toList(),
+        <int>[0, 1, 2, 3],
+      );
+    });
   });
 }

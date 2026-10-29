@@ -9,6 +9,8 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  channel_api:
+    path: ../channel_api
   core_foundation:
     path: ../core_foundation
   core_playlist:

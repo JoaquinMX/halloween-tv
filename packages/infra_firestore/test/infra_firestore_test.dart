@@ -200,7 +200,8 @@ void main() {
   group('StaticManifestSource', () {
     test('emits the fixture once per subscription, then closes', () async {
       final fixture = manifestFromFirestore(versionedFixture());
-      final ManifestSource source = StaticManifestSource(fixture);
+      final ManifestSource<PlaybackManifest> source =
+          StaticManifestSource(fixture);
 
       final emitted = await source
           .watchCurrent(partyId: 'party-1', channelId: 'cctv')

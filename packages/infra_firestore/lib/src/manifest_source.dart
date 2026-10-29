@@ -1,14 +1,39 @@
-/// Firestore control-plane stubs: manifest source port + document mapping.
+/// Firestore control-plane adapters: manifest source + document mapping.
 ///
 /// Design authority: Technical Design v1.0 §9 (Firestore control plane).
-/// Interfaces ONLY — zero network calls, zero firebase SDK imports.
+///
+/// Port direction (finding D-08 — recorded here): the `ManifestSource` port
+/// interface is owned by the contracts layer in
+/// `package:channel_api/channel_api.dart` (`ManifestSource<T>`); this
+/// library declares no port of its own and only ships the
+/// `PlaybackManifest`-bound adapter ([StaticManifestSource]) plus the
+/// document mapping ([manifestFromFirestore]). Channels therefore bind
+/// `ManifestSource<PlaybackManifest>` from `channel_api` and never import
+/// `infra_*`.
+///
+/// Backwards compatibility: the barrel
+/// (`package:infra_firestore/infra_firestore.dart`) still re-exports
+/// [ManifestSource] through this library so existing importers compile; the
+/// re-export carries an `@Deprecated` annotation recording the move (Dart
+/// raises no deprecation diagnostic for export directives, so the
+/// deprecation here is documentation-level — new code must import the port
+/// from `channel_api`).
 ///
 /// Every type crossing this boundary belongs to `core_playlist`
-/// ([PlaybackManifest], [ClipDescriptor], [OverlaySettings]) or
-/// `core_foundation`; nothing is redefined here.
+/// ([PlaybackManifest], [ClipDescriptor], [OverlaySettings]),
+/// `channel_api` (the port), or `core_foundation`; nothing is redefined
+/// here.
 library;
 
+import 'package:channel_api/channel_api.dart' show ManifestSource;
 import 'package:core_playlist/core_playlist.dart';
+
+@Deprecated(
+  'ManifestSource moved to the contracts layer (finding D-08): import it '
+  'from package:channel_api/channel_api.dart. This infra re-export is kept '
+  'only so existing importers compile.',
+)
+export 'package:channel_api/channel_api.dart' show ManifestSource;
 
 /// Supported Firestore manifest document schema version.
 ///
@@ -29,31 +54,13 @@ class ManifestSchemaException implements Exception {
   String toString() => 'ManifestSchemaException: $message';
 }
 
-/// Abstract control-plane source for the currently-scheduled manifest.
-///
-/// Production implementation watches
-/// `parties/{partyId}/channels/{channelId}/current` via Firestore snapshot
-/// listeners and maps each document with [manifestFromFirestore]. This
-/// slice ships the port plus a static fixture source.
-abstract interface class ManifestSource {
-  /// Streams the current [PlaybackManifest] for a party channel.
-  ///
-  /// Emits a new manifest whenever the control plane publishes one. The
-  /// stream owns no sockets in this slice; implementations that do must
-  /// keep `dart:io` out of this signature.
-  Stream<PlaybackManifest> watchCurrent({
-    required String partyId,
-    required String channelId,
-  });
-}
-
-/// Fixture-backed [ManifestSource] that emits [fixture] once per
-/// subscription and then closes.
+/// Fixture-backed `ManifestSource<PlaybackManifest>` that emits [fixture]
+/// once per subscription and then closes.
 ///
 /// Used by tests, previews, and offline playback. In stub mode the fixture
 /// is authoritative for every requested party/channel, so callers can wire
 /// the port before the control plane exists.
-class StaticManifestSource implements ManifestSource {
+class StaticManifestSource implements ManifestSource<PlaybackManifest> {
   /// Creates a source that emits [fixture] once per subscription.
   const StaticManifestSource(this.fixture);
 

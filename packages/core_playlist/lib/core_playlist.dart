@@ -1,15 +1,105 @@
 /// Playback manifest model (Technical Design v1.0, section 8).
+///
+/// Camera identity (owner Q3 — labels are config-driven, never hardcoded):
+/// [CctvSlot]/[cctvSlots] is the single source of truth for CCTV camera
+/// identity — canonical wall order, camera ids, and default room labels.
+/// The `channel_cctv` tile map, the tv_app asset catalog, and wall-slot
+/// label resolution all derive from it; no `CAM-0x` literals are duplicated
+/// in other layers.
+///
+/// Port direction (finding D-08 — recorded exception): the control-plane
+/// ports (`ManifestSource`, `SettingsPort`) are owned by the contracts
+/// layer in `package:channel_api/channel_api.dart`, so channels can consume
+/// them without importing `infra_*`. The `infra_*` packages ship only the
+/// adapters bound to those contracts; their barrels keep re-exporting the
+/// port names so existing importers keep compiling.
 library;
 
 import 'package:core_foundation/core_foundation.dart';
 
-/// Valid CCTV camera ids.
-const Set<String> kCctvCameraIds = <String>{
-  'CAM-01',
-  'CAM-02',
-  'CAM-03',
-  'CAM-04',
-};
+/// One CCTV wall slot: camera identity plus its default presentation.
+///
+/// Wall order is the order of `cctvSlots` (top-left reading order).
+final class CctvSlot {
+  /// Camera id (e.g. `CAM-01`).
+  final String id;
+
+  /// Wall slot index (`0..3`; matches the position in [cctvSlots]).
+  final int index;
+
+  /// Default room name shown on the tile HUD.
+  ///
+  /// Replaceable per clip by the manifest `label` field (see
+  /// [ClipDescriptor.label] and [resolveCctvLabel]).
+  final String room;
+
+  /// Creates a slot binding [id] to wall position [index] with default
+  /// room [room].
+  const CctvSlot({required this.id, required this.index, required this.room});
+
+  /// Default tile label (`'$id · $room'`), used when the manifest clip
+  /// carries no custom label.
+  String get defaultLabel => '$id · $room';
+
+  @override
+  String toString() => 'CctvSlot($id, slot $index, $room)';
+}
+
+/// Canonical CCTV wall slots in wall order (top-left reading order).
+///
+/// Single source of truth for camera identity: id, slot index, and default
+/// room label travel together so `channel_cctv`, the tv_app asset catalog,
+/// and manifest validation can never drift apart. Add a camera here — never
+/// by scattering new `CAM-0x` literals across layers.
+const List<CctvSlot> cctvSlots = <CctvSlot>[
+  CctvSlot(id: 'CAM-01', index: 0, room: 'hallway'),
+  CctvSlot(id: 'CAM-02', index: 1, room: 'kitchen'),
+  CctvSlot(id: 'CAM-03', index: 2, room: 'staircase'),
+  CctvSlot(id: 'CAM-04', index: 3, room: 'storage room'),
+];
+
+/// Valid CCTV camera ids, derived from [cctvSlots].
+///
+/// Kept for callers that only need the id set; prefer [cctvSlots] (or
+/// [slotForCameraId]) when order, index, or default labels matter.
+final Set<String> kCctvCameraIds = Set<String>.unmodifiable(
+  <String>{for (final CctvSlot slot in cctvSlots) slot.id},
+);
+
+/// Slot for [cameraId], or `null` when it is not a known camera.
+CctvSlot? slotForCameraId(String cameraId) {
+  for (final CctvSlot slot in cctvSlots) {
+    if (slot.id == cameraId) {
+      return slot;
+    }
+  }
+  return null;
+}
+
+/// Maximum manifest clip id length.
+///
+/// The tile HUD ellipsizes long labels (p5 owns the HUD), but ids longer
+/// than this are rejected by [validateCctvManifest] so oversized
+/// control-plane payloads never reach the wall.
+const int kMaxClipIdLength = 64;
+
+/// Resolves the wall-slot label for [clip].
+///
+/// The manifest clip `label` field wins when present and non-blank (owner
+/// Q3: labels are config-driven and replaceable); otherwise the
+/// [CctvSlot.defaultLabel] for the clip's camera applies. Unknown cameras
+/// fall back to the raw camera id — validation rejects those separately.
+String resolveCctvLabel(ClipDescriptor clip) {
+  final String? custom = clip.label;
+  if (custom != null && custom.trim().isNotEmpty) {
+    return custom;
+  }
+  final CctvSlot? slot = slotForCameraId(clip.cameraId);
+  if (slot != null) {
+    return slot.defaultLabel;
+  }
+  return clip.cameraId;
+}
 
 final RegExp _sha256Pattern = RegExp(r'^[0-9a-fA-F]{64}$');
 
@@ -56,6 +146,14 @@ final class ClipDescriptor {
   /// MIME type (e.g. video/mp4).
   final String mimeType;
 
+  /// Optional config-driven display label (owner Q3).
+  ///
+  /// When non-null and non-blank, wall slots show this instead of the
+  /// [CctvSlot.defaultLabel]. Absent in older manifests; [resolveCctvLabel]
+  /// falls back to the slot default. Never validated for length — the tile
+  /// HUD ellipsizes (p5 owns the HUD).
+  final String? label;
+
   const ClipDescriptor({
     required this.id,
     required this.cameraId,
@@ -64,17 +162,26 @@ final class ClipDescriptor {
     required this.sizeBytes,
     required this.duration,
     required this.mimeType,
+    this.label,
   });
 
-  Map<String, Object?> toJson() => <String, Object?>{
-    'id': id,
-    'cameraId': cameraId,
-    'storageObjectId': storageObjectId,
-    'sha256': sha256,
-    'sizeBytes': sizeBytes,
-    'durationMs': duration.inMilliseconds,
-    'mimeType': mimeType,
-  };
+  Map<String, Object?> toJson() {
+    final Map<String, Object?> map = <String, Object?>{
+      'id': id,
+      'cameraId': cameraId,
+      'storageObjectId': storageObjectId,
+      'sha256': sha256,
+      'sizeBytes': sizeBytes,
+      'durationMs': duration.inMilliseconds,
+      'mimeType': mimeType,
+    };
+    // Only newer manifests carry `label`; omitting it when null keeps the
+    // wire shape of older manifests byte-identical.
+    if (label != null) {
+      map['label'] = label;
+    }
+    return map;
+  }
 
   factory ClipDescriptor.fromJson(Map<String, Object?> json) => ClipDescriptor(
     id: json['id']! as String,
@@ -84,6 +191,7 @@ final class ClipDescriptor {
     sizeBytes: (json['sizeBytes']! as num).toInt(),
     duration: Duration(milliseconds: (json['durationMs']! as num).toInt()),
     mimeType: json['mimeType']! as String,
+    label: json['label'] as String?,
   );
 
   @override
@@ -96,7 +204,8 @@ final class ClipDescriptor {
           other.sha256 == sha256 &&
           other.sizeBytes == sizeBytes &&
           other.duration == duration &&
-          other.mimeType == mimeType);
+          other.mimeType == mimeType &&
+          other.label == label);
 
   @override
   int get hashCode => Object.hash(
@@ -107,6 +216,7 @@ final class ClipDescriptor {
     sizeBytes,
     duration,
     mimeType,
+    label,
   );
 
   @override
@@ -292,8 +402,11 @@ PlaybackManifest parseManifest(Map<String, Object?> json) {
 /// Validates CCTV manifest rules.
 ///
 /// Enforces: non-empty party/channel, version > 0, exactly 4 clips with
-/// unique ids and unique cameraId each in {CAM-01..CAM-04}, sane sha256
-/// (64 hex chars), sizeBytes > 0 and positive duration.
+/// unique ids (each at most [kMaxClipIdLength] characters) and unique
+/// cameraId each in [kCctvCameraIds] (derived from [cctvSlots]), sane sha256
+/// (64 hex chars), sizeBytes > 0 and positive duration. Clip `label` values
+/// are config-driven display strings (owner Q3) and are not length-checked
+/// here — the tile HUD ellipsizes them.
 Result<PlaybackManifest> validateCctvManifest(PlaybackManifest m) {
   if (m.partyId.trim().isEmpty) {
     return const Err<PlaybackManifest>('partyId must be non-empty');
@@ -314,6 +427,11 @@ Result<PlaybackManifest> validateCctvManifest(PlaybackManifest m) {
   for (final clip in m.clips) {
     if (clip.id.trim().isEmpty) {
       return const Err<PlaybackManifest>('clip id must be non-empty');
+    }
+    if (clip.id.length > kMaxClipIdLength) {
+      return Err<PlaybackManifest>(
+        'clip id ${clip.id} exceeds $kMaxClipIdLength characters',
+      );
     }
     if (!seenClipIds.add(clip.id)) {
       return Err<PlaybackManifest>('duplicate clip id ${clip.id}');

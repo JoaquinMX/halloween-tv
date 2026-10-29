@@ -2,6 +2,7 @@
 library;
 
 import 'package:channel_retro_tv/channel_retro_tv.dart';
+import 'package:core_playlist/core_playlist.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kernel_app/kernel_app.dart';
@@ -27,8 +28,8 @@ void main() {
     await tester.pump(const Duration(milliseconds: 16));
     await tester.pump();
 
-    expect(find.text('CAM-01 · clip-01'), findsOneWidget);
-    expect(find.text('CAM-04 · clip-04'), findsOneWidget);
+    expect(find.text(cctvSlots[0].defaultLabel), findsOneWidget);
+    expect(find.text(cctvSlots[3].defaultLabel), findsOneWidget);
     expect(find.text('REC'), findsNWidgets(4));
     expect(find.text('23:59:58'), findsNWidgets(4));
     for (final String cameraId in <String>[

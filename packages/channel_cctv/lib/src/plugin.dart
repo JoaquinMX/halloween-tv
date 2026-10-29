@@ -287,25 +287,32 @@ class _CctvWallState extends State<CctvWall> {
     super.dispose();
   }
 
-  /// Camera ids driving the four slots: manifest clips when exactly four
-  /// are present, otherwise the static [tileFor] map. Per-camera label
-  /// overrides from [ChannelContext.settings] apply on top.
+  /// Wall slots in canonical order, one per `core_playlist` [CctvSlot].
+  ///
+  /// Slot placement always follows camera identity (`cctvSlots` order), never
+  /// manifest clip order, so a reordered control-plane payload cannot move a
+  /// feed to the wrong tile. When the manifest carries one clip per slot, the
+  /// clip drives the tile via [tileForClip]: its `label` wins when present,
+  /// else the `core_playlist` slot default applies (owner Q3). Manifests that
+  /// are short, oversized, or name unknown cameras fall back to the static
+  /// [tileFor] defaults per slot instead of taking the wall down.
+  /// Per-camera label overrides from [ChannelContext.settings] apply on top.
   List<({String label, String cameraId})> _slots() {
     final PlaybackManifest? manifest = widget.manifest;
-    final List<({String label, String cameraId})> base;
-    if (manifest != null && manifest.clips.length == 4) {
-      base = <({String label, String cameraId})>[
-        for (final ClipDescriptor clip in manifest.clips)
-          (label: '${clip.cameraId} · ${clip.id}', cameraId: clip.cameraId),
-      ];
-    } else {
-      base = <({String label, String cameraId})>[
-        tileFor(0),
-        tileFor(1),
-        tileFor(2),
-        tileFor(3),
-      ];
+    final Map<String, ClipDescriptor> byCamera = <String, ClipDescriptor>{};
+    if (manifest != null && manifest.clips.length == cctvSlots.length) {
+      for (final ClipDescriptor clip in manifest.clips) {
+        byCamera.putIfAbsent(clip.cameraId, () => clip);
+      }
     }
+    final List<({String label, String cameraId})> base =
+        <({String label, String cameraId})>[
+      for (final CctvSlot slot in cctvSlots)
+        if (byCamera[slot.id] case final ClipDescriptor clip)
+          tileForClip(clip)
+        else
+          tileFor(slot.index),
+    ];
     if (widget.labelOverrides.isEmpty) {
       return base;
     }

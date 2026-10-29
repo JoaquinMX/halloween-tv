@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:channel_api/channel_api.dart';
 import 'package:channel_cctv/channel_cctv.dart';
 import 'package:core_effects/core_effects.dart';
@@ -38,26 +40,33 @@ final class _FakeClock implements Clock {
 /// Sixty-four lowercase hex chars (valid sha256 shape for fixtures).
 const String _sha = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 
-PlaybackManifest _manifest({OverlaySettings overlay = const OverlaySettings()})
-    => PlaybackManifest(
-      partyId: 'party-1',
-      channelId: hauntedSurveillanceChannelId,
-      version: 3,
-      publishedAt: DateTime.utc(2026, 10, 31, 20),
-      clips: <ClipDescriptor>[
-        for (int i = 0; i < 4; i++)
-          ClipDescriptor(
-            id: 'clip-0$i',
-            cameraId: 'CAM-0${i + 1}',
-            storageObjectId: 'obj-0$i',
-            sha256: _sha,
-            sizeBytes: 1024,
-            duration: const Duration(seconds: 4),
-            mimeType: 'video/mp4',
-          ),
-      ],
-      overlay: overlay,
-    );
+PlaybackManifest _manifest({
+  OverlaySettings overlay = const OverlaySettings(),
+  Map<String, String?> labels = const <String, String?>{},
+  bool reverseClipOrder = false,
+}) {
+  final List<ClipDescriptor> clips = <ClipDescriptor>[
+    for (int i = 0; i < 4; i++)
+      ClipDescriptor(
+        id: 'clip-0$i',
+        cameraId: 'CAM-0${i + 1}',
+        storageObjectId: 'obj-0$i',
+        sha256: _sha,
+        sizeBytes: 1024,
+        duration: const Duration(seconds: 4),
+        mimeType: 'video/mp4',
+        label: labels['CAM-0${i + 1}'],
+      ),
+  ];
+  return PlaybackManifest(
+    partyId: 'party-1',
+    channelId: hauntedSurveillanceChannelId,
+    version: 3,
+    publishedAt: DateTime.utc(2026, 10, 31, 20),
+    clips: reverseClipOrder ? clips.reversed.toList() : clips,
+    overlay: overlay,
+  );
+}
 
 void main() {
   group('tileFor', () {
@@ -73,11 +82,62 @@ void main() {
       expect(() => tileFor(-1), throwsRangeError);
       expect(() => tileFor(4), throwsRangeError);
     });
+
+    test('slot list and labels derive from core_playlist cctvSlots', () {
+      expect(cctvCameraIds, cctvSlots.map((CctvSlot s) => s.id).toList());
+      expect(cctvRooms, cctvSlots.map((CctvSlot s) => s.room).toList());
+      expect(() => cctvCameraIds.add('CAM-99'), throwsUnsupportedError);
+      expect(() => cctvRooms.add('attic'), throwsUnsupportedError);
+    });
+
+    test('a custom label overrides the slot default, blank keeps it', () {
+      expect(
+        tileFor(0, label: 'Front Door'),
+        (label: 'Front Door', cameraId: 'CAM-01'),
+      );
+      expect(
+        tileFor(0, label: '   '),
+        (label: cctvSlots[0].defaultLabel, cameraId: 'CAM-01'),
+      );
+      expect(
+        tileFor(0),
+        (label: cctvSlots[0].defaultLabel, cameraId: 'CAM-01'),
+      );
+    });
+
+    test('tileForCamera places by camera identity, not index', () {
+      expect(
+        tileForCamera('CAM-03', label: 'Stairs'),
+        (label: 'Stairs', cameraId: 'CAM-03'),
+      );
+      expect(() => tileForCamera('CAM-09'), throwsArgumentError);
+    });
+
+    test('tileForClip resolves config labels, else slot defaults', () {
+      ClipDescriptor clip(String cameraId, {String? label}) => ClipDescriptor(
+        id: 'clip-$cameraId',
+        cameraId: cameraId,
+        storageObjectId: 'obj-$cameraId',
+        sha256: _sha,
+        sizeBytes: 1024,
+        duration: const Duration(seconds: 4),
+        mimeType: 'video/mp4',
+        label: label,
+      );
+      expect(
+        tileForClip(clip('CAM-02', label: 'Kitchen Cam')),
+        (label: 'Kitchen Cam', cameraId: 'CAM-02'),
+      );
+      expect(
+        tileForClip(clip('CAM-04')),
+        (label: cctvSlots[3].defaultLabel, cameraId: 'CAM-04'),
+      );
+    });
   });
 
   group('HauntedSurveillancePlugin', () {
     test('descriptor is valid with wall capabilities', () {
-      final ChannelPlugin plugin = const HauntedSurveillancePlugin();
+      const ChannelPlugin plugin = HauntedSurveillancePlugin();
       expect(plugin.descriptor.id, hauntedSurveillanceChannelId);
       expect(plugin.descriptor.title, 'Haunted Surveillance');
       expect(plugin.descriptor.version, greaterThan(0));
@@ -133,8 +193,10 @@ void main() {
       expect(find.text('SIGNAL LOST'), findsNothing);
     });
 
-    testWidgets('uses manifest camera ids when provided',
+    testWidgets('manifest without labels falls back to core_playlist defaults',
         (WidgetTester tester) async {
+      // Manifest clips carry no `label`: wall labels must resolve to the
+      // canonical slot defaults from core_playlist, never to clip ids.
       final _FakeHandle handle = _FakeHandle();
       final HauntedSurveillancePlugin plugin = HauntedSurveillancePlugin(
         disableEffects: true,
@@ -147,8 +209,129 @@ void main() {
       );
       await tester.pumpWidget(MaterialApp(home: plugin.build(ctx)));
       await tester.pumpAndSettle();
-      expect(find.text('CAM-01 · clip-00'), findsOneWidget);
-      expect(find.text('CAM-04 · clip-03'), findsOneWidget);
+      for (final CctvSlot slot in cctvSlots) {
+        expect(find.text(slot.defaultLabel), findsOneWidget);
+      }
+      expect(find.textContaining('clip-0'), findsNothing);
+    });
+
+    testWidgets('custom-label manifest drives wall slot labels end-to-end',
+        (WidgetTester tester) async {
+      // Owner Q3: labels are config-driven. A manifest whose clips carry
+      // `label` must drive the HUD text on the matching camera slot, while
+      // slots without a label keep the core_playlist default.
+      final _FakeHandle handle = _FakeHandle();
+      final HauntedSurveillancePlugin plugin = HauntedSurveillancePlugin(
+        disableEffects: true,
+        manifest: _manifest(
+          labels: const <String, String?>{
+            'CAM-01': 'Front Door',
+            'CAM-02': null,
+            'CAM-03': 'Basement',
+            'CAM-04': '   ',
+          },
+        ),
+        tileBuilder: _fakeSurface,
+      );
+      final ChannelContext ctx = ChannelContext(
+        partyId: PartyId('party-1'),
+        playbackHandle: handle,
+      );
+      await tester.pumpWidget(MaterialApp(home: plugin.build(ctx)));
+      await tester.pumpAndSettle();
+      expect(find.text('Front Door'), findsOneWidget);
+      expect(find.text('CAM-02 · kitchen'), findsOneWidget);
+      expect(find.text('Basement'), findsOneWidget);
+      expect(find.text('CAM-04 · storage room'), findsOneWidget);
+      // Blank labels are not rendered as-is.
+      expect(find.text('   '), findsNothing);
+    });
+
+    testWidgets('slots follow camera identity, not manifest clip order',
+        (WidgetTester tester) async {
+      final _FakeHandle handle = _FakeHandle();
+      final HauntedSurveillancePlugin plugin = HauntedSurveillancePlugin(
+        disableEffects: true,
+        manifest: _manifest(
+          labels: const <String, String?>{
+            'CAM-01': 'Front Door',
+            'CAM-02': 'Kitchen Cam',
+            'CAM-03': 'Stairs',
+            'CAM-04': 'Vault',
+          },
+          reverseClipOrder: true,
+        ),
+        tileBuilder: _fakeSurface,
+      );
+      final ChannelContext ctx = ChannelContext(
+        partyId: PartyId('party-1'),
+        playbackHandle: handle,
+      );
+      await tester.pumpWidget(MaterialApp(home: plugin.build(ctx)));
+      await tester.pumpAndSettle();
+      // Labels are placed by camera id, so reversed clip order still puts
+      // CAM-01's label on wall slot 0.
+      final Text first = tester.widget<Text>(find.text('Front Door'));
+      expect(first.data, 'Front Door');
+      expect(
+        tester.getTopLeft(find.text('Front Door')).dx,
+        lessThan(tester.getTopLeft(find.text('Kitchen Cam')).dx),
+      );
+      expect(
+        tester.getTopLeft(find.text('Stairs')).dy,
+        greaterThan(tester.getTopLeft(find.text('Kitchen Cam')).dy),
+      );
+    });
+
+    testWidgets('unknown-camera manifest degrades to defaults per slot',
+        (WidgetTester tester) async {
+      // Validation rejects unknown camera ids upstream (core_playlist), but
+      // a stale payload must never crash the wall: an unmatched clip is
+      // ignored and its slot keeps the canonical default.
+      final _FakeHandle handle = _FakeHandle();
+      final HauntedSurveillancePlugin plugin = HauntedSurveillancePlugin(
+        disableEffects: true,
+        manifest: PlaybackManifest(
+          partyId: 'party-1',
+          channelId: hauntedSurveillanceChannelId,
+          version: 3,
+          publishedAt: DateTime.utc(2026, 10, 31, 20),
+          clips: <ClipDescriptor>[
+            for (int i = 0; i < 3; i++)
+              ClipDescriptor(
+                id: 'clip-0$i',
+                cameraId: 'CAM-0${i + 1}',
+                storageObjectId: 'obj-0$i',
+                sha256: _sha,
+                sizeBytes: 1024,
+                duration: const Duration(seconds: 4),
+                mimeType: 'video/mp4',
+              ),
+            const ClipDescriptor(
+              id: 'clip-99',
+              cameraId: 'CAM-09',
+              storageObjectId: 'obj-99',
+              sha256: _sha,
+              sizeBytes: 1024,
+              duration: Duration(seconds: 4),
+              mimeType: 'video/mp4',
+              label: 'Rodent Cam',
+            ),
+          ],
+        ),
+        tileBuilder: _fakeSurface,
+      );
+      final ChannelContext ctx = ChannelContext(
+        partyId: PartyId('party-1'),
+        playbackHandle: handle,
+      );
+      await tester.pumpWidget(MaterialApp(home: plugin.build(ctx)));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      expect(find.text('Rodent Cam'), findsNothing);
+      for (final CctvSlot slot in cctvSlots) {
+        expect(find.text(slot.defaultLabel), findsOneWidget);
+      }
     });
 
     testWidgets('manifest overlay tunes the tile effect intensities',
@@ -325,6 +508,169 @@ void main() {
       expect(tester.takeException(), isNull);
     });
   });
+
+  group('port direction (D-08)', () {
+    // Finding D-08: channels must be able to consume the control-plane ports
+    // without importing `infra_*`. These two tests keep that true from the
+    // consumer side: one walks the real import graph, the other compiles and
+    // runs fakes implemented purely against `channel_api`.
+    test('lib graph of this channel imports no infra_* package', () {
+      final Set<String> visitedPackages = <String>{};
+      final List<File> sources = _transitiveLibSources(
+        Directory.current,
+        visitedPackages,
+      );
+      expect(
+        visitedPackages,
+        containsAll(<String>['channel_cctv', 'channel_api']),
+        reason: 'walk must actually reach the contracts package',
+      );
+      final List<String> offenders = <String>[
+        for (final File f in sources)
+          if (f.readAsStringSync().contains('package:infra_')) f.path,
+      ];
+      expect(
+        offenders,
+        isEmpty,
+        reason: 'channels must not import infra_* (finding D-08)',
+      );
+    });
+
+    test('ports are implementable from channel_api alone', () async {
+      final _ContractOnlyManifestSource source = _ContractOnlyManifestSource(
+        _manifest(),
+      );
+      final ManifestSource<PlaybackManifest> port = source;
+      final List<PlaybackManifest> seen = await port
+          .watchCurrent(partyId: 'party-1', channelId: hauntedSurveillanceChannelId)
+          .toList();
+      expect(seen, hasLength(1));
+      expect(seen.single.channelId, hauntedSurveillanceChannelId);
+
+      final SettingsPort settings = _ContractOnlySettings();
+      await settings.setString(
+        partyId: PartyId('party-1'),
+        key: 'label.cam-01',
+        value: 'Front Door',
+      );
+      expect(
+        await settings.getString(
+          partyId: PartyId('party-1'),
+          key: 'label.cam-01',
+        ),
+        'Front Door',
+      );
+    });
+  });
+}
+
+
+/// Collects the `lib/` sources of [packageRoot] and, transitively, of every
+/// sibling path package reachable through `package:<name>/<path>` imports.
+///
+/// Only local siblings (`<packages>/<name>/lib/*.dart`) are followed, so SDK
+/// and pub-cache packages terminate the walk. Names are recorded in
+/// [visited] so the caller can assert the graph was not vacuous.
+List<File> _transitiveLibSources(Directory packageRoot, Set<String> visited) {
+  final List<File> collected = <File>[];
+  final List<(String, Directory)> queue = <(String, Directory)>[
+    (_packageNameOf(packageRoot), packageRoot),
+  ];
+  while (queue.isNotEmpty) {
+    final (String name, Directory root) = queue.removeLast();
+    if (!visited.add(name)) {
+      continue;
+    }
+    final Directory lib = Directory('${root.path}/lib');
+    if (!lib.existsSync()) {
+      continue;
+    }
+    for (final File file in lib.listSync(recursive: true).whereType<File>()) {
+      if (!file.path.endsWith('.dart')) {
+        continue;
+      }
+      collected.add(file);
+      for (final String uri in _packageUrisOf(file.readAsStringSync())) {
+        final String target = uri.split('/').first;
+        final Directory sibling = Directory('${packageRoot.parent.path}/$target');
+        if (sibling.existsSync()) {
+          queue.add((target, sibling));
+        }
+      }
+    }
+  }
+  return collected;
+}
+
+/// Package name of [root], read from its `pubspec.yaml` name line.
+String _packageNameOf(Directory root) {
+  final File pubspec = File('${root.path}/pubspec.yaml');
+  for (final String line in pubspec.readAsLinesSync()) {
+    if (line.startsWith('name:')) {
+      return line.substring('name:'.length).trim();
+    }
+  }
+  return root.uri.pathSegments.where((String s) => s.isNotEmpty).last;
+}
+
+/// `package:<name>/<path>` URIs referenced by [source].
+Iterable<String> _packageUrisOf(String source) sync* {
+  for (final RegExpMatch match
+      in RegExp(r'package:([a-z0-9_]+/[A-Za-z0-9_./]+)')
+          .allMatches(source)) {
+    yield match.group(1)!;
+  }
+}
+
+/// Manifest source bound to `PlaybackManifest` using only the contracts port.
+final class _ContractOnlyManifestSource
+    implements ManifestSource<PlaybackManifest> {
+  _ContractOnlyManifestSource(this.manifest);
+
+  final PlaybackManifest manifest;
+
+  @override
+  Stream<PlaybackManifest> watchCurrent({
+    required String partyId,
+    required String channelId,
+  }) async* {
+    yield manifest;
+  }
+}
+
+/// Settings store written against the contracts port; no infra adapter used.
+final class _ContractOnlySettings implements SettingsPort {
+  final Map<String, String> _values = <String, String>{};
+
+  @override
+  Future<String?> getString({
+    required PartyId partyId,
+    required String key,
+  }) async => _values['${partyId.value}/$key'];
+
+  @override
+  Future<void> setString({
+    required PartyId partyId,
+    required String key,
+    required String value,
+  }) async {
+    _values['${partyId.value}/$key'] = value;
+  }
+
+  @override
+  Future<bool?> getBool({
+    required PartyId partyId,
+    required String key,
+  }) async => _values['${partyId.value}/$key'] == 'true';
+
+  @override
+  Future<void> setBool({
+    required PartyId partyId,
+    required String key,
+    required bool value,
+  }) async {
+    _values['${partyId.value}/$key'] = '$value';
+  }
 }
 
 Widget _fakeSurface(

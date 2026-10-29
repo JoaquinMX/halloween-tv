@@ -221,3 +221,62 @@ abstract class ChannelPlugin {
   /// Builds the channel UI for [context].
   Widget build(ChannelContext context);
 }
+
+/// Control-plane + settings ports owned by the contracts layer.
+///
+/// Finding D-08 (recorded here): `ManifestSource` and `SettingsPort` used to
+/// live in `infra_*`, which forced any channel consuming them to import
+/// infra — the wrong direction. The interfaces below are the canonical
+/// contracts: channels (and the app composition root) program against these
+/// and never import `infra_*`. The `infra_*` packages ship only adapters
+/// bound to these contracts; their barrels keep re-exporting the port names
+/// so existing importers keep compiling (deprecated import path — prefer
+/// this library).
+///
+/// A note on the manifest type: this library depends only on
+/// `core_foundation` (never on feature domains), so [ManifestSource] is
+/// generic over the manifest type. Channels bind
+/// `ManifestSource<PlaybackManifest>` with `PlaybackManifest` from
+/// `package:core_playlist/core_playlist.dart`; the Firestore adapter binds
+/// the same instantiation.
+abstract interface class ManifestSource<T> {
+  /// Streams the current manifest of type [T] for a party channel.
+  ///
+  /// Emits a new manifest whenever the control plane publishes one. The
+  /// stream owns no sockets in this contract; implementations that do must
+  /// keep `dart:io` out of this signature.
+  Stream<T> watchCurrent({
+    required String partyId,
+    required String channelId,
+  });
+}
+
+/// Abstract settings store. Every key is scoped by [partyId] so concurrent
+/// parties (watch-party sessions) never share state.
+///
+/// Contracts-layer owner of the settings port (finding D-08): channel code
+/// depends on this declaration, never on `infra_*`. Adapters (in-memory for
+/// tests/previews, SharedPreferences- or Firestore-backed in production)
+/// implement this interface behind the same signature.
+abstract interface class SettingsPort {
+  /// Reads a string setting, or `null` when unset (or stored as another
+  /// type).
+  Future<String?> getString({required PartyId partyId, required String key});
+
+  /// Writes a string setting for [partyId].
+  Future<void> setString({
+    required PartyId partyId,
+    required String key,
+    required String value,
+  });
+
+  /// Reads a bool setting, or `null` when unset (or stored as another type).
+  Future<bool?> getBool({required PartyId partyId, required String key});
+
+  /// Writes a bool setting for [partyId].
+  Future<void> setBool({
+    required PartyId partyId,
+    required String key,
+    required bool value,
+  });
+}
