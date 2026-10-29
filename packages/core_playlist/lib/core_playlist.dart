@@ -462,3 +462,25 @@ Result<PlaybackManifest> validateCctvManifest(PlaybackManifest m) {
   }
   return Ok<PlaybackManifest>(m);
 }
+
+/// Validates that [candidate] advances beyond [committedVersion].
+///
+/// A manifest with the same version is not a new publication: callers may
+/// treat an identical, already committed manifest as an idempotent cache hit,
+/// but must reject it as an update. This keeps version ordering explicit at
+/// the point where persisted state is available.
+Result<PlaybackManifest> validateManifestVersion(
+  PlaybackManifest candidate,
+  int? committedVersion,
+) {
+  if (candidate.version <= 0) {
+    return const Err<PlaybackManifest>('version must be > 0');
+  }
+  if (committedVersion != null && candidate.version <= committedVersion) {
+    return Err<PlaybackManifest>(
+      'manifest version ${candidate.version} must be newer than '
+      'committed version $committedVersion',
+    );
+  }
+  return Ok<PlaybackManifest>(candidate);
+}

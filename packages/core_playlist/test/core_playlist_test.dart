@@ -74,6 +74,27 @@ void main() {
       }
     });
 
+    test('manifest version must advance beyond committed version', () {
+      final current = manifest(version: 4);
+      expect(validateManifestVersion(current, null).isOk, isTrue);
+      expect(validateManifestVersion(manifest(version: 5), 4).isOk, isTrue);
+      final stale = validateManifestVersion(manifest(version: 4), 4);
+      expect(stale, isA<Err<PlaybackManifest>>());
+      expect((stale as Err<PlaybackManifest>).message, contains('newer'));
+      expect(validateManifestVersion(manifest(version: 3), 4).isErr, isTrue);
+    });
+
+    test('camera assignments cover every slot even when order differs', () {
+      final reversed = manifest(
+        clips: <ClipDescriptor>[clipAt(4), clipAt(3), clipAt(2), clipAt(1)],
+      );
+      expect(validateCctvManifest(reversed).isOk, isTrue);
+      expect(
+        reversed.clips.map((clip) => slotForCameraId(clip.cameraId)!.index),
+        <int>[3, 2, 1, 0],
+      );
+    });
+
     test('clip count other than 4 rejected', () {
       for (final count in <int>[0, 3, 5]) {
         final clips = <ClipDescriptor>[
