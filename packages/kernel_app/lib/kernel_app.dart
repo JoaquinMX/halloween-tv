@@ -4,6 +4,8 @@ library;
 import 'package:channel_api/channel_api.dart';
 
 export 'package:channel_api/channel_api.dart';
+export 'src/playback_sync.dart';
+export 'src/prepare_playback.dart';
 
 /// Registry of channel plugins keyed by descriptor id.
 ///
