@@ -232,7 +232,8 @@ void main() {
     await tester.sendKeyEvent(LogicalKeyboardKey.contextMenu);
     await tester.pump();
     expect(find.byKey(kRecoveryOverlayKey), findsNothing);
-    // ...and focus returns to the wall.
+    // ...and focus returns to the wall (post-frame restore + tile rebuild).
+    await tester.pump();
     expect(find.byKey(const ValueKey<String>('tile-focus-ring-0')),
         findsOneWidget);
 

@@ -201,9 +201,12 @@ class _WallScreenState extends State<WallScreen> {
       _recoveryVisible = false;
       _recoveryStatus = null;
     });
-    // D-pad focus returns to the tile the user was watching.
-    final int index = _focus.focusedIndex;
-    _focus.focusTile(index < 0 ? 0 : index);
+    // D-pad focus returns to the tile the user was watching. Deferred to a
+    // post-frame callback: while the overlay is still mounted this frame,
+    // ExcludeFocus(excluding: true) rejects a synchronous requestFocus on
+    // the wall tiles, so the request must run after the rebuild flips
+    // excluding back to false (same path as _restoreTileFocus).
+    _restoreTileFocus();
   }
 
   Future<void> _retryCached() async {
