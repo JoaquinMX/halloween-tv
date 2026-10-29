@@ -21,8 +21,15 @@ sh tool/gen_fixtures.sh
 sh tool/gen_fixtures.sh --check   # CI gate: files exist and stay in budget
 ```
 
-If `ffmpeg` is not installed, the script still succeeds: it writes minimal
-but structurally valid MP4 placeholders (ftyp + moov + mdat, no decodable
-track) so `flutter build apk` works fully offline. Those placeholders make
-`video_player` report an error, which the wall renders as `SIGNAL LOST` for
-that tile — the other tiles keep playing.
+If `ffmpeg` is not installed, the script REFUSES to touch existing
+fixtures and exits 1 (it never overwrites good clips with undecodable
+placeholders). Placeholder MP4s are only written with explicit
+`--allow-placeholders` on an empty assets dir, exit 0 with a loud warning,
+and `--check` fails on them by design (they carry no decodable track, so
+every tile would render `SIGNAL LOST`).
+
+`fixture_manifest.json` is emitted alongside the clips: per-clip
+`{cameraId, sha256, sizeBytes, durationMs, asset}` generated from the real
+bytes. The wall loads it at boot as the offline fallback manifest and
+verifies clip hashes before playback. Regenerate clips and manifest
+together — never edit one without the other.
