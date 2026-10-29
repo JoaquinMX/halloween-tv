@@ -1,5 +1,5 @@
 name: tv_app
-description: "Halloween TV (Haunted Surveillance) — Android TV app. Flutter + video_player. Composes kernel_app (composition root) and the channels layer; must not reach into infra_* directly (design D-08)."
+description: "Halloween TV (Haunted Surveillance) — Android TV 2x2 CCTV wall. Composition root: kernel_app registry + channel_cctv, app-owned video_player decoders per tile."
 publish_to: none
 version: 1.0.0+1
 
@@ -8,18 +8,18 @@ environment:
 
 # Pub Workspaces resolution is intentionally not enabled yet: it requires a
 # root pubspec.yaml declaring `workspace:`, which is out of scope for this
-# partition. Classic Melos-managed path dependencies are used instead; see
+# cycle. Classic Melos-managed path dependencies are used instead; see
 # docs/ADRs/0001-package-mapping.md.
 
 dependencies:
   flutter:
     sdk: flutter
 
-  # --- Microkernel / composition root ---
+  # Microkernel / composition root.
   kernel_app:
     path: ../../packages/kernel_app
 
-  # --- Channels ---
+  # Channels + contracts.
   channel_api:
     path: ../../packages/channel_api
   channel_cctv:
@@ -27,23 +27,25 @@ dependencies:
   channel_retro_tv:
     path: ../../packages/channel_retro_tv
 
-  # --- Shared core ---
+  # Shared core.
   core_foundation:
     path: ../../packages/core_foundation
   core_playlist:
     path: ../../packages/core_playlist
-  core_cache:
-    path: ../../packages/core_cache
   core_effects:
     path: ../../packages/core_effects
   core_ui:
     path: ../../packages/core_ui
 
-  # --- Playback ---
-  video_player: ^2.9.0
+  # Offline manifest fixture (`manifestFixture()`) used as the Phase 1
+  # fallback when no cached wall exists yet.
+  testing_toolkit:
+    path: ../../packages/testing_toolkit
 
-  # The following adds the Cupertino Icons font to your application.
-  # Use with the CupertinoIcons class for iOS style icons.
+  # Playback + local persistence.
+  video_player: ^2.10.0
+  shared_preferences: ^2.5.3
+
   cupertino_icons: ^1.0.8
 
 dev_dependencies:
@@ -51,9 +53,10 @@ dev_dependencies:
     sdk: flutter
   flutter_lints: ^5.0.0
 
-# For information on the generic Dart part of this file, see the
-# following page: https://dart.dev/tools/pub/pubspec
-
-# The following section is specific to Flutter packages.
 flutter:
   uses-material-design: true
+  assets:
+    - assets/cam01.mp4
+    - assets/cam02.mp4
+    - assets/cam03.mp4
+    - assets/cam04.mp4
