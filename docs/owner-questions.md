@@ -26,3 +26,9 @@ OWNER QUESTION: Can I get 30 minutes with the actual TV box before the party to 
 
 - Owner: "We will be running tests in general. If you find a way to connect to the TV you are free to do it. Just let me know to ensure everything is ok."
 - Builder will propose discovery/ADB steps, list needs, coordinate a test window. No blind network steps; wait for owner go-ahead per step.
+
+## Q5 soak result (2026-10-29) — PARTY CERTIFIED
+
+- Owner ran the wall with TV Wi-Fi OFF: all 4 tiles kept playing, no freezes, no black tiles.
+- Certifies: offline-first boot, 4-decoder concurrency on Hisense CanvasTV S7 (Android 12, 1080p), no network dependency in Phase-1 path.
+- Release APK (party-signed, 46MB) installed via ADB; debug fallback build proven.
