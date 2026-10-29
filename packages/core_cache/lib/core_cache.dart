@@ -3,6 +3,10 @@ library;
 
 import 'package:core_playlist/core_playlist.dart';
 
+export 'src/cache_index.dart';
+export 'src/delivery_ports.dart';
+export 'file_cache_store.dart';
+
 /// Computes the lowercase hex SHA-256 digest of [bytes].
 ///
 /// Pure-Dart implementation so `core_cache` (and the TV boot path, which
@@ -26,7 +30,7 @@ final class DownloadedMedia {
     required List<int> bytes,
     required String sha256,
   }) : clipId = _requireNonEmpty(clipId, 'clipId'),
-       bytes = List<int>.unmodifiable(bytes),
+       bytes = _freezeBytes(bytes),
        sha256 = _requireSha256(sha256);
 
   /// Builds media from raw [bytes], computing the SHA-256 digest itself.
@@ -67,6 +71,13 @@ final class DownloadedMedia {
       throw ArgumentError.value(value, 'sha256', 'expected 64 hex characters');
     }
     return value;
+  }
+
+  static List<int> _freezeBytes(List<int> value) {
+    if (value.any((int byte) => byte < 0 || byte > 255)) {
+      throw ArgumentError.value(value, 'bytes', 'each byte must be in 0..255');
+    }
+    return List<int>.unmodifiable(value);
   }
 
   @override
@@ -131,6 +142,17 @@ abstract class CacheStore {
 
   /// Deletes expired entries; returns the number removed.
   Future<int> deleteExpired();
+}
+
+/// Downloads one clip from a signed [source] and returns its verified bytes.
+///
+/// Implementations must stage partial content (for example in a `.part`
+/// resource), check the declared byte count and SHA-256, and discard partial
+/// content on failure. The returned value contains data only; local storage
+/// is committed separately through [CacheStore].
+abstract interface class MediaDownloader {
+  /// Downloads and verifies [clip] from [source].
+  Future<DownloadedMedia> downloadAndVerify(ClipDescriptor clip, Uri source);
 }
 
 // --- Minimal SHA-256 (FIPS 180-4), pure Dart, no third-party dep. ---
