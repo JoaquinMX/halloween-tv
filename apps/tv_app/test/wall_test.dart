@@ -74,19 +74,12 @@ void main() {
 
     expect(find.text('20:00:00'), findsNWidgets(4));
     expect(find.text('REC'), findsNWidgets(4));
-<<<<<<< HEAD
-    expect(find.text('CAM-01 · clip-01'), findsOneWidget);
-    expect(find.text('CAM-04 · clip-04'), findsOneWidget);
-    // The wall sizes itself from the viewport (no scrollable overflow).
-    expect(find.byType(Scrollable), findsNothing);
-=======
     // Labels resolve through core_playlist: manifest clip labels when
-    // present, else the canonical slot defaults (owner Q3). manifestFixture
-    // carries no labels, so the defaults apply.
+    // present, else the canonical slot defaults (owner Q3).
     expect(find.text(cctvSlots[0].defaultLabel), findsOneWidget);
     expect(find.text(cctvSlots[3].defaultLabel), findsOneWidget);
-    expect(find.byType(GridView), findsOneWidget);
->>>>>>> orchestrator-cycle-2-part-p4-contracts-playlist-ports
+    // The wall sizes itself from the viewport (no scrollable overflow).
+    expect(find.byType(Scrollable), findsNothing);
 
     for (final String cameraId in <String>[
       'CAM-01',
