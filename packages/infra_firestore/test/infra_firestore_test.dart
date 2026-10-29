@@ -186,8 +186,17 @@ void main() {
       ((badClip['clips']! as List<Object?>).first! as Map<String, Object?>)
           .remove('sha256');
       final badOverlay = versionedFixture()..['overlay'] = 'not-a-map';
+      final badBackendClip = <String, Object?>{
+        'schemaVersion': 1,
+        'partyId': 'party-1',
+        'channelId': 'cctv',
+        'version': 1,
+        'cameraClips': <Object?>[
+          <Object?, Object?>{Object(): 'not a Firestore field name'},
+        ],
+      };
 
-      for (final doc in [missingClips, badClip, badOverlay]) {
+      for (final doc in [missingClips, badClip, badOverlay, badBackendClip]) {
         expect(
           () => manifestFromFirestore(doc),
           throwsA(isA<ManifestSchemaException>()),
@@ -200,8 +209,9 @@ void main() {
   group('StaticManifestSource', () {
     test('emits the fixture once per subscription, then closes', () async {
       final fixture = manifestFromFirestore(versionedFixture());
-      final ManifestSource<PlaybackManifest> source =
-          StaticManifestSource(fixture);
+      final ManifestSource<PlaybackManifest> source = StaticManifestSource(
+        fixture,
+      );
 
       final emitted = await source
           .watchCurrent(partyId: 'party-1', channelId: 'cctv')
@@ -247,6 +257,32 @@ void main() {
 
       expect(await first, [fixture]);
       expect(await second, [fixture]);
+    });
+  });
+
+  group('FirebaseTvIdentity', () {
+    test('creates anonymous party/device callable attribution', () {
+      final identity = FirebaseTvIdentity(
+        partyId: 'pilot',
+        deviceId: 'tv-pilot',
+      );
+
+      expect(identity.callablePayload(channelId: 'main'), {
+        'partyId': 'pilot',
+        'deviceId': 'tv-pilot',
+        'channelId': 'main',
+      });
+    });
+
+    test('rejects malformed or path-injecting provisioned ids', () {
+      expect(
+        () => FirebaseTvIdentity(partyId: '../pilot', deviceId: 'tv-pilot'),
+        throwsArgumentError,
+      );
+      expect(
+        () => FirebaseTvIdentity(partyId: 'pilot', deviceId: ' '),
+        throwsArgumentError,
+      );
     });
   });
 }

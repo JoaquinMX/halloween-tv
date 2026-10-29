@@ -10,3 +10,5 @@
 // `package:core_playlist/core_playlist.dart` for domain types directly.
 
 export 'src/manifest_source.dart';
+export 'src/firebase_manifest_source.dart';
+export 'src/firebase_tv_identity.dart';

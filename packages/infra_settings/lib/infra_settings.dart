@@ -7,3 +7,4 @@
 // code imports the port from `channel_api` directly.
 
 export 'src/settings_port.dart';
+export 'src/shared_preferences_settings.dart';
