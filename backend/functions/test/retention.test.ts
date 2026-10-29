@@ -28,7 +28,7 @@ test("TTL sweep expires due jobs, deletes expired media, and removes orphan obje
       cameraClips: [{ cameraId: "CAM-01", objectPath, sha256: createHash("sha256").update("expired").digest("hex"), sizeBytes: 7, durationMs: 2000, expiresAt: dueIso }],
     });
     const result = await sweepExpiredMedia(db, bucket, new Date());
-    assert.equal(result.expiredJobs, 1);
+    assert.ok(result.expiredJobs >= 1, `expected at least this party's due job to expire (got ${result.expiredJobs}); suite shares one emulator across files`);
     assert.equal((await db.doc(`parties/${partyId}/jobs/${jobId}`).get()).data()?.state, "expired");
     assert.equal((await bucket.file(objectPath).exists())[0], false);
     assert.equal((await bucket.file(orphanPath).exists())[0], false);

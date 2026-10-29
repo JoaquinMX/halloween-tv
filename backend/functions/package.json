@@ -6,7 +6,7 @@
   "engines": { "node": "22" },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "tsx --test test/*.test.ts",
+    "test": "tsx --test --test-concurrency=1 test/*.test.ts",
     "test:emulator": "firebase emulators:exec --project demo-halloween-tv --only firestore,storage \"npm test\"",
     "seed:pilot": "tsx tools/seed_pilot.ts"
   },
