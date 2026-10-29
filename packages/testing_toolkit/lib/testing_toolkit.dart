@@ -132,6 +132,11 @@ String _sha(String seed) {
 }
 
 /// Returns a valid 4-clip CCTV manifest fixture.
+///
+/// TEST-ONLY: digests here are deterministic fabricated placeholders, not
+/// real asset hashes. Production boot must NOT use this — it loads the
+/// bundled `assets/fixture_manifest.json` (emitted from real asset bytes)
+/// via `rootBundle` + `parseManifest` instead.
 PlaybackManifest manifestFixture({
   String partyId = 'party-1',
   String channelId = 'cctv',

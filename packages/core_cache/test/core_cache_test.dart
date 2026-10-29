@@ -137,4 +137,94 @@ void main() {
     final CacheStore store = _MemStore();
     expect(store, isA<CacheStore>());
   });
+
+  group('sha256Hex', () {
+    test('matches FIPS vectors (empty, abc)', () {
+      expect(
+        sha256Hex(<int>[]),
+        'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+      );
+      expect(
+        sha256Hex('abc'.codeUnits),
+        'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+      );
+    });
+
+    test('matches 0x01,0x02,0x03 against the platform digest', () {
+      expect(
+        sha256Hex(<int>[1, 2, 3]),
+        '039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81',
+      );
+    });
+  });
+
+  group('DownloadedMedia.fromBytes', () {
+    test('computes its own digest (cannot carry a mismatched sha)', () {
+      final media = DownloadedMedia.fromBytes(
+        clipId: 'c1',
+        bytes: [1, 2, 3],
+      );
+      expect(
+        media.sha256,
+        '039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81',
+      );
+      expect(media.byteLength, 3);
+      expect(() => media.bytes.add(4), throwsUnsupportedError);
+    });
+
+    test('matchesClip accepts exact bytes, rejects tampered bytes', () {
+      final bytes = <int>[10, 20, 30, 40];
+      final media = DownloadedMedia.fromBytes(clipId: 'c1', bytes: bytes);
+      final good = ClipDescriptor(
+        id: 'c1',
+        cameraId: 'CAM-01',
+        storageObjectId: 'assets/cam01.mp4',
+        sha256: media.sha256,
+        sizeBytes: bytes.length,
+        duration: const Duration(seconds: 2),
+        mimeType: 'video/mp4',
+      );
+      expect(media.matchesClip(good), isTrue);
+
+      final tampered = List<int>.of(bytes)..[0] ^= 0xff;
+      final tamperedMedia = DownloadedMedia.fromBytes(
+        clipId: 'c1',
+        bytes: tampered,
+      );
+      // Same length, but the self-computed digest no longer matches the
+      // manifest descriptor: the tamper is detected, not carried through.
+      expect(tamperedMedia.matchesClip(good), isFalse);
+
+      final wrongSize = ClipDescriptor(
+        id: 'c1',
+        cameraId: 'CAM-01',
+        storageObjectId: 'assets/cam01.mp4',
+        sha256: media.sha256,
+        sizeBytes: bytes.length + 1,
+        duration: const Duration(seconds: 2),
+        mimeType: 'video/mp4',
+      );
+      expect(media.matchesClip(wrongSize), isFalse);
+    });
+
+    test('committed fromBytes entry resolves through the port', () async {
+      final store = _MemStore();
+      final media = DownloadedMedia.fromBytes(
+        clipId: 'c9',
+        bytes: [7, 7, 7],
+      );
+      final entry = await store.commit(media);
+      expect(entry.sha256, media.sha256);
+      final descriptor = ClipDescriptor(
+        id: 'c9',
+        cameraId: 'CAM-01',
+        storageObjectId: 'obj-c9',
+        sha256: media.sha256,
+        sizeBytes: 3,
+        duration: const Duration(seconds: 5),
+        mimeType: 'video/mp4',
+      );
+      expect(await store.findVerified(descriptor), same(entry));
+    });
+  });
 }

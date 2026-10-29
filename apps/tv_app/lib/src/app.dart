@@ -101,6 +101,7 @@ class _WallGateState extends State<WallGate> {
         return WallScreen(
           plugin: result.plugin!,
           manifest: result.manifest!,
+          partyId: widget.boot.partyId,
           clock: widget.clock,
           tileControllerFactory: widget.tileControllerFactory,
           onRetryCached: widget.boot.readCached,
