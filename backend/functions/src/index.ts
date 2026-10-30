@@ -1,5 +1,6 @@
 import { getFunctions } from "firebase-admin/functions";
 import { HttpsError, onCall } from "firebase-functions/v2/https";
+import { onObjectFinalized } from "firebase-functions/v2/storage";
 import { onTaskDispatched } from "firebase-functions/v2/tasks";
 import { onSchedule } from "firebase-functions/v2/scheduler";
 import { setGlobalOptions } from "firebase-functions/v2/options";
@@ -101,6 +102,35 @@ export const listPartyDevices = onCall({ maxInstances: 2 }, (request) =>
 /** Anonymous phone callable; self-registers a guest device for the active channel (PIN-gated when configured). */
 export const joinParty = onCall({ maxInstances: 10 }, (request) =>
   callable(() => getServices().joinParty(request.data)));
+
+/** Guest photo upload with affirmative server-side consent (no login). */
+export const requestGuestUpload = onCall({ maxInstances: 10 }, (request) =>
+  callable(() => getServices().requestGuestUpload(request.data)));
+
+/** Guest upload finalization: verifies actual image bytes before eligibility. */
+export const completeGuestUpload = onCall({ maxInstances: 10 }, (request) =>
+  callable(() => getServices().completeGuestUpload(request.data)));
+
+/** Guest media status for the owning registered device. */
+export const getGuestMediaStatus = onCall({ maxInstances: 10 }, (request) =>
+  callable(() => getServices().getGuestMediaStatus(request.data)));
+
+/** Idempotent consent withdrawal: revokes eligibility and purges cloud copies. */
+export const withdrawGuestMedia = onCall({ maxInstances: 10 }, (request) =>
+  callable(() => getServices().withdrawGuestMedia(request.data)));
+
+/** Object-finalization cleanup: a PUT after withdrawal never restores eligibility. */
+function ingestBucket(): string {
+  const bucket = process.env.STORAGE_BUCKET ?? process.env.FIREBASE_STORAGE_BUCKET;
+  if (bucket) return bucket;
+  // Require-time safe fallback for discovery/local runs without bucket env.
+  // Cloud predeploy gates refuse deploys without an explicit bucket, and the
+  // emulator run sets STORAGE_BUCKET explicitly, so this never targets cloud.
+  return "demo-halloween-tv.appspot.com";
+}
+export const onGuestIngestFinalized = onObjectFinalized({ bucket: ingestBucket() }, async (event) => {
+  await getServices().handleGuestIngestFinalized(event.data.name);
+});
 
 /** Anonymous TV callable; ACK and purge are idempotent by device/channel/version. */
 export const acknowledgeDelivery = onCall({ maxInstances: 10 }, (request) =>

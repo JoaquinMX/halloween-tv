@@ -1,7 +1,17 @@
 rules_version = '2';
 service firebase.storage {
-  match /b/{bucket}/o/{object=**} {
+  match /b/{bucket}/o {
+    // Guest ingest uploads use short-lived signed PUT capabilities minted
+    // after server-side consent; the bytes are verified by the backend before
+    // any eligibility is recorded. Direct client reads, writes, listing, and
+    // deletes stay denied: signed URLs bypass rules, validation lives in the
+    // callable backend, and withdrawal cleanup deletes through the Admin SDK.
+    match /parties/{partyId}/guests/{deviceId}/ingest/{submissionId}/{fileName} {
+      allow read, write: if false;
+    }
     // Media is served only through short-lived URLs minted after callable checks.
-    allow read, write: if false;
+    match /{object=**} {
+      allow read, write: if false;
+    }
   }
 }

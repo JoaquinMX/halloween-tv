@@ -220,6 +220,21 @@
     "getCurrentManifest",
     "getDeliveryUrls",
     "acknowledgeDelivery",
-    "sweepExpiredMedia"
-  ]
+    "sweepExpiredMedia",
+    "requestGuestUpload",
+    "completeGuestUpload",
+    "getGuestMediaStatus",
+    "withdrawGuestMedia"
+  ],
+  "guestConsent": {
+    "textVersion": "v1",
+    "purpose": "guest_cameo",
+    "uploadTtlMs": 900000,
+    "inputTtlMs": 86400000,
+    "maxImageBytes": 10485760,
+    "contentTypes": ["image/jpeg", "image/png"],
+    "objectPrefix": "parties/{partyId}/guests/{deviceId}/ingest/{submissionId}/photo.jpg",
+    "providerCamera": "CAM-01",
+    "fixtureCameras": ["CAM-02", "CAM-03", "CAM-04"]
+  }
 }

@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import test from "node:test";
-import { AlibabaSubmissionError, AlibabaVideoGenerationPort } from "../src/providers/alibaba";
+import { AlibabaSubmissionError, AlibabaVideoGenerationPort, buildAlibabaSubmitBody } from "../src/providers/alibaba";
 import { buildCheapDemoRequest } from "../src/video_generation_port";
 
 const fixture = JSON.parse(readFileSync(resolve("test/fixtures/alibaba_tasks.json"), "utf8")) as Record<string, unknown>;
@@ -81,4 +82,34 @@ test("Alibaba adapter refuses a provider endpoint outside Singapore", () => {
     baseUrl: "https://workspace.us-east-1.maas.aliyuncs.com",
     fetchImpl: fetch,
   }), /Singapore region/);
+});
+
+test("guest image reference serializes offline with cheap_demo limits unchanged", async () => {
+  // Zero provider network requests: the pinned fixture is pure serialization.
+  const fixture = JSON.parse(readFileSync(resolve("test/fixtures/alibaba_guest_request.json"), "utf8")) as {
+    request: Record<string, unknown>;
+    body: Record<string, unknown>;
+  };
+  const photoSha = createHash("sha256").update(readFileSync(resolve("test/fixtures/guest_photo.jpg"))).digest("hex");
+  const request = buildCheapDemoRequest("job-guest-1", "idem-guest-1", "CAM-01", {
+    objectPath: "parties/pilot/guests/p-guest001/ingest/gsub-guest001/photo.jpg",
+    sha256: photoSha,
+    consentRevision: "v1:2026-10-30T00:00:00.000Z",
+  });
+  assert.equal(request.modelId, "wan3.0-video");
+  assert.equal(request.resolution, "480P");
+  assert.equal(request.secondsOut, 2);
+  assert.equal(request.audio, false);
+  assert.equal(request.outputs, 1);
+  assert.equal(request.autoUpscale, false);
+  const body = buildAlibabaSubmitBody(request);
+  assert.deepEqual(body, fixture.body);
+  assert.equal((body.input as Record<string, unknown>).prompt, request.prompt);
+  assert.deepEqual((body.input as Record<string, unknown>).reference_image, {
+    storage_ref: "parties/pilot/guests/p-guest001/ingest/gsub-guest001/photo.jpg",
+    sha256: photoSha,
+  });
+  assert.deepEqual(body.parameters, { resolution: "480P", ratio: "16:9", duration: 2, audio: false, watermark: false });
+  const textOnly = buildAlibabaSubmitBody(buildCheapDemoRequest("job-1", "idem-1", "CAM-02"));
+  assert.ok(!("reference_image" in (textOnly.input as Record<string, unknown>)));
 });

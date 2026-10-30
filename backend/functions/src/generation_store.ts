@@ -3,6 +3,7 @@ import { FieldValue, Firestore, Timestamp } from "firebase-admin/firestore";
 import { assertRegisteredPartyDevice } from "./auth";
 import { BackendError, parseRequestGeneration, RequestGenerationInput, validateId } from "./contracts";
 import { CHEAP_DEMO_PRESET, MEDIA_RETENTION_MS, REQUIRED_CAMERA_IDS } from "./config";
+import { assertGuestEligible, GuestMediaDoc } from "./guest_media";
 import { usageIntentDocument, usageLedgerPath } from "./usage";
 import { CameraId, ProviderResult, ProviderTaskStatus, validateCheapDemoControls } from "./video_generation_port";
 
@@ -75,12 +76,20 @@ export class FirestoreGenerationStore {
     const input = parseRequestGeneration(value);
     const registered = await assertRegisteredPartyDevice(this.db, input);
     if (registered.channel.status !== "active") throw new BackendError("FORBIDDEN", "Channel is not active for this party.");
+    // Consent-bound request gate: the guest photo must be eligible right now.
+    // The worker and the publication transaction recheck before submitting and
+    // before publishing, so a withdrawal races fail closed.
+    let guest: GuestMediaDoc | undefined;
+    if (input.guestMediaId) {
+      guest = await assertGuestEligible(this.db, input, input.guestMediaId, this.now().getTime());
+    }
     const ref = jobRef(this.db, input.partyId, input.jobId);
     const result = await this.db.runTransaction(async (transaction) => {
       const existing = await transaction.get(ref);
       if (existing.exists) {
         const old = existing.data()!;
-        if (old.idempotencyKey !== input.idempotencyKey || old.deviceId !== input.deviceId || old.channelId !== input.channelId) {
+        if (old.idempotencyKey !== input.idempotencyKey || old.deviceId !== input.deviceId || old.channelId !== input.channelId ||
+            (old.guestMediaId ?? undefined) !== (input.guestMediaId ?? undefined)) {
           throw new BackendError("FORBIDDEN", "jobId is already bound to a different request.");
         }
         return {
@@ -107,6 +116,30 @@ export class FirestoreGenerationStore {
         consumedAttempt: false,
         submissionState: "not_started",
       }]));
+      // Re-verify consent inside the creation transaction so a withdrawal that
+      // lands between the pre-check and the job write fails the request.
+      let guestBinding: Record<string, unknown> | undefined;
+      if (input.guestMediaId && guest) {
+        const guestSnap = await transaction.get(
+          this.db.doc(`parties/${input.partyId}/guestMedia/${input.guestMediaId}`),
+        );
+        const current = guestSnap.exists ? (guestSnap.data() as GuestMediaDoc) : undefined;
+        if (!current || current.status !== "eligible" ||
+            current.sourceHash !== guest.sourceHash ||
+            current.consentRevision !== guest.consentRevision ||
+            current.deviceId !== input.deviceId || current.channelId !== input.channelId) {
+          throw new BackendError("FORBIDDEN", "Guest consent is no longer eligible for generation.");
+        }
+        guestBinding = {
+          submissionId: input.guestMediaId,
+          objectPath: guest.objectPath,
+          sourceHash: guest.sourceHash,
+          sourceGeneration: guest.sourceGeneration ?? null,
+          consentRevision: guest.consentRevision,
+          deviceId: guest.deviceId,
+          channelId: guest.channelId,
+        };
+      }
       transaction.create(ref, {
         jobId: input.jobId,
         partyId: registered.partyId,
@@ -121,6 +154,7 @@ export class FirestoreGenerationStore {
         idempotencyKey: input.idempotencyKey,
         presetId: "cheap_demo",
         modelId: "wan3.0-video",
+        ...(guestBinding ? { guestMedia: guestBinding, guestMediaId: input.guestMediaId } : {}),
         costEstimate: { modelId: CHEAP_DEMO_PRESET.modelId, presetId: CHEAP_DEMO_PRESET.presetId, secondsOut: CHEAP_DEMO_PRESET.secondsOut },
         expiresAt: Timestamp.fromDate(new Date(this.now().getTime() + MEDIA_RETENTION_MS)),
         cameraAttempts,
@@ -372,6 +406,51 @@ export class FirestoreGenerationStore {
         cameraAttempts,
         timestamp: FieldValue.serverTimestamp(),
       });
+    });
+  }
+
+  /** Fixture slot outcome: no provider task, truthful fixture provenance. */
+  async recordFixtureResult(
+    partyId: string,
+    jobId: string,
+    cameraId: CameraId,
+    staged: Record<string, unknown>,
+  ): Promise<void> {
+    const ref = jobRef(this.db, partyId, jobId);
+    await this.db.runTransaction(async (transaction) => {
+      const snapshot = await transaction.get(ref);
+      if (!snapshot.exists) throw new BackendError("NOT_FOUND", "Generation job does not exist.");
+      const job = snapshot.data()!;
+      transaction.update(ref, {
+        stagedOutputs: { ...(job.stagedOutputs ?? {}), [cameraId]: staged },
+        cameraResults: {
+          ...(job.cameraResults ?? {}),
+          [cameraId]: { secondsOut: 2, secondsIn: 0, creditsCharged: null, providerState: "FIXTURE" },
+        },
+        timestamp: FieldValue.serverTimestamp(),
+      });
+    });
+  }
+
+  /** Consent withdrawal fails the bound job closed and releases the party budget. */
+  async failForWithdrawnConsent(partyId: string, jobId: string): Promise<void> {
+    const ref = jobRef(this.db, partyId, jobId);
+    const budget = budgetRef(this.db, partyId);
+    await this.db.runTransaction(async (transaction) => {
+      const [snapshot, budgetSnapshot] = await Promise.all([transaction.get(ref), transaction.get(budget)]);
+      if (!snapshot.exists) return;
+      transaction.update(ref, {
+        state: "failed",
+        status: "failed",
+        errorCode: "FORBIDDEN",
+        reconciliationReason: "GUEST_CONSENT_WITHDRAWN",
+        failedAt: FieldValue.serverTimestamp(),
+        timestamp: FieldValue.serverTimestamp(),
+        workerLeaseUntilMs: 0,
+      });
+      if (budgetSnapshot.exists && budgetSnapshot.data()?.activeJobId === jobId) {
+        transaction.update(budget, { activeJobId: null, state: "idle", updatedAt: FieldValue.serverTimestamp() });
+      }
     });
   }
 

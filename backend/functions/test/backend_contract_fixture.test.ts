@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import test from "node:test";
 import { DeliveryManifest, canonicalManifestHash, parseAck, parseCurrentManifestInput, parseRequestGeneration, validateCanonicalClips } from "../src/contracts";
+import { GUEST_CONSENT_PURPOSE, GUEST_CONSENT_TEXT_VERSION } from "../src/config";
 import { createRuntimeServices } from "../src/runtime";
 import { FakeVideoGenerationPort } from "../src/providers/fake";
 import { HAS_FIRESTORE_EMULATOR, clearParty, createEmulatorContext, disposeEmulatorContext, seedParty } from "./support/emulators";
@@ -14,6 +15,18 @@ interface ContractFixture {
   getCurrentManifest: { request: unknown; response: unknown };
   deliveryUrls: { request: unknown; response: { manifestHash: string; manifestVersion: number; clips: Array<Record<string, unknown>> } };
   acknowledgeDelivery: { request: unknown; response: { ackId: string; manifestVersion: number; purged: boolean } };
+  services: string[];
+  guestConsent: {
+    textVersion: string;
+    purpose: string;
+    uploadTtlMs: number;
+    inputTtlMs: number;
+    maxImageBytes: number;
+    contentTypes: string[];
+    objectPrefix: string;
+    providerCamera: string;
+    fixtureCameras: string[];
+  };
 }
 
 async function readFixture(): Promise<ContractFixture> {
@@ -37,6 +50,16 @@ test("shared v1 fixture parses and hashes through backend contract functions", a
     "47aa92e83cf6a4e3cf5ad02a1421357fc29f4fb236f415553e3f6bc8594b1541",
     "ackId is the deterministic device/channel/version idempotency key pinned by the fixture",
   );
+  assert.ok(fixture.services.includes("requestGuestUpload"));
+  assert.ok(fixture.services.includes("completeGuestUpload"));
+  assert.ok(fixture.services.includes("getGuestMediaStatus"));
+  assert.ok(fixture.services.includes("withdrawGuestMedia"));
+  assert.equal(fixture.guestConsent.textVersion, GUEST_CONSENT_TEXT_VERSION);
+  assert.equal(fixture.guestConsent.purpose, GUEST_CONSENT_PURPOSE);
+  assert.equal(fixture.guestConsent.uploadTtlMs, 15 * 60 * 1000);
+  assert.equal(fixture.guestConsent.inputTtlMs, 24 * 60 * 60 * 1000);
+  assert.equal(fixture.guestConsent.providerCamera, "CAM-01");
+  assert.deepEqual(fixture.guestConsent.fixtureCameras, ["CAM-02", "CAM-03", "CAM-04"]);
 });
 
 test("shared v1 fixture runs through callable service composition", { skip: !HAS_FIRESTORE_EMULATOR }, async () => {

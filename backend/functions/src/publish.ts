@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import { FieldValue } from "firebase-admin/firestore";
 import { BackendError, CanonicalClip, DeliveryManifest, validateCanonicalClips } from "./contracts";
-import { SCHEMA_VERSION, REQUIRED_CAMERA_IDS } from "./config";
+import { GUEST_PROVIDER_CAMERA_ID, SCHEMA_VERSION, REQUIRED_CAMERA_IDS } from "./config";
 import { FirestoreGenerationStore } from "./generation_store";
+import { GuestMediaDoc } from "./guest_media";
 import { usageLedgerPath } from "./usage";
 
 function isClip(value: unknown): value is CanonicalClip {
@@ -15,6 +16,35 @@ function isClip(value: unknown): value is CanonicalClip {
     typeof (value as CanonicalClip).expiresAt === "string";
 }
 
+export function guestMediaOf(job: FirebaseFirestore.DocumentData): {
+  submissionId: string;
+  sourceHash: string;
+  consentRevision: string;
+} | undefined {
+  const guest = job.guestMedia as Record<string, unknown> | undefined;
+  if (!guest || typeof guest.submissionId !== "string" || typeof guest.sourceHash !== "string" ||
+      typeof guest.consentRevision !== "string") return undefined;
+  return { submissionId: guest.submissionId, sourceHash: guest.sourceHash, consentRevision: guest.consentRevision };
+}
+
+function assertGuestBinding(
+  job: FirebaseFirestore.DocumentData,
+  guest: GuestMediaDoc,
+  nowMs: number,
+): void {
+  const binding = guestMediaOf(job)!;
+  if (guest.status !== "eligible") throw new BackendError("FORBIDDEN", "Guest consent is no longer eligible for publication.");
+  if (guest.sourceHash !== binding.sourceHash || guest.consentRevision !== binding.consentRevision) {
+    throw new BackendError("FORBIDDEN", "Guest media changed while the job was running.");
+  }
+  const expiry = guest.expiresAt instanceof Date ? guest.expiresAt.getTime() : Date.parse(String(
+    guest.expiresAt && typeof guest.expiresAt === "object" && "toDate" in guest.expiresAt
+      ? (guest.expiresAt as { toDate: () => Date }).toDate().toISOString()
+      : guest.expiresAt,
+  ));
+  if (!Number.isFinite(expiry) || expiry <= nowMs) throw new BackendError("FORBIDDEN", "Guest consent window has expired.");
+}
+
 /** Publishes the current manifest in one Firestore transaction after all four objects exist. */
 export async function publishManifest(
   store: FirestoreGenerationStore,
@@ -25,6 +55,12 @@ export async function publishManifest(
   const job = await store.getJob(partyId, jobId);
   if (job.idempotencyKey !== idempotencyKey) throw new BackendError("FORBIDDEN", "Publish idempotency key does not match the job.");
   if (job.publishedManifest) return job.publishedManifest as DeliveryManifest;
+  const guest = guestMediaOf(job);
+  if (guest) {
+    const snapshot = await store.db.doc(`parties/${partyId}/guestMedia/${guest.submissionId}`).get();
+    if (!snapshot.exists) throw new BackendError("FORBIDDEN", "Guest consent is no longer eligible for publication.");
+    assertGuestBinding(job, snapshot.data() as GuestMediaDoc, Date.now());
+  }
   const staged = job.stagedOutputs && typeof job.stagedOutputs === "object"
     ? job.stagedOutputs as Record<string, unknown>
     : {};
@@ -47,7 +83,7 @@ export async function publishManifest(
       throw new BackendError("MANIFEST_MISMATCH", "Staged camera content does not match its recorded hash and size.");
     }
     const taskId = providerTasks[cameraId]?.taskId;
-    if (typeof taskId !== "string") throw new BackendError("MANIFEST_MISMATCH", "Every staged camera clip needs a persisted provider task ID.");
+    const isFixtureSlot = guest !== undefined && cameraId !== GUEST_PROVIDER_CAMERA_ID;
     const ledgerInput = {
       partyId,
       deviceId: String(job.deviceId),
@@ -58,6 +94,17 @@ export async function publishManifest(
       cameraId,
     };
     const ledger = await store.db.doc(usageLedgerPath(ledgerInput)).get();
+    if (isFixtureSlot) {
+      // Locally prepared fixture slot: truthful provenance, no provider task
+      // ID or charge is ever fabricated for these cameras.
+      if (!ledger.exists || ledger.data()?.provider_task_id !== null || ledger.data()?.fixture !== true ||
+          ledger.data()?.success !== true) {
+        throw new BackendError("MANIFEST_MISMATCH", "Usage ledger is incomplete for a staged fixture clip.");
+      }
+      clips.push(clip);
+      continue;
+    }
+    if (typeof taskId !== "string") throw new BackendError("MANIFEST_MISMATCH", "Every staged camera clip needs a persisted provider task ID.");
     if (!ledger.exists || ledger.data()?.provider_task_id !== taskId || ledger.data()?.success !== true) {
       throw new BackendError("MANIFEST_MISMATCH", "Usage ledger is incomplete for a staged provider result.");
     }
@@ -83,10 +130,12 @@ export async function publishManifest(
   const ref = store.jobDocumentRef(partyId, jobId);
   const budgetRef = store.db.doc(`parties/${partyId}/generationBudget/active`);
   return store.db.runTransaction(async (transaction) => {
-    const [jobSnapshot, currentSnapshot, budgetSnapshot] = await Promise.all([
+    const guestRef = guest ? store.db.doc(`parties/${partyId}/guestMedia/${guest.submissionId}`) : undefined;
+    const [jobSnapshot, currentSnapshot, budgetSnapshot, guestSnapshot] = await Promise.all([
       transaction.get(ref),
       transaction.get(currentRef),
       transaction.get(budgetRef),
+      ...(guestRef ? [transaction.get(guestRef)] : []),
     ]);
     const currentJob = jobSnapshot.data();
     if (!currentJob || currentJob.idempotencyKey !== idempotencyKey) {
@@ -94,6 +143,14 @@ export async function publishManifest(
     }
     if (currentJob.publishedManifest) return currentJob.publishedManifest as DeliveryManifest;
     if (currentJob.state !== "running") throw new BackendError("MANIFEST_MISMATCH", "Only a running job can publish a manifest.");
+    if (guest) {
+      // Transactional consent gate: a withdrawal racing the worker fails the
+      // publication instead of publishing a revoked cameo.
+      if (!guestSnapshot || !guestSnapshot.exists) {
+        throw new BackendError("FORBIDDEN", "Guest consent is no longer eligible for publication.");
+      }
+      assertGuestBinding(currentJob, guestSnapshot.data() as GuestMediaDoc, Date.now());
+    }
     const currentVersion = currentSnapshot.exists ? Number(currentSnapshot.data()?.version ?? 0) : 0;
     if (currentVersion !== sourceVersion || plannedVersion <= currentVersion) {
       throw new BackendError("MANIFEST_MISMATCH", "Current manifest changed while this job was running.");

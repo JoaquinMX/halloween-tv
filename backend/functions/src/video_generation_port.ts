@@ -18,6 +18,14 @@ export interface VideoGenerationRequest {
   audio: typeof CHEAP_DEMO_PRESET.audio;
   outputs: typeof CHEAP_DEMO_PRESET.outputs;
   autoUpscale: typeof CHEAP_DEMO_PRESET.autoUpscale;
+  /** Validated consent-bound guest photo binding. Never changes cheap_demo controls. */
+  referenceImage?: GuestImageReference;
+}
+
+export interface GuestImageReference {
+  objectPath: string;
+  sha256: string;
+  consentRevision: string;
 }
 
 export interface ProviderSubmission {
@@ -50,7 +58,7 @@ const CONTROL_FIELDS = [
 const ALLOWED_GENERATION_FIELDS = new Set([
   "partyId", "deviceId", "channelId", "jobId", "idempotencyKey", "presetId", "modelId", "region",
   "resolution", "secondsOut", "aspectRatio", "audio", "outputs", "autoUpscale", "prompt", "cameraId",
-  "promptExtend", "input",
+  "promptExtend", "input", "guestMediaId", "referenceImage",
 ]);
 
 /** Rejects unsupported generation controls before a provider request can be formed. */
@@ -78,14 +86,38 @@ export function buildCheapDemoRequest(
   jobId: string,
   idempotencyKey: string,
   cameraId: CameraId,
+  referenceImage?: GuestImageReference,
 ): VideoGenerationRequest {
-  return {
+  const request: VideoGenerationRequest = {
     jobId,
     idempotencyKey: `${idempotencyKey}:${cameraId}`,
     cameraId,
     prompt: `A two-second, silent 16:9 Halloween security-camera scene for ${cameraId}.`,
     ...CHEAP_DEMO_PRESET,
   };
+  if (referenceImage !== undefined) {
+    validateGuestImageReference(referenceImage);
+    request.referenceImage = { ...referenceImage };
+  }
+  return request;
+}
+
+/** Validated image binding: server-side object path, bytes hash, and consent revision. */
+export function validateGuestImageReference(value: unknown): asserts value is GuestImageReference {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new BackendError("INVALID_ARGUMENT", "Guest image reference is invalid.");
+  }
+  const reference = value as Record<string, unknown>;
+  if (typeof reference.objectPath !== "string" ||
+      !/^parties\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/guests\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/ingest\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/photo\.jpg$/.test(reference.objectPath)) {
+    throw new BackendError("INVALID_ARGUMENT", "Guest image object path is invalid.");
+  }
+  if (typeof reference.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(reference.sha256)) {
+    throw new BackendError("INVALID_ARGUMENT", "Guest image hash is invalid.");
+  }
+  if (typeof reference.consentRevision !== "string" || !reference.consentRevision) {
+    throw new BackendError("INVALID_ARGUMENT", "Guest image consent revision is required.");
+  }
 }
 
 export function validateVideoGenerationRequest(value: unknown): asserts value is VideoGenerationRequest {
@@ -102,4 +134,5 @@ export function validateVideoGenerationRequest(value: unknown): asserts value is
       throw new BackendError("INVALID_ARGUMENT", `Unsupported ${field}; only the cheap_demo preset is allowed.`);
     }
   }
+  if (request.referenceImage !== undefined) validateGuestImageReference(request.referenceImage);
 }

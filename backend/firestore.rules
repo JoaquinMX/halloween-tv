@@ -21,6 +21,17 @@ service cloud.firestore {
       allow list, create, update, delete: if false;
     }
 
+    // Guest consent and media records are callable-only: consent is recorded
+    // server-side before any upload capability is issued, and status,
+    // eligibility, and withdrawal all pass through registered-device checks
+    // in the Functions backend. No direct client reads, writes, or listing.
+    match /parties/{partyId}/guestMedia/{mediaId} {
+      allow read, write: if false;
+    }
+    match /parties/{partyId}/guests/{deviceId}/ingest/{submissionId} {
+      allow read, write: if false;
+    }
+
     // Callable functions use the Admin SDK. Clients cannot read or mutate jobs,
     // manifests, channels, acknowledgements, or cost logs directly.
     match /{document=**} {

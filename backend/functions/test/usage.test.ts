@@ -75,3 +75,40 @@ test("usage reconciliation reports missing rows, task ID mismatches, and uncerta
     await disposeEmulatorContext(app);
   }
 });
+
+test("fixture slots in a guest-bound job reconcile without provider task IDs", {
+  skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
+}, async () => {
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  const jobId = "job-guest-usage";
+  const { recordUsageOutcome } = await import("../src/usage");
+  try {
+    await db.doc(`parties/${partyId}/jobs/${jobId}`).set({
+      partyId,
+      jobId,
+      deviceId: "tv-usage",
+      channelId: "main",
+      manifestVersion: 3,
+      idempotencyKey: "idem-guest-usage",
+      presetId: "cheap_demo",
+      state: "ready",
+      providerTasks: { "CAM-01": { taskId: "CAM-01__abc123" } },
+      cameraAttempts: {},
+      guestMedia: { submissionId: "gsub-1", sourceHash: "a".repeat(64), consentRevision: "v1:t" },
+    });
+    const base = { partyId, deviceId: "tv-usage", channelId: "main", manifestVersion: 3, idempotencyKey: "idem-guest-usage", jobId };
+    await recordUsageOutcome(db, { ...base, cameraId: "CAM-01" }, {
+      success: true, secondsOut: 2, secondsIn: 0, creditsCharged: 0, providerTaskId: "CAM-01__abc123",
+    });
+    for (const cameraId of ["CAM-02", "CAM-03", "CAM-04"] as const) {
+      await recordUsageOutcome(db, { ...base, cameraId }, {
+        success: true, secondsOut: 2, secondsIn: 0, creditsCharged: null, providerTaskId: null, fixture: true,
+      });
+    }
+    assert.deepEqual(await reconcileUsage(db), []);
+  } finally {
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+  }
+});
