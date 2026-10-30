@@ -49,6 +49,8 @@
 	</dict>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Select a photo to submit with your explicit consent for Halloween transformation.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Scan the party join QR code shown by the organizer.</string>
 	<key>UILaunchStoryboardName</key>

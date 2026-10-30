@@ -27,11 +27,13 @@ final class NowPlayingScreen extends StatelessWidget {
     required this.state,
     required this.onRefresh,
     required this.onLeave,
+    this.onGuestPhoto,
   });
 
   final GuestSessionState state;
   final Future<void> Function() onRefresh;
   final Future<void> Function() onLeave;
+  final VoidCallback? onGuestPhoto;
 
   static const Key refreshKey = Key('now-playing-refresh');
   static const Key retryKey = Key('now-playing-retry');
@@ -125,6 +127,14 @@ final class NowPlayingScreen extends StatelessWidget {
                         },
                         child: const Text(
                           'Retry',
+                          style: TextStyle(fontSize: 20),
+                        ),
+                      ),
+                    if (onGuestPhoto != null)
+                      OutlinedButton(
+                        onPressed: onGuestPhoto,
+                        child: const Text(
+                          'Submit a guest photo',
                           style: TextStyle(fontSize: 20),
                         ),
                       ),

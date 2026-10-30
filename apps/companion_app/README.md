@@ -78,11 +78,44 @@ default: `signingConfig = signingConfigs.getByName("debug")` in
 Before any distribution build, follow `docs/RELEASE-SIGNING.md` (party
 keystore, env-gated passwords). No signing changes in this pass.
 
+## Guest photo submission (consent-gated, backend-pending)
+
+Optional flow behind "Submit a guest photo" on the now-playing screen:
+
+- The guest picks a photo, checks an explicit affirmative-consent box, then
+  confirms a second "Review and upload" dialog. No capability call exists
+  before both gates pass (`GuestMediaSession.submit` requires
+  `consent && confirmed`; `GuestMediaClient.requestUpload` refuses
+  `affirmativeConsent: false` before any network).
+- The client then requests an upload capability (`requestGuestUpload`),
+  PUTs the bytes, and confirms (`completeGuestUpload`). Withdrawal
+  (`withdrawGuestMedia`) records withdrawal and clears the local receipt
+  once deletion is confirmed; a saved receipt is re-checked on next launch
+  (`recover`). Denied/failed uploads keep the photo local and retryable.
+- Privacy copy (shown in-app): the photo is transformed for Halloween, may
+  appear on the party TV, is processed by the media provider and temporarily
+  retained in cloud storage; a copy already downloaded to the TV may not be
+  removable while that TV is offline.
+
+Backend status: the guest-media callables above are NOT implemented
+server-side yet (`backend/functions/src/index.ts` has no guest handlers),
+so consented attempts are currently refused at the callable boundary with
+no bytes uploaded and no receipt stored. The emulator contract test pins
+this refusal until the backend ships; replace its refusal assertions with
+the positive completion flow at that point.
+
 ## Getting Started
 
 - `flutter pub get`
 - `flutter analyze`
-- `flutter test`
+- `flutter test --concurrency=1`
+- Emulator contract (needs local Firebase emulators from `backend/`):
+  `STORAGE_BUCKET=demo-halloween-tv.appspot.com firebase --config
+  firebase.json emulators:start --only firestore,functions,storage
+  --project demo-halloween-tv`, then
+  `flutter test --concurrency=1
+  integration_test/guest_photo_emulator_test.dart`.
+  Skips when the emulators are not reachable.
 
 Display name is `Halloween TV - Guests` (owner decision 2026-10-30) —
 deliberately distinct from the TV app (`Halloween TV`).
