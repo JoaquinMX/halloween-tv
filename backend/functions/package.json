@@ -7,8 +7,19 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "tsx --test --test-concurrency=1 test/*.test.ts",
-    "test:emulator": "firebase emulators:exec --project demo-halloween-tv --only firestore,storage \"npm test\"",
-    "seed:pilot": "tsx tools/seed_pilot.ts"
+    "test:emulator": "npm run build && FIREBASE_STORAGE_BUCKET=demo-halloween-tv.appspot.com firebase --config ../firebase.json emulators:exec --project demo-halloween-tv --only firestore,storage,functions \"npm test\"",
+    "runtime:prepare": "tsx tools/prepare_runtime.ts",
+    "preflight": "tsx tools/deploy_preflight.ts",
+    "preflight:cloud": "tsx tools/deploy_preflight.ts --target=cloud",
+    "predeploy": "npm run build && npm run runtime:prepare && npm run preflight:cloud",
+    "seed:pilot": "tsx tools/seed_pilot.ts --target=emulator",
+    "seed:pilot:preview": "tsx tools/seed_pilot.ts --target=emulator",
+    "seed:pilot:apply": "tsx tools/seed_pilot.ts --target=emulator --apply",
+    "seed:pilot:cloud": "tsx tools/seed_pilot.ts --target=cloud",
+    "dry-run": "tsx tools/run_dry_run.ts --target=emulator",
+    "fake:e2e": "FIREBASE_STORAGE_BUCKET=demo-halloween-tv.appspot.com firebase --config ../firebase.json emulators:exec --project demo-halloween-tv --only firestore,storage \"npm run dry-run\"",
+    "verify:delivery": "tsx tools/verify_delivery.ts",
+    "usage:reconcile": "tsx tools/reconcile_usage.ts"
   },
   "dependencies": {
     "@google-cloud/storage": "^7.15.2",
@@ -20,6 +31,8 @@
     "@types/node": "^22.10.2",
     "firebase-tools": "^14.7.0",
     "tsx": "^4.19.2",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "@ffmpeg-installer/linux-x64": "4.1.0",
+    "@ffprobe-installer/linux-x64": "5.2.0"
   }
 }
