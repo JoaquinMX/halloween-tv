@@ -2,6 +2,8 @@ node_modules/
 functions/lib/
 functions/coverage/
 functions/.firebase/
+functions/runtime/
+functions/delivery-output/
 *.log
 .env
 .env.*

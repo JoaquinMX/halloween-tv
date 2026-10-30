@@ -1,0 +1,473 @@
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync, copyFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import test from "node:test";
+import { createDeliveryServices } from "../src/delivery";
+import { REQUIRED_CAMERA_IDS } from "../src/config";
+import { HAS_FIRESTORE_EMULATOR, clearParty, createEmulatorContext, disposeEmulatorContext, randomPartyId } from "./support/emulators";
+
+const PACKAGE_ROOT = process.cwd();
+const ASSETS = resolve(PACKAGE_ROOT, "../../apps/tv_app/assets");
+const PROJECT_ID = process.env.GCLOUD_PROJECT ?? "demo-halloween-tv";
+const BUCKET = process.env.FIREBASE_STORAGE_BUCKET ?? `${PROJECT_ID}.appspot.com`;
+const HAS_EMULATORS = HAS_FIRESTORE_EMULATOR && Boolean(process.env.STORAGE_EMULATOR_HOST);
+const IS_LINUX_X64 = process.platform === "linux" && process.arch === "x64";
+
+type ToolResult = { status: number | null; stdout: string; stderr: string };
+
+function runTool(script: string, args: string[], env: NodeJS.ProcessEnv, cwd = PACKAGE_ROOT): ToolResult {
+  const result = spawnSync(process.execPath, ["--import", "tsx", script, ...args], {
+    cwd,
+    env,
+    encoding: "utf8",
+    timeout: 120_000,
+    maxBuffer: 8 * 1024 * 1024,
+  });
+  return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr || result.error?.message || "" };
+}
+
+function cleanEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  for (const name of ["FIRESTORE_EMULATOR_HOST", "STORAGE_EMULATOR_HOST", "GCLOUD_PROJECT", "GOOGLE_CLOUD_PROJECT",
+    "FIREBASE_STORAGE_BUCKET", "PILOT_PARTY_ID", "PILOT_DEVICE_ID", "PILOT_CHANNEL_ID", "FFMPEG_PATH", "FFPROBE_PATH"]) {
+    delete env[name];
+  }
+  return env;
+}
+
+function emulatorEnv(partyId: string, deviceId = "tv-pilot", channelId = "haunted_surveillance"): NodeJS.ProcessEnv {
+  return {
+    ...cleanEnv(),
+    FIRESTORE_EMULATOR_HOST: process.env.FIRESTORE_EMULATOR_HOST!,
+    STORAGE_EMULATOR_HOST: process.env.STORAGE_EMULATOR_HOST!,
+    GCLOUD_PROJECT: PROJECT_ID,
+    FIREBASE_STORAGE_BUCKET: BUCKET,
+    PILOT_PARTY_ID: partyId,
+    PILOT_DEVICE_ID: deviceId,
+    PILOT_CHANNEL_ID: channelId,
+  };
+}
+
+/** Refusal tests only need the emulator variables present, not a live emulator. */
+function fakeEmulatorEnv(projectId = "real-project-12345"): NodeJS.ProcessEnv {
+  return {
+    ...cleanEnv(),
+    FIRESTORE_EMULATOR_HOST: "127.0.0.1:8080",
+    STORAGE_EMULATOR_HOST: "127.0.0.1:9199",
+    GCLOUD_PROJECT: projectId,
+    FIREBASE_STORAGE_BUCKET: `${projectId}.appspot.com`,
+  };
+}
+
+function lastJson(stdout: string): Record<string, any> {
+  const lines = stdout.trim().split("\n").filter(Boolean);
+  assert.ok(lines.length > 0, "tool produced no JSON output");
+  return JSON.parse(lines[lines.length - 1]) as Record<string, any>;
+}
+
+function probeFixture(path: string): void {
+  const ffprobe = process.env.FFPROBE_PATH ?? "ffprobe";
+  const result = spawnSync(ffprobe, ["-v", "error", "-select_streams", "v:0", "-show_entries",
+    "stream=codec_name,pix_fmt,r_frame_rate,width,height:format=duration", "-of", "json", path], { encoding: "utf8", timeout: 30_000 });
+  assert.equal(result.error, undefined, result.error?.message);
+  assert.equal(result.status, 0, result.stderr);
+  const metadata = JSON.parse(result.stdout) as { streams: Array<Record<string, unknown>>; format: { duration: string } };
+  assert.equal(metadata.streams[0].codec_name, "h264");
+  assert.equal(metadata.streams[0].pix_fmt, "yuv420p");
+  assert.equal(metadata.streams[0].r_frame_rate, "24/1");
+  assert.equal(metadata.streams[0].width, 960);
+  assert.equal(metadata.streams[0].height, 540);
+  assert.equal(Math.round(Number(metadata.format.duration) * 1000), 2000);
+}
+
+function fixtureManifest(): { clips: Array<{ cameraId: string; sha256: string; sizeBytes: number }> } {
+  return JSON.parse(readFileSync(join(ASSETS, "fixture_manifest.json"), "utf8")) as { clips: Array<{ cameraId: string; sha256: string; sizeBytes: number }> };
+}
+
+test("operator tools refuse missing, mixed, and implicit cloud targets", () => {
+  const missing = runTool("tools/seed_pilot.ts", ["--target=emulator", "--apply"], cleanEnv());
+  assert.notEqual(missing.status, 0);
+  assert.match(missing.stderr, /both FIRESTORE_EMULATOR_HOST and STORAGE_EMULATOR_HOST/);
+
+  const mixedEnv = cleanEnv();
+  mixedEnv.FIRESTORE_EMULATOR_HOST = "127.0.0.1:8080";
+  mixedEnv.FIREBASE_STORAGE_BUCKET = BUCKET;
+  const mixed = runTool("tools/seed_pilot.ts", ["--target=emulator", "--apply"], mixedEnv);
+  assert.notEqual(mixed.status, 0);
+  assert.match(mixed.stderr, /partial emulator target/);
+
+  const implicitCloud = runTool("tools/seed_pilot.ts", ["--project=real-project-12345", "--bucket=real-project-12345.appspot.com", "--apply"], cleanEnv());
+  assert.notEqual(implicitCloud.status, 0);
+  assert.match(implicitCloud.stderr, /explicit --target=emulator or --target=cloud/);
+
+  const cloudWithoutFlags = runTool("tools/seed_pilot.ts", ["--target=cloud", "--apply"], cleanEnv());
+  assert.notEqual(cloudWithoutFlags.status, 0);
+  assert.match(cloudWithoutFlags.stderr, /explicit --project=PROJECT and --bucket=BUCKET/);
+
+  const cloudWithEmulator = runTool("tools/seed_pilot.ts", ["--target=cloud", "--project=real-project-12345",
+    "--bucket=real-project-12345.appspot.com", "--apply"], fakeEmulatorEnv());
+  assert.notEqual(cloudWithEmulator.status, 0);
+  assert.match(cloudWithEmulator.stderr, /Cloud seeding refuses emulator environment variables/);
+
+  const reconcileImplicit = runTool("tools/reconcile_usage.ts", [], cleanEnv());
+  assert.notEqual(reconcileImplicit.status, 0);
+  assert.match(reconcileImplicit.stderr, /explicit --target=cloud or --target=emulator/);
+
+  const preflightImplicit = runTool("tools/deploy_preflight.ts", ["--project=" + PROJECT_ID], cleanEnv());
+  assert.notEqual(preflightImplicit.status, 0);
+  assert.match(preflightImplicit.stderr, /--target=cloud or --target=emulator/);
+});
+
+test("delivery verification refuses unsafe targets and exits nonzero on a failed endpoint", () => {
+  const noAck = runTool("tools/verify_delivery.ts", ["--target=emulator", "--emulator-service-substitute"], fakeEmulatorEnv());
+  assert.notEqual(noAck.status, 0);
+  assert.match(noAck.stderr, /--ack-and-purge/);
+
+  const noSubstitute = runTool("tools/verify_delivery.ts", ["--target=emulator", "--ack-and-purge"], fakeEmulatorEnv());
+  assert.notEqual(noSubstitute.status, 0);
+  assert.match(noSubstitute.stderr, /--emulator-service-substitute/);
+
+  const cloudWithEmulator = runTool("tools/verify_delivery.ts", ["--target=cloud", "--ack-and-purge",
+    "--project=real-project-12345", "--bucket=real-project-12345.appspot.com"], fakeEmulatorEnv());
+  assert.notEqual(cloudWithEmulator.status, 0);
+  assert.match(cloudWithEmulator.stderr, /Cloud verification refuses emulator hosts/);
+
+  const substituteInCloud = runTool("tools/verify_delivery.ts", ["--target=cloud", "--ack-and-purge", "--emulator-service-substitute",
+    "--project=real-project-12345", "--bucket=real-project-12345.appspot.com", "--functions-url=https://us-central1-real-project-12345.cloudfunctions.net",
+    "--party=pilot", "--device=tv-pilot", "--channel=haunted_surveillance"], cleanEnv());
+  assert.notEqual(substituteInCloud.status, 0);
+  assert.match(substituteInCloud.stderr, /substitute is forbidden for cloud/);
+
+  const unreachable = runTool("tools/verify_delivery.ts", ["--target=emulator", "--ack-and-purge", "--emulator-service-substitute",
+    "--functions-url=http://127.0.0.1:1/demo/us-central1", "--party=pilot", "--device=tv-pilot", "--channel=haunted_surveillance",
+    "--output-dir=" + mkdtempSync(join(tmpdir(), "p4-verify-fail-"))], fakeEmulatorEnv());
+  assert.notEqual(unreachable.status, 0);
+  assert.match(unreachable.stderr, /failed|fetch|ECONNREFUSED/i);
+});
+
+test("runtime preparation refuses a host that cannot execute the packaged target", {
+  skip: IS_LINUX_X64 ? "the Linux x64 packaging path is exercised by the deploy CI job" : false,
+}, () => {
+  const result = runTool("tools/prepare_runtime.ts", [], cleanEnv());
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /must execute on linux-x64/);
+  assert.match(result.stderr, new RegExp(`${process.platform}-${process.arch}`));
+  assert.equal(existsSync(join(PACKAGE_ROOT, "runtime", "runtime-manifest.json")), false,
+    "a refused preparation must not leave a runtime artifact behind");
+});
+
+type ArtifactOptions = { timeoutSeconds?: number; omitFixture?: string; stripFixtureBinding?: boolean; omitRuntime?: boolean };
+
+/** Builds a deployable artifact shape from the real compiled output, fixtures and pinned binaries. */
+function buildArtifact(options: ArtifactOptions = {}): { root: string; functions: string } {
+  const root = mkdtempSync(join(tmpdir(), "p4-preflight-"));
+  const functions = join(root, "functions");
+  mkdirSync(join(functions, "lib", "src", "providers"), { recursive: true });
+  mkdirSync(join(functions, "runtime", "bin"), { recursive: true });
+  mkdirSync(join(functions, "runtime", "fixtures"), { recursive: true });
+  symlinkSync(join(PACKAGE_ROOT, "src"), join(functions, "src"), "dir");
+  for (const file of readdirSync(join(PACKAGE_ROOT, "lib", "src"))) {
+    if (!file.endsWith(".js") || file === "index.js") continue;
+    symlinkSync(join(PACKAGE_ROOT, "lib", "src", file), join(functions, "lib", "src", file));
+  }
+  for (const file of readdirSync(join(PACKAGE_ROOT, "lib", "src", "providers"))) {
+    symlinkSync(join(PACKAGE_ROOT, "lib", "src", "providers", file), join(functions, "lib", "src", "providers", file));
+  }
+  const binding = options.stripFixtureBinding
+    ? "const services = (0, runtime_1.createRuntimeServices)({});"
+    : 'const services = (0, runtime_1.createRuntimeServices)({ fixtureDirectory: require("node:path").join(__dirname, "../../runtime/fixtures") });\nconst servicesWithFixtureBinding = "runtime/fixtures";';
+  writeFileSync(join(functions, "lib", "src", "index.js"), `"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const runtime_1 = require("./runtime");
+const tasks_1 = require("firebase-functions/v2/tasks");
+${binding}
+exports.requestGeneration = services.requestGeneration;
+exports.getDeliveryUrls = services.getDeliveryUrls;
+exports.acknowledgeDelivery = services.acknowledgeDelivery;
+exports.sweepExpiredMedia = () => undefined;
+exports.runGeneration = (0, tasks_1.onTaskDispatched)({ timeoutSeconds: ${options.timeoutSeconds ?? 900}, retryConfig: { maxAttempts: 1 } }, async () => { await services.runGeneration({}); });
+`);
+  writeFileSync(join(functions, "package.json"), JSON.stringify({ name: "artifact", main: "lib/src/index.js", engines: { node: "22" } }, null, 2));
+  writeFileSync(join(root, "firebase.json"), JSON.stringify({
+    functions: { source: "functions", runtime: "nodejs22", predeploy: ["npm --prefix \"$RESOURCE_DIR\" run predeploy"] },
+  }, null, 2));
+
+  const manifest = fixtureManifest();
+  const fixtures: Array<Record<string, unknown>> = [];
+  for (const clip of manifest.clips) {
+    const name = `cam${clip.cameraId.slice(-2).toLowerCase()}.mp4`;
+    copyFileSync(join(ASSETS, name), join(functions, "runtime", "fixtures", name));
+    fixtures.push({
+      cameraId: clip.cameraId, path: `runtime/fixtures/${name}`, sha256: clip.sha256,
+      sizeBytes: clip.sizeBytes, durationMs: 2000,
+    });
+  }
+  copyFileSync(join(ASSETS, "fixture_manifest.json"), join(functions, "runtime", "fixtures", "fixture_manifest.json"));
+  if (options.omitFixture) rmSync(join(functions, "runtime", "fixtures", options.omitFixture));
+
+  const binary = (packageName: string, name: string): { path: string; sha256: string; sizeBytes: number } => {
+    const source = join(PACKAGE_ROOT, "node_modules", "@" + packageName, "linux-x64", name);
+    symlinkSync(source, join(functions, "runtime", "bin", name));
+    const bytes = readFileSync(source);
+    return { path: `runtime/bin/${name}`, sha256: createHash("sha256").update(bytes).digest("hex"), sizeBytes: bytes.byteLength };
+  };
+  const ffmpeg = binary("ffmpeg-installer", "ffmpeg");
+  const ffprobe = binary("ffprobe-installer", "ffprobe");
+  if (!options.omitRuntime) {
+    writeFileSync(join(functions, "runtime", "runtime-manifest.json"), JSON.stringify({
+      target: "linux-x64",
+      preparedBy: "tools/prepare_runtime.ts",
+      binaries: {
+        ffmpegPath: ffmpeg.path, ffprobePath: ffprobe.path, ffmpegVersion: "4.1.0", ffprobeVersion: "5.2.0",
+        ffmpegSha256: ffmpeg.sha256, ffprobeSha256: ffprobe.sha256, ffmpegBytes: ffmpeg.sizeBytes, ffprobeBytes: ffprobe.sizeBytes,
+      },
+      fixtureDirectory: "runtime/fixtures",
+      fixtures,
+      normalization: { codec: "h264", pixelFormat: "yuv420p", frameRate: "24/1", width: 854, height: 480, durationMs: 2000 },
+      smokeTested: true,
+      runtimeBytes: ffmpeg.sizeBytes + ffprobe.sizeBytes,
+    }, null, 2));
+  }
+  return { root, functions };
+}
+
+function preflightEnv(): NodeJS.ProcessEnv {
+  return {
+    ...cleanEnv(),
+    FIREBASE_STORAGE_BUCKET: "artifact-bucket-123456",
+    VIDEO_GENERATION_PROVIDER: "fake",
+    FFMPEG_PATH: "runtime/bin/ffmpeg",
+    FFPROBE_PATH: "runtime/bin/ffprobe",
+    GENERATION_WORKER_TIMEOUT_SECONDS: "900",
+    PROVIDER_POLL_TIMEOUT_SECONDS: "720",
+    NORMALIZATION_HEADROOM_SECONDS: "120",
+  };
+}
+
+function runPreflightOn(artifact: { root: string; functions: string }): ToolResult {
+  return runTool("tools/deploy_preflight.ts", ["--target=cloud", "--project=artifact-project-12345",
+    "--bucket=artifact-bucket-123456", `--functions-root=${artifact.functions}`, `--config-root=${artifact.root}`], preflightEnv());
+}
+
+test("preflight passes a complete artifact and rejects each missing prerequisite", () => {
+  const complete = buildArtifact();
+  const passed = runPreflightOn(complete);
+  assert.equal(passed.status, 0, passed.stderr);
+  const report = lastJson(passed.stdout);
+  assert.equal(report.preflight, "passed");
+  assert.equal(report.target, "cloud");
+  assert.equal(report.fixtureDirectory, "runtime/fixtures");
+  assert.equal(report.workerTimeoutSeconds, 900);
+
+  const shortDeadline = buildArtifact({ timeoutSeconds: 600 });
+  const deadlineResult = runPreflightOn(shortDeadline);
+  assert.notEqual(deadlineResult.status, 0);
+  assert.match(deadlineResult.stderr, /timeoutSeconds=600 does not match GENERATION_WORKER_TIMEOUT_SECONDS=900/);
+
+  const missingFixture = buildArtifact({ omitFixture: "cam03.mp4" });
+  const fixtureResult = runPreflightOn(missingFixture);
+  assert.notEqual(fixtureResult.status, 0);
+  assert.match(fixtureResult.stderr, /Prepared runtime fixture is missing: runtime\/fixtures\/cam03\.mp4/);
+
+  const unwired = buildArtifact({ stripFixtureBinding: true });
+  const unwiredResult = runPreflightOn(unwired);
+  assert.notEqual(unwiredResult.status, 0);
+  assert.match(unwiredResult.stderr, /does not pass the packaged runtime\/fixtures directory/);
+
+  const noRuntime = buildArtifact({ omitRuntime: true });
+  const runtimeResult = runPreflightOn(noRuntime);
+  assert.notEqual(runtimeResult.status, 0);
+  assert.match(runtimeResult.stderr, /Prepared runtime manifest is missing/);
+
+  for (const artifact of [complete, shortDeadline, missingFixture, unwired, noRuntime]) {
+    rmSync(artifact.root, { recursive: true, force: true });
+  }
+});
+
+test("pilot seed stores playable bytes, is idempotent, and refuses newer or purged state", {
+  skip: !HAS_EMULATORS ? "requires both emulator targets" : false,
+}, async () => {
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  const deviceId = "tv-pilot";
+  const channelId = "haunted_surveillance";
+  const env = emulatorEnv(partyId, deviceId, channelId);
+  const manifestRef = db.doc(`parties/${partyId}/manifests/current_${channelId}`);
+  const jobRef = db.doc(`parties/${partyId}/jobs/pilot-fixture-v1`);
+  try {
+    const preview = runTool("tools/seed_pilot.ts", ["--target=emulator"], env);
+    assert.equal(preview.status, 0, preview.stderr);
+    assert.equal(lastJson(preview.stdout).result, "preview");
+    assert.equal((await manifestRef.get()).exists, false, "preview must not write a manifest");
+
+    const first = runTool("tools/seed_pilot.ts", ["--target=emulator", "--apply"], env);
+    assert.equal(first.status, 0, first.stderr);
+    assert.equal(lastJson(first.stdout).result, "seeded");
+    const manifest = (await manifestRef.get()).data()!;
+    const job = (await jobRef.get()).data()!;
+    const expected = fixtureManifest();
+    assert.equal(manifest.version, 1);
+    assert.equal(manifest.schemaVersion, 1);
+    assert.ok(manifest.createdAt, "published manifest has no createdAt");
+    assert.equal(manifest.jobId, "pilot-fixture-v1");
+    assert.equal(job.state, "ready");
+    assert.ok(job.createdAt);
+    assert.ok(job.expiresAt);
+    assert.deepEqual(job.deliveryPaths, manifest.cameraClips.map((clip: { objectPath: string }) => clip.objectPath));
+    assert.deepEqual(manifest.cameraClips.map((clip: { cameraId: string }) => clip.cameraId), [...REQUIRED_CAMERA_IDS]);
+    for (const clip of manifest.cameraClips as Array<{ cameraId: string; objectPath: string; sha256: string; sizeBytes: number; durationMs: number; expiresAt: string }>) {
+      const expectedClip = expected.clips.find((entry) => entry.cameraId === clip.cameraId)!;
+      const [bytes] = await bucket.file(clip.objectPath).download();
+      assert.equal(bytes.toString("ascii", 4, 8), "ftyp", `${clip.cameraId} is not an MP4 container`);
+      assert.equal(bytes.byteLength, expectedClip.sizeBytes);
+      assert.equal(createHash("sha256").update(bytes).digest("hex"), expectedClip.sha256);
+      assert.equal(clip.sha256, expectedClip.sha256);
+      assert.equal(clip.sizeBytes, expectedClip.sizeBytes);
+      assert.equal(clip.durationMs, 2000);
+      assert.equal(clip.expiresAt, manifest.expiresAt);
+      const [metadata] = await bucket.file(clip.objectPath).getMetadata();
+      assert.equal(metadata.contentType, "video/mp4");
+      assert.equal(metadata.metadata?.expiresAt, manifest.expiresAt);
+      assert.equal(metadata.metadata?.jobId, "pilot-fixture-v1");
+      assert.equal(metadata.metadata?.cameraId, clip.cameraId);
+      assert.equal(metadata.metadata?.purpose, "delivery");
+      probeFixture(join(ASSETS, `cam${clip.cameraId.slice(-2).toLowerCase()}.mp4`));
+    }
+
+    const second = runTool("tools/seed_pilot.ts", ["--target=emulator", "--apply"], env);
+    assert.equal(second.status, 0, second.stderr);
+    assert.equal(lastJson(second.stdout).result, "already-seeded");
+    assert.equal((await manifestRef.get()).data()?.expiresAt, manifest.expiresAt, "repeat seeding rewrote publication metadata");
+
+    await manifestRef.set({ ...manifest, version: 2, expiresAt: new Date(Date.now() + 3_600_000).toISOString() });
+    const newer = runTool("tools/seed_pilot.ts", ["--target=emulator", "--apply"], env);
+    assert.notEqual(newer.status, 0);
+    assert.match(newer.stderr, /newer or unrelated/);
+    assert.equal((await manifestRef.get()).data()?.version, 2, "seeder must not replace a newer manifest");
+
+    const service = createDeliveryServices({ db, bucket, signReadUrl: async () => "https://test.invalid/not-used" });
+    const clipHashes = Object.fromEntries(manifest.cameraClips.map((clip: { cameraId: string; sha256: string }) => [clip.cameraId, clip.sha256]));
+    await manifestRef.set(manifest);
+    const ackInput = { partyId, deviceId, channelId, manifestVersion: 1, clipHashes };
+    // Accept while the manifest is current; the retry below proves the
+    // persisted ACK record finishes the bounded purge after manifest loss
+    // (a first ACK with no current manifest stays rejected per contract).
+    await service.acknowledgeDelivery(ackInput);
+    await manifestRef.delete();
+    const ack = await service.acknowledgeDelivery(ackInput);
+    assert.equal(ack.purged, true);
+    assert.equal((await jobRef.get()).data()?.state, "purged");
+    for (const clip of manifest.cameraClips) {
+      assert.equal((await bucket.file(clip.objectPath).exists())[0], false);
+    }
+    const afterPurge = runTool("tools/seed_pilot.ts", ["--target=emulator", "--apply"], env);
+    assert.equal(afterPurge.status, 0, afterPurge.stderr);
+    assert.equal(lastJson(afterPurge.stdout).result, "already-purged");
+    assert.equal((await jobRef.get()).data()?.state, "purged");
+    assert.equal((await manifestRef.get()).exists, false, "a purged pilot must not be resurrected");
+  } finally {
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+  }
+});
+
+test("delivery verification downloads, ACKs, purges, and keeps retained files", {
+  skip: !HAS_EMULATORS ? "requires both emulator targets" : false,
+}, async () => {
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  const outputDirectory = mkdtempSync(join(tmpdir(), "p4-verify-ok-"));
+  try {
+    const seeded = runTool("tools/seed_pilot.ts", ["--target=emulator", "--apply"], emulatorEnv(partyId));
+    assert.equal(seeded.status, 0, seeded.stderr);
+    const verified = runTool("tools/verify_delivery.ts", ["--target=emulator", "--emulator-service-substitute", "--ack-and-purge",
+      `--project=${PROJECT_ID}`, `--bucket=${BUCKET}`, `--party=${partyId}`, "--device=tv-pilot",
+      "--channel=haunted_surveillance", `--output-dir=${outputDirectory}`], emulatorEnv(partyId));
+    assert.equal(verified.status, 0, verified.stderr);
+    const report = lastJson(verified.stdout);
+    assert.equal(report.verification, "passed");
+    assert.equal(report.downloadedCameraIds.length, 4);
+    assert.equal(report.repeatAckIdempotent, true);
+    assert.equal(report.jobState, "purged");
+    assert.equal(report.deliveryObjectsAbsent, true);
+    assert.equal(report.retainedFilesReadableAfterPurge, true);
+    assert.match(String(report.urlMode), /test-only/);
+
+    const manifest = (await db.doc(`parties/${partyId}/manifests/current_haunted_surveillance`).get()).data()!;
+    for (const clip of manifest.cameraClips as Array<{ cameraId: string; objectPath: string; sha256: string; sizeBytes: number }>) {
+      const retained = readFileSync(join(outputDirectory, `${clip.cameraId}.mp4`));
+      assert.equal(retained.byteLength, clip.sizeBytes);
+      assert.equal(createHash("sha256").update(retained).digest("hex"), clip.sha256);
+      probeFixture(join(outputDirectory, `${clip.cameraId}.mp4`));
+    }
+    const ack = (await db.doc(`parties/${partyId}/deliveryAcks/${report.ackId}`).get()).data();
+    assert.equal(ack?.manifestVersion, 1);
+    assert.equal(ack?.deviceId, "tv-pilot");
+  } finally {
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+    rmSync(outputDirectory, { recursive: true, force: true });
+  }
+});
+
+test("delivery verification exits nonzero when downloaded bytes do not match the manifest", {
+  skip: !HAS_EMULATORS ? "requires both emulator targets" : false,
+}, async () => {
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  try {
+    const seeded = runTool("tools/seed_pilot.ts", ["--target=emulator", "--apply"], emulatorEnv(partyId));
+    assert.equal(seeded.status, 0, seeded.stderr);
+    const manifestRef = db.doc(`parties/${partyId}/manifests/current_haunted_surveillance`);
+    const manifest = (await manifestRef.get()).data()!;
+    const tampered = structuredClone(manifest);
+    tampered.cameraClips[0].sha256 = "0".repeat(64);
+    await manifestRef.set(tampered);
+    const outputDirectory = mkdtempSync(join(tmpdir(), "p4-verify-bad-"));
+    const verified = runTool("tools/verify_delivery.ts", ["--target=emulator", "--emulator-service-substitute", "--ack-and-purge",
+      `--project=${PROJECT_ID}`, `--bucket=${BUCKET}`, `--party=${partyId}`, "--device=tv-pilot",
+      "--channel=haunted_surveillance", `--output-dir=${outputDirectory}`], emulatorEnv(partyId));
+    assert.notEqual(verified.status, 0);
+    assert.match(verified.stderr, /failed independent hash\/size verification/);
+    assert.equal((await db.doc(`parties/${partyId}/jobs/pilot-fixture-v1`).get()).data()?.state, "ready",
+      "a failed verification must not purge delivery objects");
+    rmSync(outputDirectory, { recursive: true, force: true });
+  } finally {
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+  }
+});
+
+test("fake dry run proves delivery, purge, retention, and cost-log reconciliation", {
+  skip: !HAS_EMULATORS ? "requires both emulator targets" : false,
+}, () => {
+  const outputDirectory = mkdtempSync(join(tmpdir(), "p4-dry-run-"));
+  try {
+    const result = runTool("tools/run_dry_run.ts", ["--target=emulator", `--output-dir=${outputDirectory}`], emulatorEnv("unused"));
+    assert.equal(result.status, 0, result.stderr);
+    const report = lastJson(result.stdout);
+    assert.equal(report.mode, "fake-emulator-e2e");
+    assert.equal(report.billableCalls, 0);
+    assert.equal(report.networkGenerationCalls, 0);
+    assert.equal(report.downloadedAndHashed, 4);
+    assert.equal(report.jobStateAfterAck, "purged");
+    assert.equal(report.deliveryObjectsAbsent, true);
+    assert.equal(report.retainedFilesReadableAfterPurge, true);
+    assert.equal(report.reconcileIssueCountBeforeDelivery, 0);
+    assert.equal(report.reconcileIssueCountAfterDelivery, 0);
+    assert.equal(report.usageRows.length, 4);
+    for (const row of report.usageRows) {
+      assert.equal(row.success, true);
+      assert.equal(row.credits, "synthetic zero");
+      assert.match(row.providerTaskId, new RegExp(`^${row.cameraId}__[a-f0-9]{24}$`));
+    }
+    assert.equal(report.ttlOrphanSweep.expiredJobState, "expired");
+    assert.ok(report.ttlOrphanSweep.deletedExpiredObjects >= 1);
+    assert.ok(report.ttlOrphanSweep.deletedOrphanObjects >= 1);
+  } finally {
+    rmSync(outputDirectory, { recursive: true, force: true });
+  }
+});
