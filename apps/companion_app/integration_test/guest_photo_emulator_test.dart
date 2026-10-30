@@ -1,33 +1,56 @@
-// Guest-photo emulator contract test (host-run integration).
+// Guest-photo positive completion flow (host-run integration).
 //
-// Runs the REAL companion guest-media stack ([GuestMediaClient],
-// [GuestMediaSession], and [HttpGuestMediaTransport]) against the REAL
-// Firebase emulators (Functions/Firestore/Storage on the
-// `backend/firebase.json` ports). No billable calls: the emulators are
-// local, generation stays disabled there, and the guest-media callables are
-// not implemented server-side (see below).
+// Runs the REAL companion guest-media stack ([GuestMediaClient] consent
+// gate and [HttpGuestMediaTransport] byte upload) against the REAL Firebase
+// emulators (Functions/Firestore/Storage on the `backend/firebase.json`
+// ports) and the REAL guest-media callables
+// (requestGuestUpload/completeGuestUpload/getGuestMediaStatus/
+// withdrawGuestMedia in `backend/functions/src/index.ts`). No billable
+// calls: the emulators are local and generation stays disabled there.
 //
-// Backend reality (pinned, 2026-10-30): `backend/functions/src/index.ts`
-// exports requestGeneration, runGeneration, getDeliveryUrls,
-// getCurrentManifest, acknowledgeDelivery, listPartyDevices, joinParty and
-// sweepExpiredMedia — there are NO requestGuestUpload/completeGuestUpload/
-// getGuestMediaStatus/withdrawGuestMedia handlers. This test therefore pins
-// the REFUSAL contract: a consented guest upload attempt is refused by the
-// Functions emulator (no capability, no transport use, no receipt), the
-// withdrawn/absent image has no stored object, and generation cannot be
-// triggered from the guest path. When the backend ships guest-media
-// callables, the refusal assertions below must be replaced by the positive
-// completion flow (capability -> PUT -> complete -> status -> withdraw ->
-// object absence); the assertions are falsifiable either way.
+// Backend contract under test (2026-10-30, from
+// `backend/functions/src/guest_upload.ts` + `contracts.ts`):
+//   requestGuestUpload  {partyId, deviceId, channelId,
+//                        consent:{accepted:true,textVersion:"v1",
+//                                purpose:"guest_cameo"},
+//                        contentType:"image/jpeg"|"image/png"}
+//                     -> {submissionId, objectPath, uploadUrl, expiresAt,
+//                         consentRevision}
+//   completeGuestUpload {partyId, deviceId, channelId, submissionId}
+//                     -> {submissionId, partyId, deviceId, channelId,
+//                         status:"eligible", objectPath, consentRevision,
+//                         expiresAt, sha256, sizeBytes}
+//   getGuestMediaStatus {partyId, deviceId, channelId, submissionId}
+//                     -> same shape, status pending_upload|eligible|
+//                        withdrawn|expired
+//   withdrawGuestMedia  {partyId, deviceId, channelId, submissionId}
+//                     -> {submissionId, status:"withdrawn",
+//                         deletedObjects, verifiedAbsent:true}
 //
-// Emulators must be running before this file runs (from `backend/`):
+// NOTE: the in-app [GuestMediaClient]/[GuestMediaSession] request shapes
+// predate this contract (no channelId, `consent:true` instead of the
+// consent object, `contentType` echo + https-only URL + non-"withdrawn"
+// status expectations), so the happy path below drives the real callable
+// wire envelope (`{"data": ...}`, identical to what `firebase_functions`
+// sends) directly, while the consent gate and the byte PUT still go
+// through the real client/transport classes. The assertions are
+// falsifiable end to end: capability -> signed PUT -> complete(eligible,
+// backend-computed sha256/sizeBytes) -> status -> withdraw -> object
+// absence -> refusal of later use from the guest path.
+//
+// Emulators must be running before this file runs (from `backend/`).
+// Capability minting needs a local signing key (the Functions emulator
+// has no ADC private key, so getSignedUrl would return INTERNAL):
+//   GOOGLE_APPLICATION_CREDENTIALS=/tmp/fake-sa.json
 //   STORAGE_BUCKET=demo-halloween-tv.appspot.com firebase
 //     --config firebase.json emulators:start
 //     --only firestore,functions,storage --project demo-halloween-tv
 // and the fixed party must be pre-seeded with the Admin SDK (client REST
 // cannot create it: firestore.rules deny all direct writes):
-//   FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 node /tmp/seed-guest-photo.js
-// (wipes and recreates parties/guest-photo-it + its cctv channel).
+//   FIRESTORE_EMULATOR_HOST=127.0.0.1:8080
+//   STORAGE_EMULATOR_HOST=http://127.0.0.1:9199 node /tmp/seed-guest-photo.js
+// (wipes parties/guest-photo-it in Firestore AND Storage, recreates the
+// party + its cctv channel; the device is left for joinParty to create).
 // If the emulators are unreachable the test SKIPS (never fake-passes).
 //
 // Run serially from `apps/companion_app`:
@@ -51,7 +74,21 @@ const String _kStorageBase = 'http://127.0.0.1:9199';
 const String _kBucket = 'demo-halloween-tv.appspot.com';
 const Duration _kHttpTimeout = Duration(seconds: 20);
 
-/// Non-200 callable/REST outcome from an emulator endpoint.
+/// Server-side consent constants (mirror backend/functions/src/config.ts).
+const String _kConsentTextVersion = 'v1';
+const String _kConsentPurpose = 'guest_cameo';
+
+/// Synthetic image under test: SOI + APP0(JFIF) + EOI, a real file on disk.
+/// sha256 (computed out of band, asserted against the backend echo):
+/// d20f6ffd523b78a86cd2f916fa34af5d1918d75f7b142237c752ad6b254213ab
+const List<int> _kSyntheticJpeg = <int>[
+  0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01,
+  0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xD9,
+];
+const String _kExpectedSha256 =
+    'd20f6ffd523b78a86cd2f916fa34af5d1918d75f7b142237c752ad6b254213ab';
+
+/// Non-2xx callable/REST outcome from an emulator endpoint.
 final class _Refusal implements Exception {
   const _Refusal(this.status, this.body);
   final int status;
@@ -152,6 +189,14 @@ Future<Map<String, Object?>> _firestoreGet(String documentPath) async {
   return decoded;
 }
 
+String _stringField(Map<String, Object?> fields, String name) {
+  final Object? field = fields[name];
+  if (field is Map<String, Object?> && field['stringValue'] is String) {
+    return field['stringValue'] as String;
+  }
+  throw FormatException('Firestore field $name is not a string: $field');
+}
+
 /// Storage emulator object names under [prefix] (empty when absent).
 Future<List<String>> _storageObjects(String prefix) async {
   final http.Response response = await http
@@ -191,14 +236,15 @@ Future<List<String>> _storageObjects(String prefix) async {
 
 void main() {
   test(
-    'guest photo against emulators: consent-gated, refused without '
-    'backend callables, nothing stored, generation refused',
+    'guest photo positive flow against emulators: consent-gated capability, '
+    'signed PUT, complete, status, withdraw, absence, generation refused',
     timeout: const Timeout(Duration(minutes: 4)),
     () async {
       if (!await _emulatorsReachable()) {
         markTestSkipped(
           'Firebase emulators are not reachable on 127.0.0.1 '
           '(firestore :8080). From backend/ run: '
+          'GOOGLE_APPLICATION_CREDENTIALS=/tmp/fake-sa.json '
           'STORAGE_BUCKET=demo-halloween-tv.appspot.com firebase '
           '--config firebase.json emulators:start '
           '--only firestore,functions,storage '
@@ -211,29 +257,19 @@ void main() {
 
       // Fixed party pre-seeded with the Admin SDK (client REST cannot
       // create it: rules deny all direct writes). Pre-seed with:
-      //   node /tmp/seed-guest-photo.js (FIRESTORE_EMULATOR_HOST set).
+      //   FIRESTORE_EMULATOR_HOST=127.0.0.1:8080
+      //   STORAGE_EMULATOR_HOST=http://127.0.0.1:9199
+      //   node /tmp/seed-guest-photo.js
+      // (wipes and recreates parties/guest-photo-it + its cctv channel;
+      // the device below is left for joinParty to register).
       const String partyId = 'guest-photo-it';
       const String channelId = 'cctv';
-      final String deviceId = 'p-${'a' * 31}';
-
-      // Real registration path: joinParty creates the guest device doc.
-      final Object? joined = await _callFunction('joinParty', <String, Object?>{
+      const String deviceId = 'p-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+      Map<String, Object?> identity() => <String, Object?>{
         'partyId': partyId,
         'deviceId': deviceId,
         'channelId': channelId,
-      });
-      expect(joined, isA<Map<String, Object?>>());
-      final Map<String, Object?> joinedResult = joined! as Map<String, Object?>;
-      expect(
-        joinedResult['created'],
-        isTrue,
-        reason: 'first join registers the guest device',
-      );
-      final Map<String, Object?> deviceDoc = await _firestoreGet(
-        'parties/$partyId/devices/$deviceId',
-      );
-      final Object? deviceFields = deviceDoc['fields'];
-      expect(deviceFields, isA<Map<String, Object?>>());
+      };
 
       final _EmulatorInvoker invoker = _EmulatorInvoker(_callFunction);
       final _CountingTransport transport = _CountingTransport(
@@ -249,7 +285,7 @@ void main() {
       try {
         // Synthetic image: minimal JPEG container bytes, real file on disk.
         final File photo = File('${dir.path}/synthetic.jpg');
-        await photo.writeAsBytes(<int>[0xFF, 0xD8, 0xFF, 0xD9]);
+        await photo.writeAsBytes(_kSyntheticJpeg);
         final GuestMediaSession session = GuestMediaSession(
           client: client,
           partyId: partyId,
@@ -264,7 +300,7 @@ void main() {
             partyId: partyId,
             deviceId: deviceId,
             contentType: 'image/jpeg',
-            byteSize: 4,
+            byteSize: _kSyntheticJpeg.length,
             affirmativeConsent: false,
           ),
           throwsStateError,
@@ -276,99 +312,207 @@ void main() {
         );
         expect(invoker.calls, 0, reason: 'refused before the network');
 
-        // 2. Consented attempt reaches the Functions emulator, which has no
-        // guest-media callables: refusal (HTTP 404, no such function),
-        // no upload, no receipt.
-        Object? capabilityError;
+        // 2. Server-side consent gate: a non-affirmative consent object is
+        // refused by the real backend before any capability is minted.
+        Object? consentError;
         try {
-          await session.submit(photo, consent: true, confirmed: true);
+          await _callFunction('requestGuestUpload', <String, Object?>{
+            ...identity(),
+            'consent': <String, Object?>{
+              'accepted': false,
+              'textVersion': _kConsentTextVersion,
+              'purpose': _kConsentPurpose,
+            },
+            'contentType': 'image/jpeg',
+          });
         } on _Refusal catch (error) {
-          capabilityError = error;
+          consentError = error;
         }
         expect(
-          capabilityError,
+          consentError,
           isA<_Refusal>(),
-          reason: 'unimplemented guest capability must be refused',
-        );
-        final _Refusal refusedCapability = capabilityError! as _Refusal;
-        expect(
-          refusedCapability.status,
-          404,
-          reason: 'no requestGuestUpload handler is deployed',
+          reason: 'non-affirmative consent must be refused server-side',
         );
         expect(
-          refusedCapability.body,
-          contains('does not exist'),
-        );
-        expect(invoker.calls, 1, reason: 'exactly one capability attempt');
-        expect(transport.puts, 0, reason: 'no bytes uploaded without a URL');
-        expect(
-          prefs.getString(GuestMediaSession.receiptKey),
-          isNull,
-          reason: 'no consent receipt persisted without a capability',
+          (consentError as _Refusal).body,
+          contains('FORBIDDEN'),
+          reason: 'refusal carries the backend FORBIDDEN error code',
         );
 
-        // 3. Withdrawal with nothing submitted is a local no-op; the
-        // withdrawal/status callables do not exist either (HTTP 404).
-        await session.withdraw();
-        expect(invoker.calls, 1, reason: 'withdrawal without a receipt is local');
-        Object? withdrawError;
+        // 3. Real registration path: joinParty creates the guest device doc.
+        final Object? joined = await _callFunction('joinParty', identity());
+        expect(joined, isA<Map<String, Object?>>());
+        final Map<String, Object?> joinedResult =
+            joined! as Map<String, Object?>;
+        expect(
+          joinedResult['created'],
+          isTrue,
+          reason: 'first join registers the guest device',
+        );
+        final Map<String, Object?> deviceDoc = await _firestoreGet(
+          'parties/$partyId/devices/$deviceId',
+        );
+        final Map<String, Object?> deviceFields =
+            deviceDoc['fields'] as Map<String, Object?>;
+        expect(_stringField(deviceFields, 'deviceId'), deviceId);
+        expect(_stringField(deviceFields, 'role'), 'guest');
+        expect(_stringField(deviceFields, 'status'), 'active');
+
+        // 4. Consent-gated capability issue: the real backend mints a
+        // per-submission signed PUT capability bound to a server-assigned
+        // object path.
+        final Object? capabilityRaw =
+            await _callFunction('requestGuestUpload', <String, Object?>{
+              ...identity(),
+              'consent': <String, Object?>{
+                'accepted': true,
+                'textVersion': _kConsentTextVersion,
+                'purpose': _kConsentPurpose,
+              },
+              'contentType': 'image/jpeg',
+            });
+        expect(capabilityRaw, isA<Map<String, Object?>>());
+        final Map<String, Object?> capability =
+            capabilityRaw! as Map<String, Object?>;
+        final String submissionId = capability['submissionId'] as String;
+        expect(
+          submissionId,
+          matches(RegExp(r'^gsub-[a-f0-9]{32}$')),
+          reason: 'server-assigned submission id shape',
+        );
+        final String objectPath = capability['objectPath'] as String;
+        expect(
+          objectPath,
+          'parties/$partyId/guests/$deviceId/ingest/$submissionId/photo.jpg',
+          reason: 'capability is bound to the server-assigned object path',
+        );
+        final String uploadUrl = capability['uploadUrl'] as String;
+        expect(uploadUrl, isNotEmpty);
+        expect(
+          uploadUrl,
+          contains(objectPath),
+          reason: 'signed PUT URL is per-submission, never persisted',
+        );
+        final DateTime expiresAt = DateTime.parse(
+          capability['expiresAt'] as String,
+        );
+        expect(
+          expiresAt.isAfter(DateTime.now().toUtc()),
+          isTrue,
+          reason: 'capability carries a future expiry',
+        );
+        final String consentRevision =
+            capability['consentRevision'] as String;
+        expect(
+          consentRevision,
+          startsWith('$_kConsentTextVersion:'),
+          reason: 'capability echoes the server-side consent revision',
+        );
+
+        // 5. Signed PUT of the synthetic image through the real transport.
+        // The backend validates these exact bytes before any eligibility.
+        await transport.put(Uri.parse(uploadUrl), photo, 'image/jpeg');
+        expect(transport.puts, 1, reason: 'exactly one PUT to the capability');
+
+        // 6. Completion: the backend verifies the stored bytes and records
+        // eligibility with the independently computed hash and size.
+        final Object? completedRaw = await _callFunction(
+          'completeGuestUpload',
+          <String, Object?>{...identity(), 'submissionId': submissionId},
+        );
+        expect(completedRaw, isA<Map<String, Object?>>());
+        final Map<String, Object?> completed =
+            completedRaw! as Map<String, Object?>;
+        expect(completed['status'], 'eligible');
+        expect(completed['sha256'], _kExpectedSha256);
+        expect(completed['sizeBytes'], _kSyntheticJpeg.length);
+        expect(completed['consentRevision'], consentRevision);
+        expect(completed['submissionId'], submissionId);
+        expect(completed['objectPath'], objectPath);
+
+        // 7. Status: the owning registered device reads back eligibility.
+        final Object? statusRaw = await _callFunction(
+          'getGuestMediaStatus',
+          <String, Object?>{...identity(), 'submissionId': submissionId},
+        );
+        expect(statusRaw, isA<Map<String, Object?>>());
+        final Map<String, Object?> status =
+            statusRaw! as Map<String, Object?>;
+        expect(status['status'], 'eligible');
+        expect(status['sha256'], _kExpectedSha256);
+        expect(status['sizeBytes'], _kSyntheticJpeg.length);
+
+        // Unknown submissions do not exist: the status path is real.
+        Object? unknownError;
         try {
-          await client.withdraw(
-            partyId: partyId,
-            deviceId: deviceId,
-            submissionId: 'submission_nope_123',
-          );
+          await _callFunction('getGuestMediaStatus', <String, Object?>{
+            ...identity(),
+            'submissionId': 'gsub-00000000000000000000000000000000',
+          });
         } on _Refusal catch (error) {
-          withdrawError = error;
+          unknownError = error;
         }
-        expect(withdrawError, isA<_Refusal>());
-        expect((withdrawError as _Refusal).status, 404);
-        await expectLater(
-          client.status(
-            partyId: partyId,
-            deviceId: deviceId,
-            submissionId: 'submission_nope_123',
-          ),
-          throwsA(isA<_Refusal>()),
+        expect(unknownError, isA<_Refusal>());
+        expect((unknownError as _Refusal).body, contains('NOT_FOUND'));
+
+        // 8. Withdrawal revokes eligibility and purges the cloud copy.
+        final Object? withdrawnRaw = await _callFunction(
+          'withdrawGuestMedia',
+          <String, Object?>{...identity(), 'submissionId': submissionId},
+        );
+        expect(withdrawnRaw, isA<Map<String, Object?>>());
+        final Map<String, Object?> withdrawn =
+            withdrawnRaw! as Map<String, Object?>;
+        expect(withdrawn['status'], 'withdrawn');
+        expect(withdrawn['verifiedAbsent'], isTrue);
+        expect(withdrawn['deletedObjects'], contains(objectPath));
+
+        // 9. Post-withdrawal status is the tombstone, not eligibility.
+        final Object? afterRaw = await _callFunction(
+          'getGuestMediaStatus',
+          <String, Object?>{...identity(), 'submissionId': submissionId},
+        );
+        expect(
+          (afterRaw! as Map<String, Object?>)['status'],
+          'withdrawn',
         );
 
-        // 4. Object absence: no guest bytes under the party prefix.
+        // 10. Object absence: no guest bytes linger under the party prefix.
         final List<String> objects = await _storageObjects(
           'parties/$partyId/',
         );
         expect(
           objects,
           isEmpty,
-          reason: 'no guest object may linger in Storage',
+          reason: 'withdrawn guest object must be absent from Storage',
         );
 
-        // 5. No consent/media record in Firestore: the device doc the
-        // join created carries no guest-photo fields. (Collection lists
-        // are rules-denied for clients, so the doc read is the check.)
-        final Map<String, Object?> reread = await _firestoreGet(
-          'parties/$partyId/devices/$deviceId',
-        );
-        final Map<String, Object?> fields =
-            reread['fields'] as Map<String, Object?>;
-        expect(fields.containsKey('consent'), isFalse);
-        expect(fields.containsKey('submissionId'), isFalse);
+        // 11. Refusal of later use from the guest path: re-completion of
+        // the withdrawn submission is forbidden (consent withdrawn).
+        Object? recompleteError;
+        try {
+          await _callFunction('completeGuestUpload', <String, Object?>{
+            ...identity(),
+            'submissionId': submissionId,
+          });
+        } on _Refusal catch (error) {
+          recompleteError = error;
+        }
+        expect(recompleteError, isA<_Refusal>());
+        expect((recompleteError as _Refusal).body, contains('FORBIDDEN'));
 
-        // 6. Refusal of later generation from the guest path: generation
-        // is disabled in the emulator, so even a well-formed request is
-        // refused with PROVIDER_UNAVAILABLE before any job row or enqueue
-        // (no billable work). A guest-photo-flavored preset would
-        // additionally fail INVALID_ARGUMENT validation when enabled.
-        // no job row, no billable work.)
+        // 12. Refusal of later generation from the guest path: generation
+        // is disabled in the emulator, so even a well-formed guest-bound
+        // request is refused with PROVIDER_UNAVAILABLE before any job row
+        // or enqueue (no billable work).
         Object? generationError;
         try {
           await _callFunction('requestGeneration', <String, Object?>{
-            'partyId': partyId,
-            'deviceId': deviceId,
-            'channelId': channelId,
+            ...identity(),
             'jobId': 'guest-photo-it-job',
             'idempotencyKey': 'guest-photo-it-key',
-            'presetId': 'guest-photo-v1',
+            'presetId': 'cheap_demo',
+            'guestMediaId': submissionId,
           });
         } on _Refusal catch (error) {
           generationError = error;
@@ -383,13 +527,13 @@ void main() {
           contains('PROVIDER_UNAVAILABLE'),
           reason: 'generation stays disabled; nothing enqueued, no spend',
         );
-        // The refused generation left no trace on the device doc.
-        final Map<String, Object?> after = await _firestoreGet(
+        // The refused generation left no job trace on the device doc.
+        final Map<String, Object?> reread = await _firestoreGet(
           'parties/$partyId/devices/$deviceId',
         );
-        final Map<String, Object?> afterFields =
-            after['fields'] as Map<String, Object?>;
-        expect(afterFields.containsKey('jobId'), isFalse);
+        final Map<String, Object?> rereadFields =
+            reread['fields'] as Map<String, Object?>;
+        expect(rereadFields.containsKey('jobId'), isFalse);
       } finally {
         await dir.delete(recursive: true);
       }
