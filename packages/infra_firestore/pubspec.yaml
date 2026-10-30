@@ -10,6 +10,7 @@ dependencies:
   flutter:
     sdk: flutter
   cloud_firestore: ^5.6.12
+  cloud_functions: ^5.6.2
   channel_api:
     path: ../channel_api
   core_foundation:

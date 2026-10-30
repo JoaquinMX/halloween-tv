@@ -119,12 +119,12 @@ void main() {
             partyId: 'pilot',
             channelId: 'main',
             manifestVersion: 7,
-            verifiedClipHashes: <String>[
-              'a' * 64,
-              'b' * 64,
-              'c' * 64,
-              'd' * 64,
-            ],
+            verifiedClipHashes: <String, String>{
+              'CAM-04': 'd' * 64,
+              'CAM-02': 'b' * 64,
+              'CAM-01': 'a' * 64,
+              'CAM-03': 'c' * 64,
+            },
           );
           final (String ackName, Map<String, Object?> ackPayload) =
               callable.calls.last;

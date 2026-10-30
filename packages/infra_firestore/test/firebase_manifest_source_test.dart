@@ -1,6 +1,8 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+
 import 'dart:async';
 
+import 'package:core_playlist/core_playlist.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:infra_firestore/infra_firestore.dart';
 
@@ -110,13 +112,37 @@ void main() {
   test(
     'a Firestore stream transport error is recoverable by the caller',
     () async {
-      final FirebaseManifestSource source = sourceFor(
-        (_) => Stream<Map<String, Object?>?>.error(StateError('offline')),
+      final FirebaseManifestSource source = FirebaseManifestSource(
+        watchDocumentData: (_) =>
+            Stream<Map<String, Object?>?>.error(StateError('offline')),
+        maxTransportResubscriptions: 0,
+        transportRetryDelay: Duration.zero,
       );
       await expectLater(
         source.watchCurrent(partyId: 'pilot', channelId: 'main'),
         emitsError(isA<ManifestTransportException>()),
       );
+    },
+  );
+
+  test(
+    'legacy backend timestamp fallback is stable across observations',
+    () async {
+      final Map<String, Object?> withoutCreatedAt = backendManifest()
+        ..remove('createdAt');
+      final FirebaseManifestSource source = sourceFor(
+        (_) => Stream<Map<String, Object?>?>.fromIterable(
+          <Map<String, Object?>?>[withoutCreatedAt, withoutCreatedAt],
+        ),
+      );
+
+      final List<PlaybackManifest> manifest = await source
+          .watchCurrent(partyId: 'pilot', channelId: 'main')
+          .toList();
+
+      expect(manifest, hasLength(2));
+      expect(manifest[0].publishedAt, DateTime.utc(1970));
+      expect(manifest[1], manifest[0]);
     },
   );
 }

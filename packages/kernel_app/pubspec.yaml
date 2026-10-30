@@ -17,6 +17,8 @@ dependencies:
     path: ../core_foundation
   core_playlist:
     path: ../core_playlist
+  infra_firestore:
+    path: ../infra_firestore
   infra_signed_urls:
     path: ../infra_signed_urls
 

@@ -11,4 +11,5 @@
 
 export 'src/manifest_source.dart';
 export 'src/firebase_manifest_source.dart';
+export 'src/firebase_callable_manifest_transport.dart';
 export 'src/firebase_tv_identity.dart';
