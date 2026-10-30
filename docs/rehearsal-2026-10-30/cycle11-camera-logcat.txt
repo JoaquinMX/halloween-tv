@@ -1,0 +1,30 @@
+10-30 17:19:34.957 14528 14529 W AdrenoUtils: <ReadGpuID_from_sysfs:197>: Failed to open /sys/class/kgsl/kgsl-3d0/gpu_model
+10-30 17:19:34.957 14528 14529 W AdrenoUtils: <ReadGpuID:221>: Failed to read chip ID from gpu_model. Fallback to use the GSL path
+10-30 17:19:36.096  2874  9349 I NearbyMediums: No BLE Fast/GATT advertisements found in the latest cycle.
+10-30 17:19:36.096  2874  9349 I NearbyMediums: Current Tracked Scanning Clients are : {NearbyConnections.EnvironmentMonitor, NearbySharing}
+10-30 17:19:36.980  3671  3682 W System  : A resource failed to call CursorWindow.close. 
+10-30 17:19:36.980  3671  3682 W System  : A resource failed to call AbstractCursor.close. 
+10-30 17:19:39.670  3671  3671 D FMDEV   : On Accesssibility Event WINDOW 0 2048
+10-30 17:19:39.670  3671  4708 V         : Event PackageName = com.joaquinmx.companion_app, eventClassName = , eventText = 
+10-30 17:19:39.670  3671  4708 V         : Window Content change First Event
+10-30 17:19:39.670  3671  4708 V         : pkgName = com.joaquinmx.companion_app, id = , text = , className = android.view.View
+10-30 17:19:39.670  3671  4708 V         : pkgName = com.joaquinmx.companion_app, id = , text = , className = android.view.View
+10-30 17:19:39.670  3671  4708 V         : pkgName = com.joaquinmx.companion_app, id = , text = , className = android.view.View
+10-30 17:19:39.670  3671  4708 V         : pkgName = com.joaquinmx.companion_app, id = , text = , className = android.view.View
+10-30 17:19:39.670  3671  4708 V         : pkgName = com.joaquinmx.companion_app, id = , text = , className = android.view.View
+10-30 17:19:39.670  3671  4708 V         : pkgName = com.joaquinmx.companion_app, id = , text = , className = android.view.View
+10-30 17:19:39.670  3671  4708 V         : pkgName = com.joaquinmx.companion_app, id = , text = , className = android.view.View
+10-30 17:19:39.670  3671  4708 V         : pkgName = com.joaquinmx.companion_app, id = , text = , className = android.view.View
+10-30 17:19:39.672  3671  4708 V         : pkgName = com.joaquinmx.companion_app, id = , text = , className = android.view.View
+10-30 17:19:39.672  3671  4708 V         : pkgName = com.joaquinmx.companion_app, id = , text = , className = android.view.View
+10-30 17:19:39.672  3671  4708 V         : pkgName = com.joaquinmx.companion_app, id = , text = , className = android.view.View
+10-30 17:19:39.672  3671  4708 V         : pkgName = com.joaquinmx.companion_app, id = , text = , className = android.view.View
+10-30 17:19:39.672  3671  4708 V         : pkgName = com.joaquinmx.companion_app, id = , text = , className = android.view.View
+10-30 17:19:39.672  3671  4708 V         : pkgName = com.joaquinmx.companion_app, id = , text = , className = android.view.View
+10-30 17:19:39.672  3671  4708 V         : pkgName = com.joaquinmx.companion_app, id = , text = , className = android.view.View
+10-30 17:19:39.672  3671  4708 V         : pkgName = com.joaquinmx.companion_app, id = , text = , className = android.view.View
+10-30 17:19:39.673  3671  4708 V         : pkgName = com.joaquinmx.companion_app, id = , text = , className = android.widget.Button
+10-30 17:19:39.673  3671  4708 V         : pkgName = com.joaquinmx.companion_app, id = , text = , className = android.widget.Button
+10-30 17:19:43.789  2874  3071 I NearbyDiscovery: (REDACTED) BloomFilterAdvManager: Detected bloom filter but too far away, ignoring. %sm, %s
+10-30 17:19:43.790  2874 14487 I NearbyDiscovery: (REDACTED) loadFastPairModule: checkFeaturesAreAvailable:%d
+10-30 17:19:43.790  2874 14487 I NearbyDiscovery: loadFastPairModule: FastPair module is downloaded. [CONTEXT service_id=265 ]
