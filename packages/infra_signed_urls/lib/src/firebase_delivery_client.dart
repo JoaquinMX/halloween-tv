@@ -56,6 +56,11 @@ final class FirebaseDeliveryClipUrl {
 }
 
 /// Validated result from the `getDeliveryUrls` callable.
+///
+/// `manifestVersion` and `manifestHash` are validated as response fields, but
+/// URL reuse is intentionally keyed only by cameraId plus SHA-256. The TV does
+/// not request a particular manifest from this callable, so those fields are
+/// not compared to a requested manifest.
 final class FirebaseDeliveryUrls {
   FirebaseDeliveryUrls({
     required this.manifestVersion,
@@ -171,6 +176,9 @@ final class FirebaseDeliveryClient implements DeliveryAcknowledger {
 
   /// Gets a fresh URL for this exact camera content. Hash matching makes a
   /// concurrent manifest update safe: another clip cannot be substituted.
+  /// This does not compare the returned manifestVersion or manifestHash with
+  /// the prepared manifest; the server response has no requested-version
+  /// binding. The caller still ACKs only its prepared version.
   Future<Uri> refreshUrlFor({
     required String channelId,
     required ClipDescriptor clip,
@@ -195,29 +203,55 @@ final class FirebaseDeliveryClient implements DeliveryAcknowledger {
     required String partyId,
     required String channelId,
     required int manifestVersion,
-    required List<String> verifiedClipHashes,
+    required Map<String, String> verifiedClipHashes,
   }) async {
     if (partyId != _identity.partyId) {
       throw ArgumentError.value(partyId, 'partyId', 'does not match identity');
     }
-    if (manifestVersion <= 0 || verifiedClipHashes.length != cctvSlots.length) {
+    final Set<String> canonicalCameras = cctvSlots
+        .map((CctvSlot slot) => slot.id)
+        .toSet();
+    if (manifestVersion <= 0 ||
+        verifiedClipHashes.length != cctvSlots.length ||
+        !verifiedClipHashes.keys.toSet().containsAll(canonicalCameras)) {
       throw ArgumentError(
-        'ACK requires a positive version and four clip hashes',
+        'ACK requires a positive version and one hash for each canonical camera',
       );
     }
     final Map<String, String> hashes = <String, String>{};
-    for (var i = 0; i < cctvSlots.length; i++) {
-      final String hash = verifiedClipHashes[i].toLowerCase();
+    for (final String cameraId in canonicalCameras) {
+      final String hash = verifiedClipHashes[cameraId]!.toLowerCase();
       if (!_sha256.hasMatch(hash)) {
-        throw ArgumentError.value(hash, 'verifiedClipHashes[$i]');
+        throw ArgumentError.value(hash, 'verifiedClipHashes[$cameraId]');
       }
-      hashes[cctvSlots[i].id] = hash;
+      hashes[cameraId] = hash;
     }
-    await _call('acknowledgeDelivery', <String, Object?>{
+    final Object? raw = await _call('acknowledgeDelivery', <String, Object?>{
       ..._identity.callablePayload(channelId: channelId),
       'manifestVersion': manifestVersion,
       'clipHashes': hashes,
     });
+    if (raw is! Map) {
+      throw const FormatException(
+        'acknowledgeDelivery response must be an object',
+      );
+    }
+    final Object? ackId = raw['ackId'];
+    final Object? responseVersion = raw['manifestVersion'];
+    final Object? purged = raw['purged'];
+    if (ackId is! String || ackId.trim().isEmpty) {
+      throw const FormatException('acknowledgeDelivery ackId is invalid');
+    }
+    if (responseVersion is! num ||
+        responseVersion.toInt() != responseVersion ||
+        responseVersion.toInt() != manifestVersion) {
+      throw const FormatException(
+        'acknowledgeDelivery manifestVersion does not match request',
+      );
+    }
+    if (purged is! bool || !purged) {
+      throw const FormatException('acknowledgeDelivery purged is invalid');
+    }
   }
 }
 

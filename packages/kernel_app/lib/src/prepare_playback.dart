@@ -440,10 +440,10 @@ final class PreparePlayback {
         partyId: manifest.partyId,
         channelId: manifest.channelId,
         manifestVersion: manifest.version,
-        verifiedClipHashes: <String>[
+        verifiedClipHashes: <String, String>{
           for (final ClipDescriptor clip in manifest.clips)
-            clip.sha256.toLowerCase(),
-        ],
+            clip.cameraId: clip.sha256.toLowerCase(),
+        },
       );
     } on Object catch (error) {
       if (token == _operation) {

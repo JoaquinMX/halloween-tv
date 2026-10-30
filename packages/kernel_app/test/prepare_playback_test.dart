@@ -40,12 +40,14 @@ final class _Downloader implements MediaDownloader {
   final Map<String, Completer<void>> started = <String, Completer<void>>{};
   int active = 0;
   int maxActive = 0;
+  int downloadCount = 0;
 
   @override
   Future<DownloadedMedia> downloadAndVerify(
     ClipDescriptor clip,
     Uri source,
   ) async {
+    downloadCount++;
     active++;
     if (active > maxActive) {
       maxActive = active;
@@ -124,8 +126,13 @@ final class _IndexStore implements ManifestIndexStore {
 
   @override
   Future<void> writeAtomically(CommittedManifestIndex index) async {
+    if (failWrites) {
+      throw StateError('atomic index write failed');
+    }
     indexes[_key(index.manifest.partyId, index.manifest.channelId)] = index;
   }
+
+  bool failWrites = false;
 }
 
 final class _AckRecord {
@@ -134,25 +141,31 @@ final class _AckRecord {
   final String partyId;
   final String channelId;
   final int version;
-  final List<String> hashes;
+  final Map<String, String> hashes;
 }
 
 final class _Acknowledger implements DeliveryAcknowledger {
   final List<_AckRecord> records = <_AckRecord>[];
+  Object? failure;
 
   @override
   Future<void> acknowledge({
     required String partyId,
     required String channelId,
     required int manifestVersion,
-    required List<String> verifiedClipHashes,
+    required Map<String, String> verifiedClipHashes,
   }) async {
+    final Object? currentFailure = failure;
+    failure = null;
+    if (currentFailure != null) {
+      throw currentFailure;
+    }
     records.add(
       _AckRecord(
         partyId,
         channelId,
         manifestVersion,
-        List<String>.unmodifiable(verifiedClipHashes),
+        Map<String, String>.unmodifiable(verifiedClipHashes),
       ),
     );
   }
@@ -286,6 +299,126 @@ void main() {
       expect(offlineSigner.signedClipIds, isEmpty);
     },
   );
+
+  test(
+    'shuffled manifests ACK hashes by camera id instead of list position',
+    () async {
+      final _CacheStore cache = _CacheStore();
+      final _IndexStore indexes = _IndexStore();
+      final _Downloader downloader = _Downloader();
+      final _Acknowledger ack = _Acknowledger();
+      final List<ClipDescriptor> shuffled = _manifest().clips.reversed.toList();
+      final PreparePlayback service = _useCase(
+        cache: cache,
+        index: indexes,
+        downloader: downloader,
+        acknowledger: ack,
+      );
+      addTearDown(service.dispose);
+
+      final PlaybackManifest manifest = _manifest(clips: shuffled);
+      expect(
+        (await service.prepareManifest(manifest)).state,
+        PlaybackSyncState.ready,
+      );
+      expect(ack.records.single.hashes, <String, String>{
+        for (final ClipDescriptor clip in manifest.clips)
+          clip.cameraId: clip.sha256,
+      });
+      expect(ack.records.single.hashes.values.toSet(), hasLength(4));
+    },
+  );
+
+  test(
+    'lost ACK response retries committed version without downloading again',
+    () async {
+      final _CacheStore cache = _CacheStore();
+      final _IndexStore indexes = _IndexStore();
+      final _Downloader downloader = _Downloader();
+      final _Acknowledger ack = _Acknowledger()
+        ..failure = StateError('ACK response was lost');
+      final PreparePlayback service = _useCase(
+        cache: cache,
+        index: indexes,
+        downloader: downloader,
+        acknowledger: ack,
+      );
+      addTearDown(service.dispose);
+      final PlaybackManifest manifest = _manifest();
+
+      final PlaybackSyncSnapshot first = await service.prepareManifest(
+        manifest,
+      );
+      expect(first.state, PlaybackSyncState.errorRecoverable);
+      expect(first.hasCompleteMedia, isTrue);
+      expect(indexes.indexes.values.single.committedVersion, 1);
+      final int downloadsAfterFirstCommit = downloader.downloadCount;
+
+      final PlaybackSyncSnapshot retried = await service.prepareManifest(
+        manifest,
+      );
+      expect(retried.state, PlaybackSyncState.ready);
+      expect(downloader.downloadCount, downloadsAfterFirstCommit);
+      expect(ack.records, hasLength(1));
+      expect(ack.records.single.version, 1);
+    },
+  );
+
+  test(
+    'ACK rejection keeps verified playback available for a later retry',
+    () async {
+      final _CacheStore cache = _CacheStore();
+      final _IndexStore indexes = _IndexStore();
+      final _Downloader downloader = _Downloader();
+      final _Acknowledger ack = _Acknowledger()
+        ..failure = StateError('backend rejected ACK');
+      final PreparePlayback service = _useCase(
+        cache: cache,
+        index: indexes,
+        downloader: downloader,
+        acknowledger: ack,
+      );
+      addTearDown(service.dispose);
+      final PlaybackManifest manifest = _manifest();
+
+      final PlaybackSyncSnapshot rejected = await service.prepareManifest(
+        manifest,
+      );
+      expect(rejected.state, PlaybackSyncState.errorRecoverable);
+      expect(rejected.hasCompleteMedia, isTrue);
+      expect(indexes.indexes.values.single.committedVersion, 1);
+      expect(ack.records, isEmpty);
+      final int downloads = downloader.downloadCount;
+
+      final PlaybackSyncSnapshot retried = await service.prepareManifest(
+        manifest,
+      );
+      expect(retried.state, PlaybackSyncState.ready);
+      expect(downloader.downloadCount, downloads);
+      expect(ack.records.single.version, 1);
+    },
+  );
+
+  test('failed atomic index write cannot ACK verified clip files', () async {
+    final _CacheStore cache = _CacheStore();
+    final _IndexStore indexes = _IndexStore()..failWrites = true;
+    final _Downloader downloader = _Downloader();
+    final _Acknowledger ack = _Acknowledger();
+    final PreparePlayback service = _useCase(
+      cache: cache,
+      index: indexes,
+      downloader: downloader,
+      acknowledger: ack,
+    );
+    addTearDown(service.dispose);
+
+    final PlaybackSyncSnapshot failed = await service.prepareManifest(
+      _manifest(),
+    );
+    expect(failed.state, PlaybackSyncState.errorRecoverable);
+    expect(indexes.indexes, isEmpty);
+    expect(ack.records, isEmpty);
+  });
 
   test(
     'corrupt download keeps previous playback and committed version',

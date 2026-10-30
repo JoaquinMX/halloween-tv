@@ -115,6 +115,10 @@ class StaticManifestSource implements ManifestSource<PlaybackManifest> {
 /// Semantic rules (4 CCTV cameras, digests, durations) live in
 /// `core_playlist`'s `validateCctvManifest`; mapping stays shape-only so it
 /// can also carry manifests for non-CCTV channels.
+///
+/// [now] remains accepted for source compatibility. Legacy backend documents
+/// without a publication timestamp map to a stable UTC epoch value instead
+/// of observation time.
 PlaybackManifest manifestFromFirestore(
   Map<String, Object?> doc, {
   DateTime Function()? now,
@@ -179,14 +183,14 @@ Map<String, Object?> _playbackPayloadFromBackend(
     });
   }
 
-  // Backend v1 records the publication timestamp as `createdAt`. Seeded
-  // emulator fixtures may omit it; in that case the observation time is the
-  // best timestamp available to the domain model.
+  // Published and newly seeded backend manifests carry a stable `createdAt`.
+  // For legacy documents without either timestamp, use an epoch sentinel so
+  // repeated observations of identical content remain the same manifest.
   final Object? publishedAt = doc['publishedAt'] ?? doc['createdAt'];
   final String timestamp = switch (publishedAt) {
     final DateTime value => value.toUtc().toIso8601String(),
     final String value => value,
-    _ => now().toUtc().toIso8601String(),
+    _ => DateTime.utc(1970).toIso8601String(),
   };
 
   return <String, Object?>{
