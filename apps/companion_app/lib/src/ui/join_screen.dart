@@ -26,7 +26,7 @@ final class _JoinScreenState extends State<JoinScreen> {
   final _party = TextEditingController(), _channel = TextEditingController(), _pin = TextEditingController(), _payload = TextEditingController();
   late final DeviceIdentityStore _identityStore = widget.identityStore ?? DeviceIdentityStore();
   String? _deviceId, _error;
-  bool _submitting = false;
+  bool _submitting = false, _scanning = false;
   @override void initState() { super.initState(); _initialize(); }
   Future<void> _initialize() async { try { final id = await _identityStore.getDeviceId(); if (mounted) setState(() => _deviceId = id); } catch (_) { if (mounted) setState(() => _error = 'Could not save this device identity. Retry to continue.'); } }
   @override void dispose() { _party.dispose(); _channel.dispose(); _pin.dispose(); _payload.dispose(); super.dispose(); }
@@ -44,10 +44,16 @@ final class _JoinScreenState extends State<JoinScreen> {
     }
   }
   Future<void> _scan() async {
-    final result = await widget.scanner.scan();
-    if (!mounted) return;
-    if (result case JoinPayloadText(:final text)) { setState(() => _payload.text = text); await _submit(); }
-    else { setState(() => _error = 'Scanner is unavailable on this device.'); }
+    if (_scanning || _submitting || _deviceId == null) return;
+    setState(() => _scanning = true);
+    try {
+      final result = await widget.scanner.scan();
+      if (!mounted) return;
+      if (result case JoinPayloadText(:final text)) { setState(() => _payload.text = text); await _submit(); }
+      else { setState(() => _error = 'Scanner is unavailable on this device.'); }
+    } finally {
+      if (mounted) setState(() => _scanning = false);
+    }
   }
   @override Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(title: const Text('Join party')),
@@ -59,7 +65,7 @@ final class _JoinScreenState extends State<JoinScreen> {
       _field(JoinScreen.channelFieldKey, _channel, 'Channel ID'), const SizedBox(height: 12),
       _field(JoinScreen.pinFieldKey, _pin, 'Join PIN (optional)'), const SizedBox(height: 12),
       TextField(key: JoinScreen.payloadFieldKey, controller: _payload, decoration: const InputDecoration(labelText: 'Pasted join data (optional)', hintText: '{"partyId":"…","channelId":"…","joinPin":"004201"}', border: OutlineInputBorder()), minLines: 1, maxLines: 4, autocorrect: false, enableSuggestions: false),
-      TextButton(key: JoinScreen.scanKey, onPressed: _scan, child: const Text('Scan QR')),
+      TextButton(key: JoinScreen.scanKey, onPressed: _deviceId == null || _submitting || _scanning ? null : _scan, child: const Text('Scan QR')),
       if (_error != null) Text(_error!, key: JoinScreen.errorKey, style: TextStyle(color: Theme.of(context).colorScheme.error)),
       const SizedBox(height: 16), ElevatedButton(key: JoinScreen.submitKey, onPressed: _deviceId == null || _submitting ? null : _submit, child: _submitting ? const CircularProgressIndicator() : const Text('Join')),
       if (_deviceId == null) const Text('Preparing this device…'),

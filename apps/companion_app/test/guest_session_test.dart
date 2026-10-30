@@ -59,6 +59,32 @@ final class FakeRegistrationInvoker implements PartyJoinCallableInvoker {
       pending.future;
 }
 
+/// Join invoker serving one scripted step per call: a [Completer] waits, a
+/// [Map] returns a valid echo, any other [Object] is thrown.
+final class ScriptedJoinInvoker implements PartyJoinCallableInvoker {
+  ScriptedJoinInvoker(this.steps);
+  final List<Object?> steps;
+  int calls = 0;
+  @override
+  Future<Object?> call(String name, Map<String, Object?> payload) async {
+    final Object? step = steps[calls++];
+    if (step is Completer<Object?>) {
+      return step.future;
+    }
+    if (step is Map<String, Object?>) {
+      return <String, Object?>{
+        'partyId': payload['partyId'],
+        'deviceId': payload['deviceId'],
+        'channelId': payload['channelId'],
+        'role': 'guest',
+        'status': 'active',
+        'created': true,
+      };
+    }
+    throw step!;
+  }
+}
+
 PlaybackManifest makeManifest({
   String partyId = 'party-1',
   String channelId = 'cctv',
@@ -190,6 +216,94 @@ void main() {
         await joining;
         expect(source.watchCalls, 0);
         expect(session.state.status, GuestSessionStatus.idle);
+        await session.dispose();
+      },
+    );
+
+    test(
+      'switch during pending registration supersedes; late first registration never subscribes',
+      () async {
+        final Completer<Object?> first = Completer<Object?>();
+        final Completer<Object?> second = Completer<Object?>();
+        final ScriptedJoinInvoker invoker = ScriptedJoinInvoker(
+          <Object?>[first, second],
+        );
+        final GuestSession session = GuestSession(
+          source: source,
+          clock: clock,
+          joinClient: PartyJoinClient(invoker: invoker),
+        );
+        final Future<void> joiningFirst = session.join(
+          joinFor(party: 'party-a'),
+        );
+        await pumpEvents();
+        expect(session.state.status, GuestSessionStatus.loading);
+        expect(invoker.calls, 1);
+
+        final Future<void> joiningSecond = session.join(
+          joinFor(party: 'party-b'),
+        );
+        await pumpEvents();
+        expect(invoker.calls, 2);
+
+        // The superseded first registration resolves late: it must never
+        // start a manifest read for the abandoned party.
+        first.complete(<String, Object?>{
+          'partyId': 'party-a',
+          'deviceId': 'device-9',
+          'channelId': 'cctv',
+          'role': 'guest',
+          'status': 'active',
+          'created': true,
+        });
+        await joiningFirst;
+        expect(source.watchCalls, 0);
+        expect(session.state.join?.partyId.value, 'party-b');
+
+        second.complete(<String, Object?>{
+          'partyId': 'party-b',
+          'deviceId': 'device-9',
+          'channelId': 'cctv',
+          'role': 'guest',
+          'status': 'active',
+          'created': true,
+        });
+        await joiningSecond;
+        expect(source.watchCalls, 1);
+        expect(source.lastPartyId, 'party-b');
+        source.controllers.single.add(makeManifest(partyId: 'party-b'));
+        await pumpEvents();
+        expect(session.state.status, GuestSessionStatus.ready);
+        expect(session.manifest?.partyId, 'party-b');
+        await session.dispose();
+      },
+    );
+
+    test(
+      'refresh while unregistered re-registers instead of subscribing',
+      () async {
+        final ScriptedJoinInvoker invoker = ScriptedJoinInvoker(
+          <Object?>[
+            contractError('permission-denied', 'FORBIDDEN', 'denied'),
+            <String, Object?>{},
+          ],
+        );
+        final GuestSession session = GuestSession(
+          source: source,
+          clock: clock,
+          joinClient: PartyJoinClient(invoker: invoker),
+        );
+        await session.join(joinFor());
+        expect(session.state.status, GuestSessionStatus.denied);
+        expect(invoker.calls, 1);
+        expect(source.watchCalls, 0);
+
+        await session.refresh();
+        expect(invoker.calls, 2);
+        expect(source.watchCalls, 1);
+        source.controllers.single.add(makeManifest());
+        await pumpEvents();
+        expect(session.state.status, GuestSessionStatus.ready);
         await session.dispose();
       },
     );

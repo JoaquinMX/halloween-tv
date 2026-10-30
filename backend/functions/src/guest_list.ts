@@ -1,6 +1,6 @@
 import { Firestore } from "firebase-admin/firestore";
 import { assertRegisteredPartyDevice } from "./auth";
-import { BackendError, CurrentManifestInput, parseCurrentManifestInput } from "./contracts";
+import { BackendError, CurrentManifestInput, JOIN_PIN_RE, parseCurrentManifestInput } from "./contracts";
 
 /** One registered device visible to the TV host panel. */
 export interface GuestCodeEntry {
@@ -56,8 +56,13 @@ export function createGuestListService(options: GuestListServiceOptions): {
             role: typeof data.role === "string" ? String(data.role) : "unknown",
             status: typeof data.status === "string" ? String(data.status) : "unknown",
           };
-          if (typeof rawLabel === "string" && rawLabel.length > 0) {
-            entry.label = rawLabel;
+          if (typeof rawLabel === "string") {
+            // Whitespace-only labels normalize to absent (the TV falls back
+            // to a neutral device-based display for those rows).
+            const trimmed = rawLabel.trim();
+            if (trimmed.length > 0) {
+              entry.label = trimmed;
+            }
           }
           return entry;
         })
@@ -69,8 +74,19 @@ export function createGuestListService(options: GuestListServiceOptions): {
         tvDeviceId: registered.deviceId,
         devices,
       };
-      const storedPin = registered.party.joinPin;
-      if (typeof storedPin === "string" && storedPin.length > 0) {
+      // Fail closed on a malformed stored PIN: a PIN-free session must never
+      // be presented as valid when the stored value is present but invalid
+      // (number/boolean/malformed string written via console). The TV panel
+      // surfaces this as an error state with no fabricated QR.
+      const storedPin: unknown = registered.party.joinPin;
+      const pinUnset = storedPin === undefined || storedPin === "";
+      if (!pinUnset) {
+        if (typeof storedPin !== "string" || !JOIN_PIN_RE.test(storedPin)) {
+          throw new BackendError(
+            "INTERNAL",
+            "Party join PIN is misconfigured; re-provision it with seed_join.",
+          );
+        }
         listing.joinPin = storedPin;
       }
       return listing;

@@ -52,6 +52,10 @@ const Key kGuestCodeEmptyKey = ValueKey<String>('guest-code-empty');
 /// Default bounded refresh interval while the panel is visible.
 const Duration kGuestCodeRefreshInterval = Duration(seconds: 10);
 
+/// Bounds a single listing fetch: without this, a hung callable would hold
+/// `_fetching` true forever and wedge the panel (no retries, stale rows).
+const Duration kGuestCodeFetchTimeout = Duration(seconds: 10);
+
 /// Host panel: TV code (large text + session QR) and the guest list.
 ///
 /// Owns its listing refresh: fetches immediately on open and re-fetches on
@@ -123,13 +127,25 @@ class _GuestCodePanelState extends State<GuestCodePanel> {
     _fetching = true;
     final int generation = _generation;
     try {
-      final GuestCodeListing listing = await widget.client.fetchListing();
+      final GuestCodeListing listing = await widget.client
+          .fetchListing()
+          .timeout(kGuestCodeFetchTimeout);
       if (!mounted || generation != _generation) {
         return;
       }
       setState(() {
         _listing = listing;
         _error = null;
+        _firstFetchDone = true;
+      });
+    } on TimeoutException {
+      // A hung fetch releases the in-flight guard so the next tick retries;
+      // the last valid session (if any) is retained behind an inline error.
+      if (!mounted || generation != _generation) {
+        return;
+      }
+      setState(() {
+        _error = 'guest list refresh timed out';
         _firstFetchDone = true;
       });
     } on Object catch (error) {

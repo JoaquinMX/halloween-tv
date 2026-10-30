@@ -489,6 +489,74 @@ void main() {
       await disposePanel(tester);
     });
 
+    testWidgets('hung fetch times out and the panel retries to recovery',
+        (WidgetTester tester) async {
+      int calls = 0;
+      final GuestCodeClient client = GuestCodeClient(
+        invoker: (_, __) {
+          calls++;
+          if (calls <= 2) {
+            // Never completes: without the fetch timeout these would hold
+            // `_fetching` true forever and wedge the panel.
+            return Completer<Map<String, Object?>>().future;
+          }
+          return Future.value(
+            listingResponse(
+              joinPin: '004201',
+              devices: <Object?>[
+                <String, Object?>{'deviceId': 'g-1', 'label': 'Guest 1'},
+              ],
+            ),
+          );
+        },
+        partyId: 'party-1',
+        deviceId: 'tv-abc',
+        channelId: hauntedSurveillanceChannelId,
+      );
+      await pumpPanel(
+        tester,
+        client,
+        refreshInterval: const Duration(seconds: 5),
+      );
+      await tester.pump();
+      expect(find.byKey(kGuestCodeLoadingKey), findsOneWidget);
+      expect(calls, 1);
+
+      // The periodic tick while the first fetch hangs is skipped.
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pump();
+      expect(calls, 1);
+
+      // The hung fetch times out: error state, no fabricated QR. The next
+      // tick retries (the in-flight guard was released by the timeout), and
+      // that retry hangs too — the error state persists across the tick.
+      await tester.pump(const Duration(seconds: 6));
+      await tester.pump();
+      expect(find.byKey(kGuestCodeErrorKey), findsOneWidget);
+      expect(find.textContaining('timed out'), findsOneWidget);
+      expect(find.byType(QrImageView), findsNothing);
+      expect(calls, 2);
+
+      await tester.pump(const Duration(seconds: 4));
+      await tester.pump();
+      expect(calls, 2);
+      expect(find.byKey(kGuestCodeErrorKey), findsOneWidget);
+      expect(find.byType(QrImageView), findsNothing);
+
+      // The second hung fetch times out as well; the following tick retries
+      // and the panel recovers with the authoritative session.
+      await tester.pump(const Duration(seconds: 6));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pump();
+      await tester.pump();
+      expect(calls, greaterThanOrEqualTo(3));
+      expect(find.byType(QrImageView), findsOneWidget);
+      expect(find.text('Guest 1: g-1'), findsOneWidget);
+      await disposePanel(tester);
+    });
+
     testWidgets('dispose cancels timer and ignores late responses',
         (WidgetTester tester) async {
       int calls = 0;

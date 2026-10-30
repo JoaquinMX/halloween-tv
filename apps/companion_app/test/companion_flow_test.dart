@@ -13,6 +13,8 @@ import 'dart:async';
 import 'package:channel_api/channel_api.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:companion_app/src/companion_app.dart';
+import 'package:companion_app/src/config/backend_config.dart';
+import 'package:companion_app/src/data/party_join_client.dart';
 import 'package:companion_app/src/join/device_identity_store.dart';
 import 'package:companion_app/src/ui/connection_status.dart';
 import 'package:companion_app/src/ui/join_screen.dart';
@@ -22,6 +24,8 @@ import 'package:core_playlist/core_playlist.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:infra_firestore/infra_firestore.dart'
+    show FirebaseManifestCallableInvoker;
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Port-level fake: substitutes only the callable-boundary source.
@@ -42,6 +46,64 @@ final class FakeManifestSource implements ManifestSource<PlaybackManifest> {
         StreamController<PlaybackManifest>();
     controllers.add(controller);
     return controller.stream;
+  }
+}
+
+/// Records live-boot callable traffic in [events] (`register` before
+/// `manifest` proves the registration-before-subscription wiring).
+///
+/// When [failAfterFirst] is set, the first call serves [document] and later
+/// calls throw: the transport treats the first failure as terminal
+/// (`maxConsecutiveFailures: 0`), closes its stream, and the whole
+/// subscription chain ends on its own — so no poll timer is left pending at
+/// teardown (cancelling a chain parked in `await for` never completes).
+final class RecordingManifestInvoker
+    implements FirebaseManifestCallableInvoker {
+  RecordingManifestInvoker(this.events, this.document);
+
+  final List<String> events;
+  final Map<String, Object?> document;
+  int calls = 0;
+  bool failAfterFirst = false;
+
+  @override
+  Future<Object?> call(String name, Map<String, Object?> payload) async {
+    calls++;
+    events.add('manifest');
+    if (failAfterFirst && calls > 1) {
+      throw Exception('scripted post-first callable failure');
+    }
+    return Map<String, Object?>.of(document);
+  }
+}
+
+/// Fake joinParty boundary: echoes the requested scope into a valid guest
+/// registration, or throws [failure] to script denial paths.
+final class RecordingJoinInvoker implements PartyJoinCallableInvoker {
+  RecordingJoinInvoker(this.events);
+
+  final List<String> events;
+  Object? failure;
+  int calls = 0;
+  Map<String, Object?>? lastPayload;
+
+  @override
+  Future<Object?> call(String name, Map<String, Object?> payload) async {
+    calls++;
+    events.add('register');
+    lastPayload = Map<String, Object?>.of(payload);
+    final Object? error = failure;
+    if (error != null) {
+      throw error;
+    }
+    return <String, Object?>{
+      'partyId': payload['partyId'],
+      'deviceId': payload['deviceId'],
+      'channelId': payload['channelId'],
+      'role': 'guest',
+      'status': 'active',
+      'created': true,
+    };
   }
 }
 
@@ -455,6 +517,124 @@ void main() {
       expect(find.text('CAM-04 · storage room'), findsOneWidget);
       expect(find.byKey(const Key('camera-CAM-01')), findsOneWidget);
       expect(find.byKey(ConnectionStatus.retryKey), findsNothing);
+      expect(tester.takeException(), isNull);
+    });
+  });
+
+  group('Companion live-boot flow (config + invoker overrides)', () {
+    late FakeClock liveClock;
+    late List<String> events;
+    late RecordingManifestInvoker manifestInvoker;
+    late RecordingJoinInvoker joinInvoker;
+
+    Map<String, Object?> liveManifestDoc() {
+      String sha(String seed) => List.filled(64, seed).join();
+      return <String, Object?>{
+        'partyId': 'party-1',
+        'channelId': 'cctv',
+        'version': 1,
+        'schemaVersion': 1,
+        'jobId': 'job-1',
+        'cameraClips': <Object?>[
+          for (int i = 1; i <= 4; i++)
+            <String, Object?>{
+              'cameraId': 'CAM-0$i',
+              'durationMs': 2000,
+              'expiresAt': '2030-01-01T00:00:00.000Z',
+              'objectPath':
+                  'parties/party-1/channels/cctv/delivery/1/CAM-0$i.mp4',
+              'sha256': sha('$i'),
+              'sizeBytes': 1024 + i,
+            },
+        ],
+        'createdAt': '2026-10-29T14:00:00.000Z',
+        'expiresAt': '2030-01-01T00:00:00.000Z',
+      };
+    }
+
+    Future<void> pumpLiveApp(WidgetTester tester) async {
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        DeviceIdentityStore.storageKey: kFixedDeviceId,
+      });
+      await tester.pumpWidget(
+        CompanionApp(
+          config: BackendConfig.parse(<String, Object?>{
+            'apiKey': 'test-api-key',
+            'appId': '1:123:android:abc',
+            'projectId': 'test-project',
+          }),
+          firebaseBootstrap: (_) async {},
+          invokerOverride: manifestInvoker,
+          partyJoinInvokerOverride: joinInvoker,
+          clock: liveClock,
+        ),
+      );
+      await flush(tester);
+    }
+
+    Future<void> joinLive(WidgetTester tester) async {
+      await enterVisible(tester, find.byKey(JoinScreen.partyFieldKey), 'party-1');
+      await enterVisible(tester, find.byKey(JoinScreen.channelFieldKey), 'cctv');
+      await enterVisible(tester, find.byKey(JoinScreen.pinFieldKey), '');
+      await tapVisible(tester, find.byKey(JoinScreen.submitKey));
+      await flush(tester);
+    }
+
+    setUp(() {
+      liveClock = FakeClock(DateTime.utc(2026, 10, 29, 12));
+      events = <String>[];
+      manifestInvoker = RecordingManifestInvoker(events, liveManifestDoc());
+      joinInvoker = RecordingJoinInvoker(events);
+    });
+
+    testWidgets('registration precedes the manifest subscription', (
+      WidgetTester tester,
+    ) async {
+      manifestInvoker.failAfterFirst = true;
+      await pumpLiveApp(tester);
+      await joinLive(tester);
+
+      expect(joinInvoker.calls, 1);
+      expect(joinInvoker.lastPayload, <String, Object?>{
+        'partyId': 'party-1',
+        'deviceId': kFixedDeviceId,
+        'channelId': 'cctv',
+      });
+      expect(manifestInvoker.calls, 1);
+      // Registration is wired before the first manifest read.
+      expect(events, <String>['register', 'manifest']);
+
+      await flush(tester);
+      expect(find.textContaining('Manifest version 1'), findsOneWidget);
+      expect(find.text('CAM-01 · hallway'), findsOneWidget);
+
+      // Let the next poll fail: the transport closes its stream on the
+      // first failure, so the subscription ends on its own with the
+      // last-known lineup retained and no poll timer pending at teardown.
+      await tester.pump(const Duration(seconds: 31));
+      await flush(tester);
+      expect(manifestInvoker.calls, 2);
+      expect(find.textContaining('Manifest version 1'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('a FORBIDDEN registration surfaces the denied state', (
+      WidgetTester tester,
+    ) async {
+      joinInvoker.failure = FirebaseFunctionsException(
+        code: 'permission-denied',
+        message: 'unregistered party/device secret-party-9',
+        details: const <String, Object?>{'errorCode': 'FORBIDDEN'},
+      );
+      await pumpLiveApp(tester);
+      await joinLive(tester);
+
+      expect(joinInvoker.calls, 1);
+      expect(manifestInvoker.calls, 0);
+      expect(find.text('Access was denied.'), findsOneWidget);
+      expect(find.text('CAM-01 · hallway'), findsNothing);
+      // Raw backend detail never reaches a rendered banner.
+      expect(find.textContaining('secret-party-9'), findsNothing);
       expect(tester.takeException(), isNull);
     });
   });

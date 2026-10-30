@@ -84,7 +84,18 @@ Admin SDK. Direct client device writes stay denied by `firestore.rules`.
   keys: `{ "partyId": string, "channelId": string }` plus OPTIONAL
   `"joinPin"`: exactly six ASCII digits as a string (leading zeros significant,
   e.g. `"004201"`). NEVER a deviceId, URL, or secret. Extra keys in
-  scanned/pasted input are ignored.
+  scanned/pasted input are ignored. The `joinPin` is intentionally carried in
+  the QR: it is a displayed shared admission value, not a secret, and the TV
+  screen is the disclosure boundary (anyone who can see the TV can read it).
+- Authorized set: a device admitted through `joinParty` becomes a full
+  party-scoped caller — it may read the current manifest, mint delivery URLs,
+  request generation, and ACK/purge deliveries. That breadth is the
+  owner-accepted consequence of anonymous admission for a co-located party
+  (whoever is in the room and reads the TV screen can join). The residual
+  risk of an unbounded admitted set is tracked as an open owner question:
+  per-party rate limiting/lockout and per-party guest caps/bounded
+  listing/operator removal are explicitly deferred pending owner protocol
+  decisions, not implemented controls.
 - `joinParty { partyId, deviceId, channelId, joinPin? }` →
   `{ partyId, deviceId, channelId, role: "guest", status: "active", created }`.
   `deviceId` is the phone-generated installation ID (below). `created` is true
@@ -111,15 +122,21 @@ Admin SDK. Direct client device writes stay denied by `firestore.rules`.
   leaves an existing PIN untouched. Creates NO guest devices, collects NO
   labels, uploads NO media, calls NO providers. Target guards mirror
   `seed_guests.ts` (`--target=emulator|cloud`, explicit `--project` for cloud,
-  operator ADC, no service-account keys).
+  operator ADC, no service-account keys). Emulator trigger discovery for the
+  `demo-halloween-tv` project is driven by the `.env.demo-halloween-tv` file
+  (selects the demo project for local emulator runs; carries no secrets).
 - Phone installation-ID lifetime (companion): `"p-"` + 32 lowercase hex chars
   from 128 bits of `Random.secure` entropy, persisted under one app-wide
   `SharedPreferences` key and reused across launches, retries, leave, and
   party changes. Corrupt stored values are replaced and re-persisted;
   persistence/entropy failure surfaces retry and never proceeds unpersisted.
-- Camera deferral (companion): camera permission is requested only when the
-  user explicitly starts a scan, never at launch; paste remains available
-  without camera access.
+  Reinstall/cleared data mints a new installation id and therefore a new
+  guest row on next join; the old row remains until operator removal
+  (removal tooling is an open owner question, explicitly deferred below).
+- Camera deferral (companion): no camera/scanner implementation ships; the
+  scan seam returns unavailable, and no camera permission is
+  declared/requested. Paste remains available without camera access. Future
+  work needs a permission plus validation pass before any scanning ships.
 - Migration away from typed guest codes: new parties use QR + PIN
   self-registration. The typed-code path (`tools/guest_codes.ts`,
   `tools/seed_guests.ts`, verbal dictation via `listPartyDevices`) is

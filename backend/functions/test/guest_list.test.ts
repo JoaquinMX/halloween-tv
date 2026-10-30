@@ -55,15 +55,17 @@ test("host listing tolerates label-absent guests and surfaces joinPin only when 
     await db.doc(`parties/${partyId}/devices/${tvDevice}`).set({ partyId, deviceId: tvDevice, label: "TV", role: "tv", status: "active" });
     await db.doc(`parties/${partyId}/devices/p-nolabel`).set({ partyId, deviceId: "p-nolabel", role: "guest", status: "active" });
     await db.doc(`parties/${partyId}/devices/p-emptylabel`).set({ partyId, deviceId: "p-emptylabel", label: "", role: "guest", status: "active" });
+    await db.doc(`parties/${partyId}/devices/p-spacelabel`).set({ partyId, deviceId: "p-spacelabel", label: "   ", role: "guest", status: "active" });
     await db.doc(`parties/${partyId}/devices/p-named`).set({ partyId, deviceId: "p-named", label: "Named", role: "guest", status: "active" });
 
     const runtime = createRuntimeServices({ db, bucket });
     const listing = await runtime.listPartyDevices({ partyId, deviceId: tvDevice, channelId });
-    assert.equal(listing.devices.length, 3);
+    assert.equal(listing.devices.length, 4);
     assert.equal(listing.joinPin, "004201");
     const byId = new Map(listing.devices.map((entry) => [entry.deviceId, entry]));
     assert.ok(!("label" in byId.get("p-nolabel")!));
     assert.ok(!("label" in byId.get("p-emptylabel")!));
+    assert.ok(!("label" in byId.get("p-spacelabel")!), "whitespace-only labels normalize to absent");
     assert.equal(byId.get("p-named")!.label, "Named");
     assert.ok(listing.devices.every((entry) => entry.role === "guest" && entry.status === "active"));
     assert.ok(!listing.devices.some((entry) => entry.deviceId === tvDevice));
@@ -71,6 +73,45 @@ test("host listing tolerates label-absent guests and surfaces joinPin only when 
     await db.doc(`parties/${partyId}`).update({ joinPin: "" });
     const unpinned = await runtime.listPartyDevices({ partyId, deviceId: tvDevice, channelId });
     assert.ok(!("joinPin" in unpinned));
+  } finally {
+    await db.recursiveDelete(db.doc(`parties/${partyId}`));
+    await disposeEmulatorContext(app);
+  }
+});
+
+test("host listing fails closed on a malformed stored PIN", { skip: !HAS_FIRESTORE_EMULATOR }, async () => {
+  const { app, db } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  const tvDevice = "tv-host";
+  const channelId = "main";
+  try {
+    await db.doc(`parties/${partyId}`).set({ ownerUid: null, status: "active", activeChannelId: channelId });
+    await db.doc(`parties/${partyId}/channels/${channelId}`).set({ partyId, channelId, status: "active" });
+    await db.doc(`parties/${partyId}/devices/${tvDevice}`).set({ partyId, deviceId: tvDevice, label: "TV", role: "tv", status: "active" });
+    const services = createGuestListService({ db });
+
+    // A missing PIN field means "no PIN required" and omits joinPin.
+    const unpinned = await services.listPartyDevices({ partyId, deviceId: tvDevice, channelId });
+    assert.ok(!("joinPin" in unpinned));
+
+    // Present-but-invalid stored PINs (console-written number/boolean/null/
+    // malformed strings) surface a callable INTERNAL error: the TV panel
+    // shows an error state instead of a PIN-free session.
+    for (const badPin of [420100, true, null, "not-a-pin", "12 456"] as const) {
+      await db.doc(`parties/${partyId}`).update({ joinPin: badPin });
+      const error = await services.listPartyDevices({ partyId, deviceId: tvDevice, channelId }).then(
+        () => null,
+        (error: unknown) => error,
+      );
+      assert.ok(error instanceof BackendError, `stored PIN ${String(badPin)} must fail closed`);
+      assert.equal(error.errorCode, "INTERNAL");
+      assert.match(error.message, /misconfigured/);
+    }
+
+    // Empty string stays unpinned.
+    await db.doc(`parties/${partyId}`).update({ joinPin: "" });
+    const reopened = await services.listPartyDevices({ partyId, deviceId: tvDevice, channelId });
+    assert.ok(!("joinPin" in reopened));
   } finally {
     await db.recursiveDelete(db.doc(`parties/${partyId}`));
     await disposeEmulatorContext(app);

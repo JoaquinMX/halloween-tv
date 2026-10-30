@@ -189,6 +189,65 @@ test("joinParty rejects unknown/inactive party, channel mismatch, and bad regist
   }
 });
 
+test("joinParty fails closed on malformed stored PINs and shares one message", { skip: !HAS_FIRESTORE_EMULATOR }, async () => {
+  const { app, db } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  const channelId = "main";
+  try {
+    await seedHost(db, partyId, "tv-host", channelId);
+    const services = createJoinPartyService({ db });
+
+    // Present-but-invalid stored PINs (console-written number/boolean/null/
+    // malformed or padded strings) must fail closed with or without a PIN.
+    const messages = new Set<string>();
+    for (const badPin of [420100, true, null, "not-a-pin", " 123456", "123456 ", "12 456"] as const) {
+      await db.doc(`parties/${partyId}`).update({ joinPin: badPin });
+      for (const input of [
+        { partyId, deviceId: "p-hung", channelId },
+        { partyId, deviceId: "p-hung", channelId, joinPin: "123456" },
+      ]) {
+        const error = await services.joinParty(input).then(
+          () => null,
+          (error: unknown) => error,
+        );
+        assert.ok(error instanceof BackendError, `stored PIN ${String(badPin)} must fail closed`);
+        assert.equal(error.errorCode, "FORBIDDEN");
+        messages.add(error.message);
+        assert.equal(
+          (await db.doc(`parties/${partyId}/devices/p-hung`).get()).exists,
+          false,
+          "rejected joins must not create guest docs",
+        );
+      }
+    }
+    assert.equal(messages.size, 1, "every join gate must share one identical message");
+
+    // The same identical message covers party-not-found and channel
+    // mismatch (no probing oracle across gates).
+    for (const input of [
+      { partyId: "no-such-party", deviceId: "p-hung", channelId },
+      { partyId, deviceId: "p-hung", channelId: "other-channel" },
+    ]) {
+      const error = await services.joinParty(input).then(
+        (result: unknown) => result,
+        (error: unknown) => error,
+      );
+      assert.ok(error instanceof BackendError);
+      assert.equal(error.errorCode, "FORBIDDEN");
+      messages.add(error.message);
+    }
+    assert.equal(messages.size, 1, "party/channel/PIN gates must share one identical message");
+
+    // Empty string stays unpinned: joining without a PIN succeeds again.
+    await db.doc(`parties/${partyId}`).update({ joinPin: "" });
+    const open = await services.joinParty({ partyId, deviceId: "p-open", channelId });
+    assert.equal(open.created, true);
+  } finally {
+    await db.recursiveDelete(db.doc(`parties/${partyId}`));
+    await disposeEmulatorContext(app);
+  }
+});
+
 test("concurrent same-ID joins create exactly one guest doc", { skip: !HAS_FIRESTORE_EMULATOR }, async () => {
   const { app, db } = await createEmulatorContext();
   const partyId = randomPartyId();

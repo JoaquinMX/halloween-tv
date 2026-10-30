@@ -1,6 +1,9 @@
 import { FieldValue, Firestore } from "firebase-admin/firestore";
 import { BackendError, JOIN_PIN_RE, parseJoinPartyInput } from "./contracts";
 
+/** Single rejection message shared by every join gate (see above). */
+const JOIN_REJECTED_MESSAGE = "Join request was rejected.";
+
 export interface JoinPartyResult {
   partyId: string;
   deviceId: string;
@@ -18,6 +21,11 @@ export interface JoinPartyServiceOptions {
  * Anonymous phone registration. Each call revalidates party, channel, and
  * PIN inside a single Firestore transaction before creating (or reusing)
  * the guest device doc. The PIN is never echoed in the response.
+ *
+ * Every rejection below shares ONE identical message: distinct texts would
+ * let callers probe which gate (party/channel/PIN/device) failed. The
+ * specific reason is only server-logged. All rejections keep errorCode
+ * FORBIDDEN so the callable `details.errorCode` mapping is unchanged.
  */
 export function createJoinPartyService(options: JoinPartyServiceOptions): {
   joinParty(value: unknown): Promise<JoinPartyResult>;
@@ -36,30 +44,51 @@ export function createJoinPartyService(options: JoinPartyServiceOptions): {
           transaction.get(deviceRef),
         ]);
         if (!partySnap.exists) {
-          throw new BackendError("FORBIDDEN", "Party is not available.");
+          console.warn(`joinParty rejected: unknown party ${input.partyId}`);
+          throw new BackendError("FORBIDDEN", JOIN_REJECTED_MESSAGE);
         }
         const party = partySnap.data()!;
         if (party.status !== "active") {
-          throw new BackendError("FORBIDDEN", "Party is not available.");
+          console.warn(`joinParty rejected: inactive party ${input.partyId}`);
+          throw new BackendError("FORBIDDEN", JOIN_REJECTED_MESSAGE);
         }
         if (party.activeChannelId !== input.channelId) {
-          throw new BackendError("FORBIDDEN", "Channel is not active for this party.");
+          console.warn(
+            `joinParty rejected: channel ${input.channelId} is not active for party ${input.partyId}`,
+          );
+          throw new BackendError("FORBIDDEN", JOIN_REJECTED_MESSAGE);
         }
         if (!channelSnap.exists) {
-          throw new BackendError("FORBIDDEN", "Channel is not registered for this party.");
+          console.warn(
+            `joinParty rejected: channel ${input.channelId} is not registered for party ${input.partyId}`,
+          );
+          throw new BackendError("FORBIDDEN", JOIN_REJECTED_MESSAGE);
         }
         const channel = channelSnap.data()!;
         if (channel.partyId !== input.partyId || channel.status !== "active") {
-          throw new BackendError("FORBIDDEN", "Channel is not registered for this party.");
+          console.warn(
+            `joinParty rejected: channel doc ${input.channelId} is inactive or mismatched for party ${input.partyId}`,
+          );
+          throw new BackendError("FORBIDDEN", JOIN_REJECTED_MESSAGE);
         }
-        const storedPin = party.joinPin;
-        const pinConfigured = typeof storedPin === "string" && storedPin.length > 0;
-        if (pinConfigured) {
-          if (!JOIN_PIN_RE.test(storedPin)) {
-            throw new BackendError("FORBIDDEN", "Party is not available.");
+        // Fail closed: ANY present-but-invalid stored PIN (number/boolean/
+        // malformed string written via console) counts as configured and
+        // rejects every attempt. Only a missing field or an empty string
+        // means "no PIN configured".
+        const storedPin: unknown = party.joinPin;
+        const pinUnset = storedPin === undefined || storedPin === "";
+        if (!pinUnset) {
+          if (typeof storedPin !== "string" || !JOIN_PIN_RE.test(storedPin)) {
+            console.warn(
+              `joinParty rejected: party ${input.partyId} has a misconfigured joinPin; re-provision it with seed_join`,
+            );
+            throw new BackendError("FORBIDDEN", JOIN_REJECTED_MESSAGE);
           }
           if (input.joinPin !== storedPin) {
-            throw new BackendError("FORBIDDEN", "Join PIN is required.");
+            console.warn(
+              `joinParty rejected: wrong or missing join PIN for party ${input.partyId}`,
+            );
+            throw new BackendError("FORBIDDEN", JOIN_REJECTED_MESSAGE);
           }
         }
         if (deviceSnap.exists) {
@@ -70,7 +99,10 @@ export function createJoinPartyService(options: JoinPartyServiceOptions): {
             device.status !== "active" ||
             (typeof device.deviceId === "string" && device.deviceId !== input.deviceId)
           ) {
-            throw new BackendError("FORBIDDEN", "Device registration is not valid for this party.");
+            console.warn(
+              `joinParty rejected: device ${input.deviceId} is not a valid guest registration for party ${input.partyId}`,
+            );
+            throw new BackendError("FORBIDDEN", JOIN_REJECTED_MESSAGE);
           }
           return {
             partyId: input.partyId,

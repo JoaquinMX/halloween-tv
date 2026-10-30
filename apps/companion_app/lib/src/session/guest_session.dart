@@ -457,6 +457,7 @@ final class GuestSession {
     _generation++;
     await _cancelSubscription();
     _refreshing = false;
+    _registered = false;
     if (_disposed) {
       return;
     }

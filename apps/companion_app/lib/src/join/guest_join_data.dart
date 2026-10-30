@@ -15,7 +15,6 @@ final class GuestJoinData {
   final String channelId;
   final String? joinPin;
   const GuestJoinData({required this.partyId, required this.deviceId, required this.channelId, this.joinPin});
-  Map<String, Object?> toJson() => <String, Object?>{'partyId': partyId.value, 'deviceId': deviceId.value, 'channelId': channelId, if (joinPin != null) 'joinPin': joinPin};
   @override
   bool operator ==(Object other) => other is GuestJoinData && other.partyId == partyId && other.deviceId == deviceId && other.channelId == channelId && other.joinPin == joinPin;
   @override
@@ -53,6 +52,8 @@ Result<GuestJoinData> parseGuestJoinPayload(String raw, {required String localDe
   final party = field('partyId', 'party_id');
   final channel = field('channelId', 'channel_id');
   final pinValue = json['joinPin'] ?? json['join_pin'];
-  if (party == null || channel == null || (pinValue != null && pinValue is! String)) return const Err<GuestJoinData>('join payload must contain string partyId and channelId');
+  // A present-but-non-string PIN is a PIN error, not an identifier error.
+  if (pinValue != null && pinValue is! String) return const Err<GuestJoinData>('joinPin must contain exactly six digits');
+  if (party == null || channel == null) return const Err<GuestJoinData>('join payload must contain string partyId and channelId');
   return parseGuestJoinFields(partyId: party, localDeviceId: localDeviceId, channelId: channel, joinPin: pinValue as String?);
 }
