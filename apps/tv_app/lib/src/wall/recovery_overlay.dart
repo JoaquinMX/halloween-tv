@@ -20,6 +20,7 @@ class RecoveryOverlay extends StatelessWidget {
     required this.onClose,
     this.primaryFocusNode,
     this.statusMessage,
+    this.onShowGuestCodes,
   });
 
   /// Whether effects are currently disabled (drives the toggle label).
@@ -40,6 +41,10 @@ class RecoveryOverlay extends StatelessWidget {
 
   /// Optional inline status line (e.g. "no cached wall").
   final String? statusMessage;
+
+  /// Opens the host guest-code page; null hides the GUEST CODES button
+  /// (offline builds stay on the recovery actions only).
+  final VoidCallback? onShowGuestCodes;
 
   /// MENU closes the panel again, like it opens it.
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
@@ -117,6 +122,16 @@ class RecoveryOverlay extends StatelessWidget {
                             : 'DISABLE EFFECTS',
                         onPressed: onToggleEffects,
                       ),
+                      if (onShowGuestCodes != null) ...<Widget>[
+                        const SizedBox(height: 10),
+                        _RecoveryButton(
+                          actionKey: const ValueKey<String>(
+                            'recovery-guest-codes',
+                          ),
+                          label: 'GUEST CODES',
+                          onPressed: onShowGuestCodes!,
+                        ),
+                      ],
                       const SizedBox(height: 10),
                       _RecoveryButton(
                         actionKey: const ValueKey<String>('recovery-close'),

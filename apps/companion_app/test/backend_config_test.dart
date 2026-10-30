@@ -5,6 +5,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:companion_app/src/config/backend_config.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -121,7 +122,7 @@ void main() {
     });
   });
 
-  group('firebase.example.json', () {
+  group('firebase.example.json', skip: kIsWeb ? 'repo fixture files are unreadable on web (dart:io); covered on the VM suite' : false, () {
     test('holds placeholders only and parses structurally', () async {
       final String source = await File(
         'config/firebase.example.json',

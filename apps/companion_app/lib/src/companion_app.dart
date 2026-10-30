@@ -205,7 +205,7 @@ final class _CompanionAppState extends State<CompanionApp>
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Party Companion',
+      title: 'Halloween TV - Guests',
       theme: CctvTheme.dark(),
       home: _home(),
     );

@@ -1,11 +1,11 @@
 {
-    "name": "Party Companion (dev)",
-    "short_name": "Party Companion (dev)",
+    "name": "Halloween TV - Guests",
+    "short_name": "Halloween Guests",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",
     "theme_color": "#0175C2",
-    "description": "Party companion guest app (dev scaffold) for Halloween TV.",
+    "description": "Guest companion for Halloween TV: join with your code and see what is playing.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [

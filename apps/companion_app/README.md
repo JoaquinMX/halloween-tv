@@ -1,4 +1,4 @@
-# Party Companion — `companion_app`
+# Halloween TV - Guests — `companion_app`
 
 Guest app (Android, iOS, Web) for Halloween TV. This is the second Flutter
 app in the monorepo alongside `apps/tv_app`. The standing owner gate in
@@ -84,5 +84,5 @@ keystore, env-gated passwords). No signing changes in this pass.
 - `flutter analyze`
 - `flutter test`
 
-Display name is provisionally `Party Companion (dev)` — deliberately
-distinct from the TV app (`Halloween TV`).
+Display name is `Halloween TV - Guests` (owner decision 2026-10-30) —
+deliberately distinct from the TV app (`Halloween TV`).

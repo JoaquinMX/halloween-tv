@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "897751802522",
+    "project_id": "halloween-tv",
+    "storage_bucket": "halloween-tv.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:897751802522:android:fe5c604831cb7753173523",
+        "android_client_info": {
+          "package_name": "com.joaquinmx.companion_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBbDma_L5MIsZB56f-dDIRDH3nj7SKD5Lk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:897751802522:android:2fa1aa7c3032610b173523",
+        "android_client_info": {
+          "package_name": "com.joaquinmx.tv_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBbDma_L5MIsZB56f-dDIRDH3nj7SKD5Lk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

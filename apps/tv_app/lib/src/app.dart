@@ -103,6 +103,8 @@ class _WallGateState extends State<WallGate> {
           plugin: result.plugin!,
           manifest: result.manifest!,
           partyId: widget.boot.partyId,
+          tvDeviceId: widget.boot.tvDeviceId,
+          guestCodeClient: widget.boot.guestCodeClient,
           clock: widget.clock,
           tileControllerFactory: widget.tileControllerFactory,
           onRetryCached: widget.boot.readCached,

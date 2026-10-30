@@ -3,7 +3,9 @@
   "private": true,
   "description": "Firebase backend contracts for Halloween TV (outside the Dart workspace)",
   "main": "lib/src/index.js",
-  "engines": { "node": "22" },
+  "engines": {
+    "node": "22"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "tsx --test --test-concurrency=1 test/*.test.ts",
@@ -19,7 +21,11 @@
     "dry-run": "tsx tools/run_dry_run.ts --target=emulator",
     "fake:e2e": "FIREBASE_STORAGE_BUCKET=demo-halloween-tv.appspot.com firebase --config ../firebase.json emulators:exec --project demo-halloween-tv --only firestore,storage \"npm run dry-run\"",
     "verify:delivery": "tsx tools/verify_delivery.ts",
-    "usage:reconcile": "tsx tools/reconcile_usage.ts"
+    "usage:reconcile": "tsx tools/reconcile_usage.ts",
+    "seed:guests": "tsx tools/seed_guests.ts --target=emulator",
+    "seed:guests:preview": "tsx tools/seed_guests.ts --target=emulator",
+    "seed:guests:apply": "tsx tools/seed_guests.ts --target=emulator --apply",
+    "seed:guests:cloud": "tsx tools/seed_guests.ts --target=cloud"
   },
   "dependencies": {
     "@google-cloud/storage": "^7.15.2",

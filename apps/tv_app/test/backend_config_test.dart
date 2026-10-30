@@ -110,6 +110,11 @@ void main() {
         reason: 'bundled media stays in the asset namespace',
       );
       expect(dependencies.liveSession, isNull);
+      expect(
+        dependencies.guestCodeClient,
+        isNull,
+        reason: 'offline builds keep the recovery panel on its actions only',
+      );
       expect(firebaseInitializations, 0);
       expect(
         dependencies.preparePlayback.snapshot.state,

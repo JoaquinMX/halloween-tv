@@ -78,6 +78,10 @@ export const getDeliveryUrls = onCall({ maxInstances: 10 }, (request) =>
 export const getCurrentManifest = onCall({ maxInstances: 10 }, (request) =>
   callable(() => services.getCurrentManifest(request.data)));
 
+/** Host TV callable; lists registered party devices (guest codes) for verbal dictation. Guests get FORBIDDEN. */
+export const listPartyDevices = onCall({ maxInstances: 2 }, (request) =>
+  callable(() => services.listPartyDevices(request.data)));
+
 /** Anonymous TV callable; ACK and purge are idempotent by device/channel/version. */
 export const acknowledgeDelivery = onCall({ maxInstances: 10 }, (request) =>
   callable(() => services.acknowledgeDelivery(request.data)));

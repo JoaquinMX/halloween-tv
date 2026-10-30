@@ -17,6 +17,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:testing_toolkit/testing_toolkit.dart';
 import 'package:tv_app/src/playback/camera_tile.dart';
 import 'package:tv_app/src/playback/tile_video_controller.dart';
+import 'package:tv_app/src/wall/guest_codes.dart';
 import 'package:tv_app/src/wall/wall_screen.dart';
 
 import 'support/fakes.dart';
@@ -31,6 +32,9 @@ Widget wallHarness({
   SettingsPort? settings,
   bool initialEffectsDisabled = false,
   bool recoveryEnabled = true,
+  GuestCodeClient? guestCodeClient,
+  String partyId = 'local-party',
+  String tvDeviceId = '',
 }) {
   return MaterialApp(
     theme: CctvTheme.dark(),
@@ -46,6 +50,9 @@ Widget wallHarness({
       onRetryCached: onRetryCached,
       fileExists: fileExists,
       recoveryEnabled: recoveryEnabled,
+      guestCodeClient: guestCodeClient,
+      partyId: partyId,
+      tvDeviceId: tvDeviceId,
     ),
   );
 }

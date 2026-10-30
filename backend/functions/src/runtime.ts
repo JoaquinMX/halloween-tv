@@ -3,6 +3,7 @@ import type { Firestore } from "firebase-admin/firestore";
 import { createDeliveryServices, DeliveryServiceOptions, GenerationTask } from "./delivery";
 import { BackendError, DeliveryManifest } from "./contracts";
 import { createGenerationServices, GenerationServiceOptions } from "./generation";
+import { createGuestListService } from "./guest_list";
 import { FakeVideoGenerationPort } from "./providers/fake";
 import { CameraId, ProviderResult, VideoGenerationPort } from "./video_generation_port";
 
@@ -33,6 +34,7 @@ export interface RuntimeServices {
   getCurrentManifest(value: unknown): ReturnType<ReturnType<typeof createDeliveryServices>["getCurrentManifest"]>;
   getDeliveryUrls: ReturnType<typeof createDeliveryServices>["getDeliveryUrls"];
   acknowledgeDelivery: ReturnType<typeof createDeliveryServices>["acknowledgeDelivery"];
+  listPartyDevices: ReturnType<typeof createGuestListService>["listPartyDevices"];
 }
 
 /**
@@ -57,6 +59,7 @@ export function createRuntimeServices(options: RuntimeServiceOptions): RuntimeSe
       normalization: options.normalization,
     })
     : undefined;
+  const guestList = createGuestListService({ db: options.db });
   const delivery = createDeliveryServices({
     db: options.db,
     bucket: options.bucket,
@@ -112,5 +115,6 @@ export function createRuntimeServices(options: RuntimeServiceOptions): RuntimeSe
     getCurrentManifest: delivery.getCurrentManifest,
     getDeliveryUrls: delivery.getDeliveryUrls,
     acknowledgeDelivery: delivery.acknowledgeDelivery,
+    listPartyDevices: guestList.listPartyDevices,
   };
 }

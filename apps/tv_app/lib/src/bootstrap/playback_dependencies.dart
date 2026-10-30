@@ -18,6 +18,7 @@ import 'package:kernel_app/kernel_app.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'package:tv_app/src/config/backend_config.dart';
+import 'package:tv_app/src/wall/guest_codes.dart';
 import 'package:tv_app/src/wall/live_wall_session.dart';
 import 'package:tv_app/src/wall/manifest_store.dart';
 import 'package:tv_app/src/wall/wall_boot.dart';
@@ -35,12 +36,18 @@ final class PlaybackDependencies {
     required this.remoteUnavailableReason,
     required this.manifestIndexStore,
     required this.cacheStore,
+    required this.guestCodeClient,
   });
 
   final BackendConfig config;
   final PreparePlayback preparePlayback;
   final SettingsPort settings;
   final LiveWallSession? liveSession;
+
+  /// Host guest-code reader; null unless the live backend is configured.
+  ///
+  /// Null keeps the recovery panel on its offline actions only.
+  final GuestCodeClient? guestCodeClient;
   final String? remoteUnavailableReason;
   final ManifestIndexStore manifestIndexStore;
   final CacheStore cacheStore;
@@ -111,6 +118,7 @@ final class PlaybackDependencies {
 
     late final PreparePlayback prepare;
     LiveWallSession? live;
+    GuestCodeClient? guestCodes;
     if (resolved.isLiveConfigured &&
         unavailable == null &&
         firestore != null &&
@@ -156,6 +164,15 @@ final class PlaybackDependencies {
         manifestSource: source,
         preparation: prepare,
       );
+      // Host panel reader: the TV device lists guest codes over the
+      // TV-only listPartyDevices callable. Null when live is unavailable
+      // keeps the recovery panel on its offline actions only.
+      guestCodes = GuestCodeClient.cloudFunctions(
+        functions: functions,
+        partyId: resolved.partyId,
+        deviceId: resolved.deviceId,
+        channelId: hauntedSurveillanceChannelId,
+      );
     } else {
       prepare = PreparePlayback(
         manifestSource: _UnavailableManifestSource(),
@@ -172,6 +189,7 @@ final class PlaybackDependencies {
       preparePlayback: prepare,
       settings: settings,
       liveSession: live,
+      guestCodeClient: guestCodes,
       remoteUnavailableReason: unavailable,
       manifestIndexStore: manifestIndex,
       cacheStore: cache,
@@ -185,6 +203,8 @@ final class PlaybackDependencies {
   }) => WallBoot(
     store: store,
     partyId: config.partyIdOrOffline,
+    tvDeviceId: config.deviceId,
+    guestCodeClient: guestCodeClient,
     preparePlayback: preparePlayback,
     liveSession: liveSession,
     settings: settings,

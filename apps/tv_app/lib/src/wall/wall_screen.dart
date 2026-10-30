@@ -16,6 +16,8 @@ import 'package:kernel_app/kernel_app.dart';
 import 'package:tv_app/src/media/feed_assets.dart';
 import 'package:tv_app/src/playback/camera_tile.dart';
 import 'package:tv_app/src/playback/tile_video_controller.dart';
+import 'package:tv_app/src/wall/guest_code_panel.dart';
+import 'package:tv_app/src/wall/guest_codes.dart';
 import 'package:tv_app/src/wall/live_wall_session.dart';
 import 'package:tv_app/src/wall/playback_handle.dart';
 import 'package:tv_app/src/wall/recovery_overlay.dart';
@@ -53,6 +55,9 @@ class WallScreen extends StatefulWidget {
     this.settings,
     this.profile,
     this.partyId = 'local-party',
+    this.tvDeviceId = '',
+    this.channelId = hauntedSurveillanceChannelId,
+    this.guestCodeClient,
     this.glitchSeed = 0x4A11,
     this.onRetryCached,
     this.onRetryCachedPlayback,
@@ -93,6 +98,16 @@ class WallScreen extends StatefulWidget {
 
   /// Party this wall belongs to.
   final String partyId;
+
+  /// TV's own device code, shown on the host guest-code page.
+  final String tvDeviceId;
+
+  /// Active channel for the guest-code join payload.
+  final String channelId;
+
+  /// Host guest-code reader; null keeps the recovery panel on its actions
+  /// only (offline builds never list codes).
+  final GuestCodeClient? guestCodeClient;
 
   /// Seed for the wall's deterministic glitch bursts.
   final int glitchSeed;
@@ -145,6 +160,10 @@ class _WallScreenState extends State<WallScreen> {
   bool _liveStarted = false;
   late bool _effectsDisabled;
   bool _recoveryVisible = false;
+  bool _guestCodesVisible = false;
+  bool _guestCodesLoading = false;
+  List<GuestCodeEntry>? _guestCodes;
+  String? _guestCodesError;
   bool _okHeld = false;
   bool _activatedHandle = false;
   String? _status;
@@ -420,9 +439,63 @@ class _WallScreenState extends State<WallScreen> {
     });
   }
 
+  /// Opens the host guest-code page and loads the guest list once.
+  ///
+  /// Offline builds never reach here (no GUEST CODES button without a
+  /// [GuestCodeClient]); a read failure stays inline on the panel and keeps
+  /// the TV code + QR visible.
+  void _openGuestCodes() {
+    final GuestCodeClient? client = widget.guestCodeClient;
+    if (!mounted || _guestCodesVisible || client == null) {
+      return;
+    }
+    setState(() {
+      _guestCodesVisible = true;
+      _guestCodesLoading = true;
+      _guestCodesError = null;
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _guestCodesVisible) {
+        _recoveryFocus.requestFocus();
+      }
+    });
+    client.fetchGuestCodes().then((List<GuestCodeEntry> entries) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _guestCodes = entries;
+        _guestCodesLoading = false;
+      });
+    }, onError: (Object error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _guestCodesLoading = false;
+        _guestCodesError = error is GuestCodeException
+            ? error.message
+            : 'unexpected guest list failure';
+      });
+    });
+  }
+
+  /// Returns from the guest-code page to the recovery actions.
+  void _closeGuestCodes() {
+    setState(() {
+      _guestCodesVisible = false;
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _recoveryVisible) {
+        _recoveryFocus.requestFocus();
+      }
+    });
+  }
+
   void _closeRecovery() {
     setState(() {
       _recoveryVisible = false;
+      _guestCodesVisible = false;
       _recoveryStatus = null;
     });
     // D-pad focus returns to the tile the user was watching. Deferred to a
@@ -637,14 +710,34 @@ class _WallScreenState extends State<WallScreen> {
             Positioned.fill(
               child: KeyedSubtree(
                 key: kRecoveryOverlayKey,
-                child: RecoveryOverlay(
-                  effectsDisabled: _effectsDisabled,
-                  statusMessage: _recoveryStatus,
-                  primaryFocusNode: _recoveryFocus,
-                  onRetryCached: () => unawaited(_retryCached()),
-                  onToggleEffects: _toggleEffects,
-                  onClose: _closeRecovery,
-                ),
+                child: _guestCodesVisible
+                  ? GuestCodePanel(
+                      partyId: widget.partyId,
+                      tvDeviceId: widget.tvDeviceId,
+                      channelId: widget.channelId,
+                      joinPayload: buildJoinPayload(
+                        partyId: widget.partyId,
+                        deviceId: widget.tvDeviceId,
+                        channelId: widget.channelId,
+                      ),
+                      guests: _guestCodes,
+                      isLoadingGuests: _guestCodesLoading,
+                      guestsError: _guestCodesError,
+                      primaryFocusNode: _recoveryFocus,
+                      onBack: _closeGuestCodes,
+                      onClose: _closeRecovery,
+                    )
+                  : RecoveryOverlay(
+                      effectsDisabled: _effectsDisabled,
+                      statusMessage: _recoveryStatus,
+                      primaryFocusNode: _recoveryFocus,
+                      onRetryCached: () => unawaited(_retryCached()),
+                      onToggleEffects: _toggleEffects,
+                      onClose: _closeRecovery,
+                      onShowGuestCodes: widget.guestCodeClient == null
+                          ? null
+                          : _openGuestCodes,
+                    ),
               ),
             ),
         ],

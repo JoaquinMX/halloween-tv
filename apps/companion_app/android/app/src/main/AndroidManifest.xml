@@ -2,7 +2,7 @@
     <!-- Guest app talks to Firebase / emulator endpoints over the network. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <application
-        android:label="Party Companion (dev)"
+        android:label="Halloween TV - Guests"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

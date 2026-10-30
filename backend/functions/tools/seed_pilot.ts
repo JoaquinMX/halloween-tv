@@ -287,7 +287,7 @@ async function applySeed(
       if (deviceSnapshot.exists && (deviceData?.status !== "active" || deviceData?.partyId !== options.party)) fail("Device changed during upload.");
       if (channelSnapshot.exists && (channelData?.status !== "active" || channelData?.partyId !== options.party)) fail("Channel changed during upload.");
       if (!partySnapshot.exists) transaction.create(refsForSeed.party, { ownerUid: null, status: "active", activeChannelId: options.channel, createdAt: timestamp });
-      if (!deviceSnapshot.exists) transaction.create(refsForSeed.device, { partyId: options.party, deviceId: options.device, status: "active", registeredAt: timestamp });
+      if (!deviceSnapshot.exists) transaction.create(refsForSeed.device, { partyId: options.party, deviceId: options.device, label: "TV", role: "tv", status: "active", registeredAt: timestamp });
       if (!channelSnapshot.exists) transaction.create(refsForSeed.channel, { partyId: options.party, channelId: options.channel, status: "active", createdAt: timestamp });
       transaction.create(refsForSeed.manifest, publishedManifest);
       transaction.create(refsForSeed.job, {

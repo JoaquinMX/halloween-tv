@@ -61,3 +61,10 @@ Test success does not change deployment, device, or live-spend statuses above.
 - tv_app: `flutter analyze` clean, full `flutter test` 43/43 pass, `flutter build apk --debug` succeeds.
 - Orchestrator-fixed defects (with tests): boot prepare-before-activate order; `fileExists` seam + setUpAll file setup (real dart:io hangs in testWidgets FakeAsync zone); serial emulator suite + shared-emulator count assertion; operator seed ACK ordering per persisted-ACK contract.
 - Emulator suite must stay serial (`--test-concurrency=1`): parallel files sharing one emulator raced the TTL sweeper against generation staging.
+
+## Owner decisions 2026-10-30 (Firebase live, companion, distribution)
+
+- Firebase project `halloween-tv` created by Joaquin; firebase + flutterfire CLIs installed. Remaining: flutterfire configure wiring, `.firebaserc` alias, deploy rules/indexes/storage/functions to the real project, switch live `--dart-define` build flags from emulator to the real project, verify with a cheap read-only callable check. No billable generation without explicit action. Ask Joaquin for help when blocked (logins, console steps).
+- Companion display name: "Halloween TV - Guests".
+- Party code distribution: host dictates each guest's device-code verbally (QR scanning later). Guest codes are per-guest device-codes seeded in Firebase; the host reads them from the host-visible list (TV overlay and/or console). The host reads the TV's OWN party/device code off the TV screen (large text + QR, next slice) — nothing to memorize at build time (today those IDs are build-time `--dart-define`s).
+- Next slice delegated: installable companion builds, real-device/browser tests, Firebase guest settings + seeded codes, TV QR display panel.

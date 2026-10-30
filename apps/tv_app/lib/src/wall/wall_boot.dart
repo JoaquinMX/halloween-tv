@@ -24,6 +24,7 @@ import 'package:core_playlist/core_playlist.dart';
 import 'package:flutter/services.dart';
 import 'package:kernel_app/kernel_app.dart';
 import 'package:tv_app/src/media/feed_assets.dart';
+import 'package:tv_app/src/wall/guest_codes.dart';
 import 'package:tv_app/src/wall/live_wall_session.dart';
 import 'package:tv_app/src/wall/manifest_store.dart';
 
@@ -240,6 +241,8 @@ final class WallBoot {
   const WallBoot({
     this.store = const PrefsManifestStore(),
     this.partyId = 'local-party',
+    this.tvDeviceId = '',
+    this.guestCodeClient,
     this.registryFactory = defaultWallRegistry,
     this.fixture,
     this.fixtureLoader,
@@ -258,6 +261,12 @@ final class WallBoot {
 
   /// Party the wall belongs to.
   final String partyId;
+
+  /// TV's own device code, shown on the host guest-code page.
+  final String tvDeviceId;
+
+  /// Host guest-code reader; null keeps the recovery panel offline-only.
+  final GuestCodeClient? guestCodeClient;
 
   /// Registry factory (channel registration).
   final WallRegistryFactory registryFactory;

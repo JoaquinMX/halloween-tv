@@ -11,6 +11,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:cloud_functions/cloud_functions.dart';
+import 'package:flutter/foundation.dart';
 import 'package:companion_app/src/bootstrap/companion_dependencies.dart';
 import 'package:companion_app/src/config/backend_config.dart';
 import 'package:companion_app/src/data/callable_manifest_invoker.dart';
@@ -85,6 +86,7 @@ void main() {
   group('callable payload', () {
     test(
       'invokes getCurrentManifest with exactly party/device/channel',
+      skip: kIsWeb ? 'repo fixture files are unreadable on web (dart:io); covered on the VM suite' : false,
       () async {
         final FakeInvoker invoker = FakeInvoker(
           result: await _contractManifest(),
@@ -162,7 +164,7 @@ void main() {
     });
   });
 
-  group('transport-to-mapper output', () {
+  group('transport-to-mapper output', skip: kIsWeb ? 'repo fixture files are unreadable on web (dart:io); covered on the VM suite' : false, () {
     test('maps the contract vector to a 4-camera manifest', () async {
       final FakeInvoker invoker = FakeInvoker(
         result: await _contractManifest(),
@@ -455,7 +457,7 @@ void main() {
       },
     );
 
-    test('configured boot composes the live callable connection', () async {
+    test('configured boot composes the live callable connection', skip: kIsWeb ? 'repo fixture files are unreadable on web (dart:io); covered on the VM suite' : false, () async {
       final FakeInvoker invoker = FakeInvoker(
         result: await _contractManifest(),
       );
@@ -486,7 +488,7 @@ void main() {
       });
     });
 
-    test('unscoped live boot scopes each join from guest-typed IDs', () async {
+    test('unscoped live boot scopes each join from guest-typed IDs', skip: kIsWeb ? 'repo fixture files are unreadable on web (dart:io); covered on the VM suite' : false, () async {
       final FakeInvoker invoker = FakeInvoker(
         result: await _contractManifest(),
       );
