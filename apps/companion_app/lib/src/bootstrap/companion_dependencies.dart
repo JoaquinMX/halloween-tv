@@ -32,6 +32,7 @@ import 'package:companion_app/src/data/callable_manifest_invoker.dart';
 import 'package:companion_app/src/data/manifest_connection.dart';
 import 'package:companion_app/src/data/manifest_failure.dart';
 import 'package:companion_app/src/data/party_join_client.dart';
+import 'package:companion_app/src/data/guest_media_client.dart';
 import 'package:companion_app/src/join/guest_join_data.dart';
 
 /// Injectable Firebase bootstrap for tests and emulator wiring.
@@ -46,6 +47,7 @@ final class CompanionDependencies {
     required this.remoteUnavailableReason,
     required FirebaseManifestCallableInvoker? invoker,
     required this.partyJoinClient,
+    required this.guestMediaClient,
   }) : _invoker = invoker;
 
   final BackendConfig config;
@@ -54,6 +56,7 @@ final class CompanionDependencies {
   final String? remoteUnavailableReason;
   final FirebaseManifestCallableInvoker? _invoker;
   final PartyJoinClient? partyJoinClient;
+  final GuestMediaClient? guestMediaClient;
 
   /// True when the manifest source is backed by the live callable.
   bool get isLive => remoteUnavailableReason == null;
@@ -98,6 +101,7 @@ final class CompanionDependencies {
         remoteUnavailableReason: resolved.error ?? 'backend is not configured',
         invoker: null,
         partyJoinClient: null,
+        guestMediaClient: null,
       );
     }
     if (identity == null) {
@@ -122,6 +126,10 @@ final class CompanionDependencies {
           identity: null,
           remoteUnavailableReason: null,
           invoker: invoker,
+          guestMediaClient: GuestMediaClient(
+            invoker: CallableGuestMediaInvoker(resolveFunctions),
+            transport: HttpGuestMediaTransport(),
+          ),
           partyJoinClient: PartyJoinClient(
             invoker:
                 partyJoinInvokerOverride ??
@@ -138,6 +146,7 @@ final class CompanionDependencies {
               'Firebase could not be initialized: ${failure.message}',
           invoker: null,
           partyJoinClient: null,
+          guestMediaClient: null,
         );
       }
     }
@@ -161,6 +170,10 @@ final class CompanionDependencies {
         identity: identity,
         remoteUnavailableReason: null,
         invoker: invoker,
+        guestMediaClient: GuestMediaClient(
+          invoker: CallableGuestMediaInvoker(resolveFunctions),
+          transport: HttpGuestMediaTransport(),
+        ),
         partyJoinClient: PartyJoinClient(
           invoker:
               partyJoinInvokerOverride ??
@@ -177,6 +190,7 @@ final class CompanionDependencies {
             'Firebase could not be initialized: ${failure.message}',
         invoker: null,
         partyJoinClient: null,
+        guestMediaClient: null,
       );
     }
   }

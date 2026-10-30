@@ -122,59 +122,65 @@ void main() {
     });
   });
 
-  group('firebase.example.json', skip: kIsWeb ? 'repo fixture files are unreadable on web (dart:io); covered on the VM suite' : false, () {
-    test('holds placeholders only and parses structurally', () async {
-      final String source = await File(
-        'config/firebase.example.json',
-      ).readAsString();
-      final Map<String, Object?> json = Map<String, Object?>.from(
-        jsonDecode(source) as Map<Object?, Object?>,
-      );
-
-      expect(json['projectId'], 'YOUR-FIREBASE-PROJECT-ID');
-      expect(json['appId'], 'YOUR-FIREBASE-APP-ID');
-      expect(json['apiKey'], 'YOUR-FIREBASE-API-KEY');
-      // No real secret material: every required value is a YOUR- sentinel.
-      for (final String key in <String>['projectId', 'appId', 'apiKey']) {
-        expect(
-          (json[key]! as String).startsWith('YOUR-'),
-          isTrue,
-          reason: '$key must be a placeholder',
+  group(
+    'firebase.example.json',
+    skip: kIsWeb
+        ? 'repo fixture files are unreadable on web (dart:io); covered on the VM suite'
+        : false,
+    () {
+      test('holds placeholders only and parses structurally', () async {
+        final String source = await File(
+          'config/firebase.example.json',
+        ).readAsString();
+        final Map<String, Object?> json = Map<String, Object?>.from(
+          jsonDecode(source) as Map<Object?, Object?>,
         );
-      }
 
-      // Fail closed: a copied-but-never-filled file must never select a
-      // cloud target, even though every required field is non-empty.
-      final BackendConfig config = BackendConfig.parse(json);
-      expect(config.mode, CompanionBackendMode.unconfigured);
-      expect(config.isLiveConfigured, isFalse);
-      expect(config.firebaseOptions, isNull);
-      expect(config.error, contains('placeholder'));
-      expect(config.functionsRegion, 'us-central1');
-    });
+        expect(json['projectId'], 'YOUR-FIREBASE-PROJECT-ID');
+        expect(json['appId'], 'YOUR-FIREBASE-APP-ID');
+        expect(json['apiKey'], 'YOUR-FIREBASE-API-KEY');
+        // No real secret material: every required value is a YOUR- sentinel.
+        for (final String key in <String>['projectId', 'appId', 'apiKey']) {
+          expect(
+            (json[key]! as String).startsWith('YOUR-'),
+            isTrue,
+            reason: '$key must be a placeholder',
+          );
+        }
 
-    test('YOUR- sentinel in any single field fails closed', () {
-      final BackendConfig config = BackendConfig.parse(<String, Object?>{
-        'apiKey': 'test-api-key',
-        'appId': '1:123:android:abc',
-        'projectId': 'YOUR-FIREBASE-PROJECT-ID',
+        // Fail closed: a copied-but-never-filled file must never select a
+        // cloud target, even though every required field is non-empty.
+        final BackendConfig config = BackendConfig.parse(json);
+        expect(config.mode, CompanionBackendMode.unconfigured);
+        expect(config.isLiveConfigured, isFalse);
+        expect(config.firebaseOptions, isNull);
+        expect(config.error, contains('placeholder'));
+        expect(config.functionsRegion, 'us-central1');
       });
 
-      expect(config.mode, CompanionBackendMode.unconfigured);
-      expect(config.isLiveConfigured, isFalse);
-      expect(config.firebaseOptions, isNull);
-      expect(config.error, contains('placeholder'));
-    });
+      test('YOUR- sentinel in any single field fails closed', () {
+        final BackendConfig config = BackendConfig.parse(<String, Object?>{
+          'apiKey': 'test-api-key',
+          'appId': '1:123:android:abc',
+          'projectId': 'YOUR-FIREBASE-PROJECT-ID',
+        });
 
-    test('fromEnvironment defaults to unconfigured offline boot', () {
-      // No --dart-define values in the test environment.
-      final BackendConfig config = BackendConfig.fromEnvironment();
+        expect(config.mode, CompanionBackendMode.unconfigured);
+        expect(config.isLiveConfigured, isFalse);
+        expect(config.firebaseOptions, isNull);
+        expect(config.error, contains('placeholder'));
+      });
 
-      expect(config.mode, CompanionBackendMode.unconfigured);
-      expect(config.isLiveConfigured, isFalse);
-      expect(config.useEmulator, isFalse);
-      expect(config.error, isNull);
-      expect(config.firebaseOptions, isNull);
-    });
-  });
+      test('fromEnvironment defaults to unconfigured offline boot', () {
+        // No --dart-define values in the test environment.
+        final BackendConfig config = BackendConfig.fromEnvironment();
+
+        expect(config.mode, CompanionBackendMode.unconfigured);
+        expect(config.isLiveConfigured, isFalse);
+        expect(config.useEmulator, isFalse);
+        expect(config.error, isNull);
+        expect(config.firebaseOptions, isNull);
+      });
+    },
+  );
 }

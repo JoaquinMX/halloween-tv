@@ -1,0 +1,189 @@
+import 'dart:io';
+
+import 'package:companion_app/src/media/guest_photo_picker.dart';
+import 'package:companion_app/src/session/guest_media_session.dart';
+
+import 'package:flutter/material.dart';
+
+final class GuestPhotoScreen extends StatefulWidget {
+  const GuestPhotoScreen({
+    super.key,
+    required this.session,
+    required this.picker,
+  });
+  final GuestMediaSession session;
+  final GuestPhotoPicker picker;
+  @override
+  State<GuestPhotoScreen> createState() => _GuestPhotoScreenState();
+}
+
+final class _GuestPhotoScreenState extends State<GuestPhotoScreen> {
+  File? photo;
+  bool consent = false;
+  String? message;
+  @override
+  void dispose() {
+    final selected = photo;
+    if (selected != null) {
+      selected.exists().then((exists) {
+        if (exists) selected.delete();
+      });
+    }
+    super.dispose();
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    widget.session
+        .recover()
+        .then((_) {
+          if (mounted) {
+            setState(
+              () => message = widget.session.status == null
+                  ? null
+                  : 'Saved submission status: ${widget.session.status}.',
+            );
+          }
+        })
+        .catchError((Object _) {
+          if (mounted) {
+            setState(
+              () => message = 'Could not refresh saved submission status.',
+            );
+          }
+        });
+  }
+
+  Future<void> choose() async {
+    final selected = await widget.picker.pickPhoto();
+    if (!mounted) {
+      if (selected != null && await selected.exists()) await selected.delete();
+      return;
+    }
+    final previous = photo;
+    if (previous != null &&
+        previous.path != selected?.path &&
+        await previous.exists()) {
+      await previous.delete();
+    }
+    setState(() {
+      photo = selected;
+      consent = false;
+      message = selected == null ? 'Photo selection cancelled.' : null;
+    });
+  }
+
+  Future<void> submit() async {
+    final selected = photo;
+    if (selected == null || !consent) return;
+    final confirmed =
+        await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Confirm photo upload'),
+            content: const Text(
+              'Upload this photo to transform it for the party TV?',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Upload photo'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+    if (!confirmed) {
+      if (await selected.exists()) await selected.delete();
+      if (mounted) setState(() => photo = null);
+      return;
+    }
+    setState(() => message = 'Uploading…');
+    try {
+      await widget.session.submit(
+        selected,
+        consent: consent,
+        confirmed: confirmed,
+      );
+      if (mounted) setState(() => message = 'Photo submitted.');
+    } catch (_) {
+      if (mounted) {
+        setState(
+          () => message =
+              'Upload could not be completed. Select the photo again to retry.',
+        );
+      }
+    } finally {
+      if (await selected.exists()) await selected.delete();
+      if (mounted) setState(() => photo = null);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('Guest photo')),
+    body: ListView(
+      padding: const EdgeInsets.all(20),
+      children: [
+        const Text(
+          'Optional photo submission',
+          style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 12),
+        const Text(
+          'Your photo will be transformed for Halloween and may appear on the party TV. The image is processed by our media provider and temporarily retained in cloud storage. You can delete the photo and withdraw here. A copy already downloaded to the TV may not be removable while that TV is offline.',
+          style: TextStyle(fontSize: 17),
+        ),
+        const SizedBox(height: 16),
+        OutlinedButton(onPressed: choose, child: const Text('Choose photo')),
+        if (photo != null) Image.file(photo!, height: 220, fit: BoxFit.contain),
+        CheckboxListTile(
+          value: consent,
+          onChanged: photo == null
+              ? null
+              : (v) => setState(() => consent = v ?? false),
+          title: const Text(
+            'I understand and affirmatively consent to this photo being processed and shown on the party TV.',
+          ),
+        ),
+        FilledButton(
+          onPressed: photo == null || !consent || widget.session.busy
+              ? null
+              : submit,
+          child: const Text('Review and upload'),
+        ),
+        if (widget.session.submissionId != null)
+          OutlinedButton(
+            onPressed: widget.session.busy
+                ? null
+                : () async {
+                    await widget.session.withdraw();
+                    if (mounted) {
+                      setState(
+                        () => message = widget.session.status == 'deleted'
+                            ? 'Withdrawal recorded and deletion confirmed.'
+                            : widget.session.status == 'recorded'
+                            ? 'Withdrawal recorded; cloud deletion is pending. Retry deletion when online.'
+                            : 'Cloud deletion is pending. Retry when online.',
+                      );
+                    }
+                  },
+            child: const Text('Delete photo and withdraw'),
+          ),
+        if (widget.session.status == 'deletionPending' ||
+            widget.session.status == 'recorded')
+          OutlinedButton(
+            onPressed: widget.session.retryWithdrawal,
+            child: const Text('Retry deletion'),
+          ),
+        if (message != null)
+          Text(message!, key: const Key('guest-photo-status')),
+      ],
+    ),
+  );
+}

@@ -573,8 +573,16 @@ void main() {
     }
 
     Future<void> joinLive(WidgetTester tester) async {
-      await enterVisible(tester, find.byKey(JoinScreen.partyFieldKey), 'party-1');
-      await enterVisible(tester, find.byKey(JoinScreen.channelFieldKey), 'cctv');
+      await enterVisible(
+        tester,
+        find.byKey(JoinScreen.partyFieldKey),
+        'party-1',
+      );
+      await enterVisible(
+        tester,
+        find.byKey(JoinScreen.channelFieldKey),
+        'cctv',
+      );
       await enterVisible(tester, find.byKey(JoinScreen.pinFieldKey), '');
       await tapVisible(tester, find.byKey(JoinScreen.submitKey));
       await flush(tester);

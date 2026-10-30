@@ -36,6 +36,9 @@ import 'package:companion_app/src/session/guest_session_state.dart';
 import 'package:companion_app/src/join/join_payload_scanner.dart';
 import 'package:companion_app/src/ui/join_screen.dart';
 import 'package:companion_app/src/ui/now_playing_screen.dart';
+import 'package:companion_app/src/ui/guest_photo_screen.dart';
+import 'package:companion_app/src/media/guest_photo_picker.dart';
+import 'package:companion_app/src/session/guest_media_session.dart';
 import 'package:core_foundation/core_foundation.dart' show Clock, SystemClock;
 import 'package:core_playlist/core_playlist.dart' show PlaybackManifest;
 import 'package:core_ui/core_ui.dart' show CctvTheme;
@@ -256,6 +259,24 @@ final class _CompanionAppState extends State<CompanionApp>
       state: snapshot,
       onRefresh: session.refresh,
       onLeave: session.leave,
+      onGuestPhoto: _baseDependencies?.guestMediaClient == null
+          ? null
+          : () {
+              final join = snapshot.join!;
+              final mediaSession = GuestMediaSession(
+                client: _baseDependencies!.guestMediaClient!,
+                partyId: join.partyId.value,
+                deviceId: join.deviceId.value,
+              );
+              Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => GuestPhotoScreen(
+                    session: mediaSession,
+                    picker: NativeGuestPhotoPicker(),
+                  ),
+                ),
+              );
+            },
     );
   }
 }
