@@ -11,6 +11,7 @@
 import 'dart:async';
 
 import 'package:channel_api/channel_api.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:companion_app/src/companion_app.dart';
 import 'package:companion_app/src/ui/connection_status.dart';
 import 'package:companion_app/src/ui/join_screen.dart';
@@ -285,13 +286,19 @@ void main() {
       await joinAs(tester, source);
 
       source.controllers.single.addError(
-        Exception('FORBIDDEN: unregistered party/device'),
+        FirebaseFunctionsException(
+          code: 'permission-denied',
+          message: 'unregistered party/device secret-party-9',
+          details: const <String, Object?>{'errorCode': 'FORBIDDEN'},
+        ),
       );
       await flush(tester);
 
       expect(find.text('Access was denied.'), findsOneWidget);
       expect(find.text('CAM-01 · hallway'), findsNothing);
       expect(find.textContaining('Manifest version'), findsNothing);
+      // Raw backend detail never reaches a rendered banner.
+      expect(find.textContaining('secret-party-9'), findsNothing);
       expect(tester.takeException(), isNull);
     });
 

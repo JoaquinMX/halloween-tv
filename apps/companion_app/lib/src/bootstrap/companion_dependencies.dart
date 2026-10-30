@@ -8,9 +8,13 @@
 /// recoverable [remoteUnavailableReason] with an erroring manifest source;
 /// a cloud target is never silently selected.
 ///
-/// Party/device identity arrives from the join flow (a later partition) as
-/// a [FirebaseTvIdentity]; without one the connection cannot scope the
-/// callable, so the source stays unavailable.
+/// Party/device identity arrives with the join flow as validated
+/// [GuestJoinData]: a live backend without a join-time identity yet is
+/// "unscoped" (Firebase initialized, invoker built, [isLive] true) and each
+/// join scopes its own source through [manifestSourceForJoin], which builds
+/// a [FirebaseTvIdentity] from the guest-typed IDs so they scope the actual
+/// callable payload. A fixed [FirebaseTvIdentity] may still be supplied to
+/// [create] for single-identity compositions.
 library;
 
 import 'package:channel_api/channel_api.dart' show ManifestSource;
@@ -27,6 +31,7 @@ import 'package:companion_app/src/config/backend_config.dart';
 import 'package:companion_app/src/data/callable_manifest_invoker.dart';
 import 'package:companion_app/src/data/manifest_connection.dart';
 import 'package:companion_app/src/data/manifest_failure.dart';
+import 'package:companion_app/src/join/guest_join_data.dart';
 
 /// Injectable Firebase bootstrap for tests and emulator wiring.
 typedef FirebaseBootstrap = Future<void> Function(BackendConfig config);
@@ -38,15 +43,36 @@ final class CompanionDependencies {
     required this.manifestSource,
     required this.identity,
     required this.remoteUnavailableReason,
-  });
+    required FirebaseManifestCallableInvoker? invoker,
+  }) : _invoker = invoker;
 
   final BackendConfig config;
   final ManifestSource<PlaybackManifest> manifestSource;
   final FirebaseTvIdentity? identity;
   final String? remoteUnavailableReason;
+  final FirebaseManifestCallableInvoker? _invoker;
 
   /// True when the manifest source is backed by the live callable.
   bool get isLive => remoteUnavailableReason == null;
+
+  /// Builds the per-join scoped source for validated [join] identifiers.
+  ///
+  /// The [FirebaseTvIdentity] is derived from the guest-typed party/device
+  /// IDs so they scope the actual callable payload; the [channelId] scopes
+  /// the requested document. Identity construction is deferred to the
+  /// first [ManifestSource.watchCurrent] call so an identifier the guest
+  /// parser accepts but the backend identity shape rejects surfaces as a
+  /// session `invalidData` error (via [ManifestFailure.classify]) instead
+  /// of throwing out of the join wiring. When no live invoker is available
+  /// (offline/unconfigured), returns the base [manifestSource] so the
+  /// existing recoverable reason still surfaces.
+  ManifestSource<PlaybackManifest> manifestSourceForJoin(GuestJoinData join) {
+    final FirebaseManifestCallableInvoker? invoker = _invoker;
+    if (invoker == null) {
+      return manifestSource;
+    }
+    return _JoinScopedSource(join: join, invoker: invoker);
+  }
 
   static Future<CompanionDependencies> create({
     BackendConfig? config,
@@ -66,18 +92,49 @@ final class CompanionDependencies {
         ),
         identity: identity,
         remoteUnavailableReason: resolved.error ?? 'backend is not configured',
+        invoker: null,
       );
     }
     if (identity == null) {
-      const String reason = 'guest identity is not provisioned';
-      return CompanionDependencies._(
-        config: resolved,
-        manifestSource: _UnavailableManifestSource(
-          ManifestFailure.configuration(reason),
-        ),
-        identity: null,
-        remoteUnavailableReason: reason,
-      );
+      // Live backend selected but no fixed identity: this is the normal
+      // pre-join state. Firebase is still initialized now (so init failures
+      // surface pre-join as recoverable state) and the invoker is built;
+      // each join scopes its own source through [manifestSourceForJoin].
+      try {
+        await (firebaseBootstrap ?? _initializeFirebase)(resolved);
+        final FirebaseManifestCallableInvoker invoker;
+        if (invokerOverride != null) {
+          invoker = invokerOverride;
+        } else {
+          final FirebaseFunctions functions =
+              functionsOverride ??
+              FirebaseFunctions.instanceFor(region: resolved.functionsRegion);
+          if (resolved.useEmulator) {
+            functions.useFunctionsEmulator(
+              resolved.functionsEmulatorHost,
+              resolved.functionsEmulatorPort!,
+            );
+          }
+          invoker = CallableManifestInvoker(functions: functions);
+        }
+        return CompanionDependencies._(
+          config: resolved,
+          manifestSource: _UnscopedManifestSource(),
+          identity: null,
+          remoteUnavailableReason: null,
+          invoker: invoker,
+        );
+      } on Object catch (error) {
+        final ManifestFailure failure = ManifestFailure.classify(error);
+        return CompanionDependencies._(
+          config: resolved,
+          manifestSource: _UnavailableManifestSource(failure),
+          identity: null,
+          remoteUnavailableReason:
+              'Firebase could not be initialized: ${failure.message}',
+          invoker: null,
+        );
+      }
     }
     try {
       await (firebaseBootstrap ?? _initializeFirebase)(resolved);
@@ -104,6 +161,7 @@ final class CompanionDependencies {
         ),
         identity: identity,
         remoteUnavailableReason: null,
+        invoker: invoker,
       );
     } on Object catch (error) {
       final ManifestFailure failure = ManifestFailure.classify(error);
@@ -113,6 +171,7 @@ final class CompanionDependencies {
         identity: identity,
         remoteUnavailableReason:
             'Firebase could not be initialized: ${failure.message}',
+        invoker: null,
       );
     }
   }
@@ -137,4 +196,52 @@ final class _UnavailableManifestSource
   }) => Stream<PlaybackManifest>.error(
     ManifestTransportException('remote manifest is unavailable', failure),
   );
+}
+
+/// Placeholder source for a live-but-unscoped composition (pre-join).
+///
+/// The app never reads through this: every join scopes its own source via
+/// [CompanionDependencies.manifestSourceForJoin]. Surfacing here means a
+/// programming error (reading before a join bound an identity).
+final class _UnscopedManifestSource
+    implements ManifestSource<PlaybackManifest> {
+  @override
+  Stream<PlaybackManifest> watchCurrent({
+    required String partyId,
+    required String channelId,
+  }) => Stream<PlaybackManifest>.error(
+    StateError('join a party before reading the manifest'),
+  );
+}
+
+/// Per-join scoped source: derives the [FirebaseTvIdentity] from validated
+/// [GuestJoinData] so the guest-typed IDs scope the actual callable
+/// payload, then delegates to a real [ManifestConnection].
+///
+/// Identity construction is deferred to the first `watchCurrent` call so an
+/// identifier the guest parser accepts but the backend identity shape
+/// rejects surfaces as a session `invalidData` error (the session's
+/// subscribe path funnels synchronous `watchCurrent` throws through
+/// [ManifestFailure.classify]) instead of throwing out of the join wiring.
+final class _JoinScopedSource implements ManifestSource<PlaybackManifest> {
+  _JoinScopedSource({required GuestJoinData join, required this.invoker})
+    : _join = join;
+
+  final GuestJoinData _join;
+  final FirebaseManifestCallableInvoker invoker;
+
+  @override
+  Stream<PlaybackManifest> watchCurrent({
+    required String partyId,
+    required String channelId,
+  }) {
+    final ManifestConnection connection = ManifestConnection(
+      identity: FirebaseTvIdentity(
+        partyId: _join.partyId.value,
+        deviceId: _join.deviceId.value,
+      ),
+      invoker: invoker,
+    );
+    return connection.watchCurrent(partyId: partyId, channelId: channelId);
+  }
 }

@@ -20,8 +20,10 @@
 library;
 
 import 'dart:async';
+import 'dart:developer' as developer;
 
 import 'package:channel_api/channel_api.dart';
+import 'package:companion_app/src/data/manifest_failure.dart';
 import 'package:companion_app/src/join/guest_join_data.dart';
 import 'package:companion_app/src/session/guest_session_state.dart';
 import 'package:core_foundation/core_foundation.dart';
@@ -182,11 +184,17 @@ final class GuestSession {
     }
     final Result<PlaybackManifest> validated = validateCctvManifest(manifest);
     if (validated is Err<PlaybackManifest>) {
+      // Validator detail is app-generated diagnostics, not UI text: the raw
+      // reason stays in logs and the UI only gets the fixed message.
+      developer.log(
+        'GuestSession manifest validation failed: ${validated.message}',
+        name: 'companion.guest_session',
+      );
       _emit(
         GuestSessionState(
           status: GuestSessionStatus.invalidData,
           join: bound,
-          message: validated.message,
+          message: 'The manifest data was invalid.',
         ),
       );
       return;
@@ -203,6 +211,22 @@ final class GuestSession {
     );
   }
 
+  /// Classifies stream errors structurally and maps them to statuses.
+  ///
+  /// Classification is structural only: [ManifestFailure.classify] unwraps
+  /// transport cause chains and reads the backend `details.errorCode`
+  /// contract codes (plus SDK codes and typed schema/scope/format errors).
+  /// There is deliberately NO substring matching on `error.toString()`:
+  /// raw SDK/backend text never reaches [GuestSessionState.message] — it
+  /// stays in logs only, and the UI renders fixed [ManifestFailure] text.
+  ///
+  /// Kind mapping: `FORBIDDEN`/`UNAUTHENTICATED` clear inaccessible data as
+  /// [GuestSessionStatus.denied]; `CLIP_EXPIRED` is never labeled current
+  /// ([GuestSessionStatus.expired]); `MANIFEST_MISMATCH` and other malformed
+  /// payloads surface as [GuestSessionStatus.invalidData] (retryable false);
+  /// `NOT_FOUND` surfaces the no-manifest state (cold: unavailable,
+  /// retained: stale); transport/unavailable/timeout failures retain
+  /// last-known metadata as stale, or report unavailable on a cold start.
   void _handleError(Object error, int generation) {
     if (generation != _generation || _disposed) {
       return;
@@ -211,44 +235,53 @@ final class GuestSession {
     if (bound == null) {
       return;
     }
-    final String text = error.toString();
-    final String upper = text.toUpperCase();
-    if (_isExpired(upper)) {
-      // Expiry is never labeled current: drop any retained metadata.
-      _emit(
-        GuestSessionState(
-          status: GuestSessionStatus.expired,
-          join: bound,
-          message: 'Clip expired: $text',
-        ),
-      );
-      return;
+    developer.log(
+      'GuestSession stream error: $error',
+      name: 'companion.guest_session',
+    );
+    final ManifestFailure failure = ManifestFailure.classify(error);
+    switch (failure.kind) {
+      case ManifestFailureKind.forbidden:
+      case ManifestFailureKind.unauthenticated:
+        // Inaccessible data is cleared; the binding is kept so the UI can
+        // explain which party was rejected.
+        _emit(
+          GuestSessionState(
+            status: GuestSessionStatus.denied,
+            join: bound,
+            message: failure.message,
+          ),
+        );
+        return;
+      case ManifestFailureKind.expired:
+        // Expiry is never labeled current: drop any retained metadata.
+        _emit(
+          GuestSessionState(
+            status: GuestSessionStatus.expired,
+            join: bound,
+            message: failure.message,
+          ),
+        );
+        return;
+      case ManifestFailureKind.malformed:
+      case ManifestFailureKind.invalidArgument:
+      case ManifestFailureKind.configuration:
+        _emit(
+          GuestSessionState(
+            status: GuestSessionStatus.invalidData,
+            join: bound,
+            message: failure.message,
+          ),
+        );
+        return;
+      case ManifestFailureKind.notFound:
+      case ManifestFailureKind.unavailable:
+      case ManifestFailureKind.transport:
+      case ManifestFailureKind.timeout:
+        break;
     }
-    if (_isDenied(upper)) {
-      // Inaccessible data is cleared; the binding is kept so the UI can
-      // explain which party was rejected.
-      _emit(
-        GuestSessionState(
-          status: GuestSessionStatus.denied,
-          join: bound,
-          message: 'Access denied: $text',
-        ),
-      );
-      return;
-    }
-    if (_isInvalidData(upper, error)) {
-      _emit(
-        GuestSessionState(
-          status: GuestSessionStatus.invalidData,
-          join: bound,
-          message: 'Invalid manifest data: $text',
-        ),
-      );
-      return;
-    }
-    // Transient failure (network loss, transport retry exhaustion,
-    // provider unavailable, unknown): retain last-known metadata as stale,
-    // or report unavailable on a cold start with nothing retained.
+    // No-manifest and transient failures: retain last-known metadata as
+    // stale, or report unavailable on a cold start with nothing retained.
     final PlaybackManifest? retained = _state.manifest;
     if (retained != null) {
       _emit(
@@ -256,7 +289,7 @@ final class GuestSession {
           status: GuestSessionStatus.stale,
           join: bound,
           manifest: retained,
-          message: 'Connection lost; showing last-known data: $text',
+          message: failure.message,
           lastSuccessfulCheck: _state.lastSuccessfulCheck,
         ),
       );
@@ -266,39 +299,9 @@ final class GuestSession {
       GuestSessionState(
         status: GuestSessionStatus.unavailable,
         join: bound,
-        message: 'Manifest unavailable: $text',
+        message: failure.message,
       ),
     );
-  }
-
-  static bool _isExpired(String upper) {
-    return upper.contains('CLIP_EXPIRED') ||
-        upper.contains('CLIP-EXPIRED') ||
-        (upper.contains('EXPIRED') &&
-            (upper.contains('CLIP') || upper.contains('MANIFEST')));
-  }
-
-  static bool _isDenied(String upper) {
-    return upper.contains('FORBIDDEN') ||
-        upper.contains('UNAUTHENTICATED') ||
-        upper.contains('PERMISSION-DENIED') ||
-        upper.contains('PERMISSION_DENIED') ||
-        upper.contains('UNAUTHENTICATED');
-  }
-
-  static bool _isInvalidData(String upper, Object error) {
-    return error is FormatException ||
-        upper.contains('MANIFESTSCHEMAEXCEPTION') ||
-        upper.contains('MANIFESTSCOPEEXCEPTION') ||
-        upper.contains('SCOP_MISMATCH') ||
-        upper.contains('SCOPE MISMATCH') ||
-        upper.contains('MANIFEST_MISMATCH') ||
-        upper.contains('MANIFEST-MISMATCH') ||
-        upper.contains('INVALID_ARGUMENT') ||
-        upper.contains('INVALID-ARGUMENT') ||
-        upper.contains('SCHEMA') ||
-        upper.contains('MALFORMED') ||
-        upper.contains('FORMATEXCEPTION');
   }
 
   /// Re-reads the current manifest without overlapping in-flight refreshes.
@@ -338,7 +341,9 @@ final class GuestSession {
 
   /// Suspends the session for backgrounding: cancels the subscription and
   /// labels retained metadata stale. A session with no retained manifest
-  /// returns to idle without fabricating one.
+  /// keeps its join binding (including while still loading, so a
+  /// backgrounded cold start re-subscribes on resume instead of resetting
+  /// to idle and discarding the typed identifiers).
   Future<void> suspend() async {
     if (_disposed) {
       return;
@@ -365,12 +370,17 @@ final class GuestSession {
     }
     if (_state.status == GuestSessionStatus.loading) {
       _emit(
-        const GuestSessionState(
-          status: GuestSessionStatus.idle,
-          message: 'Suspended before first manifest',
+        GuestSessionState(
+          status: GuestSessionStatus.loading,
+          join: bound,
+          message: 'Suspended before first manifest; will retry on resume',
+          lastSuccessfulCheck: _state.lastSuccessfulCheck,
         ),
       );
     }
+    // Settled non-loading states without retained metadata (denied,
+    // expired, invalid-data, unavailable) keep their binding and message;
+    // the subscription is already cancelled above.
   }
 
   /// Resumes the session with a fresh read after [suspend].

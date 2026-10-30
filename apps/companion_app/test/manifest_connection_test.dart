@@ -10,11 +10,14 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:companion_app/src/bootstrap/companion_dependencies.dart';
 import 'package:companion_app/src/config/backend_config.dart';
 import 'package:companion_app/src/data/callable_manifest_invoker.dart';
 import 'package:companion_app/src/data/manifest_connection.dart';
 import 'package:companion_app/src/data/manifest_failure.dart';
+import 'package:companion_app/src/join/guest_join_data.dart';
+import 'package:core_foundation/core_foundation.dart' show DeviceId, PartyId;
 import 'package:core_playlist/core_playlist.dart' show PlaybackManifest;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:infra_firestore/infra_firestore.dart'
@@ -267,6 +270,89 @@ void main() {
   });
 
   group('backend and transport error classification', () {
+    FirebaseFunctionsException contractError(
+      String code,
+      String errorCode,
+      String message,
+    ) => FirebaseFunctionsException(
+      code: code,
+      message: message,
+      details: <String, Object?>{'errorCode': errorCode},
+    );
+
+    test('MANIFEST_MISMATCH classifies by details errorCode, not SDK text', () {
+      // The SDK code carries no contract meaning here on purpose: the
+      // details errorCode must win.
+      final ManifestFailure failure = ManifestFailure.classify(
+        const ManifestTransportException(
+          'getCurrentManifest callable failed',
+          <String, Object?>{'errorCode': 'MANIFEST_MISMATCH'},
+        ),
+      );
+
+      expect(failure.kind, ManifestFailureKind.malformed);
+      expect(failure.retryable, isFalse);
+      expect(failure.message, 'The manifest data was invalid.');
+    });
+
+    test('real-shaped MANIFEST_MISMATCH exception classifies invalid', () {
+      final ManifestFailure failure = ManifestFailure.classify(
+        contractError(
+          'internal',
+          'MANIFEST_MISMATCH',
+          'backend said MANIFEST_MISMATCH for secret-party-9',
+        ),
+      );
+
+      expect(failure.kind, ManifestFailureKind.malformed);
+      expect(failure.retryable, isFalse);
+      expect(failure.message, isNot(contains('secret-party-9')));
+    });
+
+    test('real-shaped CLIP_EXPIRED exception classifies expired', () {
+      final ManifestFailure failure = ManifestFailure.classify(
+        contractError(
+          'internal',
+          'CLIP_EXPIRED',
+          'clip expired for secret-party-9',
+        ),
+      );
+
+      expect(failure.kind, ManifestFailureKind.expired);
+      expect(failure.retryable, isFalse);
+      expect(failure.message, 'This lineup has expired.');
+      expect(failure.message, isNot(contains('secret-party-9')));
+    });
+
+    test('real-shaped NOT_FOUND exception classifies no-manifest', () {
+      final ManifestFailure failure = ManifestFailure.classify(
+        contractError(
+          'internal',
+          'NOT_FOUND',
+          'no manifest for secret-party-9',
+        ),
+      );
+
+      expect(failure.kind, ManifestFailureKind.notFound);
+      expect(failure.retryable, isFalse);
+      expect(failure.message, 'No manifest is published yet.');
+    });
+
+    test('UNAUTHENTICATED renders the provisioning message, never sign-in', () {
+      final ManifestFailure failure = ManifestFailure.classify(
+        contractError(
+          'unauthenticated',
+          'UNAUTHENTICATED',
+          'missing party/device for secret-party-9',
+        ),
+      );
+
+      expect(failure.kind, ManifestFailureKind.unauthenticated);
+      expect(failure.retryable, isFalse);
+      expect(failure.message, 'This device is not provisioned for this party.');
+      expect(failure.message, isNot(contains('Sign-in')));
+      expect(failure.message, isNot(contains('secret-party-9')));
+    });
     test('FORBIDDEN surfaces promptly and classifies without retry', () async {
       final FakeInvoker invoker = FakeInvoker(
         error: const ManifestTransportException(
@@ -399,5 +485,65 @@ void main() {
         'channelId': 'main',
       });
     });
+
+    test('unscoped live boot scopes each join from guest-typed IDs', () async {
+      final FakeInvoker invoker = FakeInvoker(
+        result: await _contractManifest(),
+      );
+      final CompanionDependencies dependencies =
+          await CompanionDependencies.create(
+            config: BackendConfig.parse(<String, Object?>{
+              'apiKey': 'test-api-key',
+              'appId': '1:123:android:abc',
+              'projectId': 'test-project',
+            }),
+            firebaseBootstrap: (BackendConfig config) async {},
+            invokerOverride: invoker,
+          );
+
+      // Pre-join: live, with no remote problem to banner.
+      expect(dependencies.isLive, isTrue);
+      expect(dependencies.remoteUnavailableReason, isNull);
+
+      final GuestJoinData join = GuestJoinData(
+        partyId: PartyId('pilot'),
+        deviceId: DeviceId('guest-phone-7'),
+        channelId: 'main',
+      );
+      final PlaybackManifest manifest = await dependencies
+          .manifestSourceForJoin(join)
+          .watchCurrent(partyId: 'pilot', channelId: 'main')
+          .first;
+
+      expect(manifest.clips, hasLength(4));
+      expect(invoker.lastName, 'getCurrentManifest');
+      expect(invoker.lastPayload, <String, Object?>{
+        'partyId': 'pilot',
+        'deviceId': 'guest-phone-7',
+        'channelId': 'main',
+      });
+    });
+
+    test(
+      'offline boot has no invoker, so join reuses the base source',
+      () async {
+        final CompanionDependencies dependencies =
+            await CompanionDependencies.create();
+
+        expect(dependencies.isLive, isFalse);
+        final GuestJoinData join = GuestJoinData(
+          partyId: PartyId('pilot'),
+          deviceId: DeviceId('guest-phone-7'),
+          channelId: 'main',
+        );
+        await expectLater(
+          dependencies
+              .manifestSourceForJoin(join)
+              .watchCurrent(partyId: 'pilot', channelId: 'main')
+              .first,
+          throwsA(isA<ManifestTransportException>()),
+        );
+      },
+    );
   });
 }

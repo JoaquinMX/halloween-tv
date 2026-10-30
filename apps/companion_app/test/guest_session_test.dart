@@ -7,6 +7,7 @@
 import 'dart:async';
 
 import 'package:channel_api/channel_api.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:companion_app/src/join/guest_join_data.dart';
 import 'package:companion_app/src/session/guest_session.dart';
 import 'package:companion_app/src/session/guest_session_state.dart';
@@ -84,7 +85,20 @@ GuestJoinData joinFor({String party = 'party-1', String channel = 'cctv'}) {
   );
 }
 
-/// Pumps async stream delivery.
+/// Real-shaped backend failure: an SDK `FirebaseFunctionsException` whose
+/// `details.errorCode` carries the backend contract code. Classification
+/// must read the contract code — never substring-match error text.
+FirebaseFunctionsException contractError(
+  String sdkCode,
+  String errorCode,
+  String message,
+) => FirebaseFunctionsException(
+  code: sdkCode,
+  message: message,
+  details: <String, Object?>{'errorCode': errorCode},
+);
+
+/// Flushes async stream delivery.
 Future<void> pumpEvents() async {
   await Future<void>.delayed(Duration.zero);
   await Future<void>.delayed(Duration.zero);
@@ -186,6 +200,33 @@ void main() {
       await session.dispose();
     });
 
+    test(
+      'suspend during loading retains the join binding for resume',
+      () async {
+        final GuestSession session = GuestSession(source: source, clock: clock);
+        await session.join(joinFor());
+        expect(session.state.status, GuestSessionStatus.loading);
+        final int callsAfterJoin = source.watchCalls;
+
+        // Backgrounding a cold start must not reset to idle: the typed
+        // identifiers are retained in a suspended-loading state.
+        await session.suspend();
+        expect(session.state.status, GuestSessionStatus.loading);
+        expect(session.joinData, joinFor());
+        expect(session.manifest, isNull);
+
+        // Foreground return re-subscribes with the retained binding.
+        await session.resume();
+        expect(session.state.status, GuestSessionStatus.loading);
+        expect(source.watchCalls, callsAfterJoin + 1);
+        source.controllers.last.add(makeManifest());
+        await pumpEvents();
+        expect(session.state.status, GuestSessionStatus.ready);
+        expect(session.manifest?.version, 1);
+        await session.dispose();
+      },
+    );
+
     test('unchanged version still updates the observation timestamp', () async {
       final GuestSession session = GuestSession(source: source, clock: clock);
       await session.join(joinFor());
@@ -211,7 +252,11 @@ void main() {
       expect(session.state.status, GuestSessionStatus.ready);
 
       source.controllers.single.addError(
-        Exception('FORBIDDEN: unregistered party/device'),
+        contractError(
+          'permission-denied',
+          'FORBIDDEN',
+          'unregistered party/device secret-party-9',
+        ),
       );
       await pumpEvents();
 
@@ -219,19 +264,74 @@ void main() {
       expect(session.manifest, isNull);
       // Binding is retained so the UI can explain the rejection.
       expect(session.joinData?.partyId.value, 'party-1');
+      // Fixed UI text only: the raw backend detail stays in logs.
+      expect(session.state.message, 'Access was denied.');
+      expect(session.state.message, isNot(contains('secret-party-9')));
       await session.dispose();
     });
 
-    test('UNAUTHENTICATED maps to denied', () async {
+    test(
+      'UNAUTHENTICATED maps to denied with the provisioning message',
+      () async {
+        final GuestSession session = GuestSession(source: source, clock: clock);
+        await session.join(joinFor());
+        source.controllers.single.addError(
+          contractError(
+            'unauthenticated',
+            'UNAUTHENTICATED',
+            'missing party/device secret-party-9',
+          ),
+        );
+        await pumpEvents();
+
+        expect(session.state.status, GuestSessionStatus.denied);
+        expect(session.manifest, isNull);
+        // There is no login: denial means the device is not provisioned.
+        expect(
+          session.state.message,
+          'This device is not provisioned for this party.',
+        );
+        expect(session.state.message, isNot(contains('secret-party-9')));
+        await session.dispose();
+      },
+    );
+
+    test('MANIFEST_MISMATCH surfaces invalid-data, never current', () async {
       final GuestSession session = GuestSession(source: source, clock: clock);
       await session.join(joinFor());
       source.controllers.single.addError(
-        Exception('unauthenticated: missing party/device'),
+        contractError(
+          'internal',
+          'MANIFEST_MISMATCH',
+          'sibling manifest for secret-party-9',
+        ),
       );
       await pumpEvents();
 
-      expect(session.state.status, GuestSessionStatus.denied);
+      expect(session.state.status, GuestSessionStatus.invalidData);
       expect(session.manifest, isNull);
+      expect(session.state.isReady, isFalse);
+      expect(session.state.message, 'The manifest data was invalid.');
+      expect(session.state.message, isNot(contains('secret-party-9')));
+      await session.dispose();
+    });
+
+    test('NOT_FOUND surfaces the no-manifest state', () async {
+      final GuestSession session = GuestSession(source: source, clock: clock);
+      await session.join(joinFor());
+      source.controllers.single.addError(
+        contractError(
+          'internal',
+          'NOT_FOUND',
+          'no manifest for secret-party-9',
+        ),
+      );
+      await pumpEvents();
+
+      expect(session.state.status, GuestSessionStatus.unavailable);
+      expect(session.manifest, isNull);
+      expect(session.state.message, 'No manifest is published yet.');
+      expect(session.state.message, isNot(contains('secret-party-9')));
       await session.dispose();
     });
 
@@ -242,14 +342,56 @@ void main() {
       await pumpEvents();
       expect(session.state.status, GuestSessionStatus.ready);
 
-      source.controllers.single.addError(Exception('CLIP_EXPIRED'));
+      source.controllers.single.addError(
+        contractError(
+          'internal',
+          'CLIP_EXPIRED',
+          'clip expired for secret-party-9',
+        ),
+      );
       await pumpEvents();
 
       expect(session.state.status, GuestSessionStatus.expired);
       expect(session.manifest, isNull);
       expect(session.state.isReady, isFalse);
+      expect(session.state.message, 'This lineup has expired.');
+      expect(session.state.message, isNot(contains('secret-party-9')));
       await session.dispose();
     });
+
+    test('SDK-code-only failures classify without contract details', () async {
+      final GuestSession session = GuestSession(source: source, clock: clock);
+      await session.join(joinFor());
+      source.controllers.single.addError(
+        FirebaseFunctionsException(
+          code: 'permission-denied',
+          message: 'secret-party-9 is not registered',
+        ),
+      );
+      await pumpEvents();
+
+      expect(session.state.status, GuestSessionStatus.denied);
+      expect(session.manifest, isNull);
+      expect(session.state.message, isNot(contains('secret-party-9')));
+      await session.dispose();
+    });
+
+    test(
+      'transport failures stay sanitized on the cold and stale paths',
+      () async {
+        final GuestSession session = GuestSession(source: source, clock: clock);
+        await session.join(joinFor());
+        source.controllers.single.addError(
+          StateError('socket reset by peer 10.0.0.9'),
+        );
+        await pumpEvents();
+
+        expect(session.state.status, GuestSessionStatus.unavailable);
+        expect(session.state.message, 'Could not reach the backend.');
+        expect(session.state.message, isNot(contains('10.0.0.9')));
+        await session.dispose();
+      },
+    );
 
     test(
       'leave clears identity and metadata and cancels subscription',

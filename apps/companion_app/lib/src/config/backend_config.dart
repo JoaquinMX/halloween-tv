@@ -65,7 +65,7 @@ final class BackendConfig {
     final int? emulatorPort = switch (rawPort) {
       null => null,
       final int v => v,
-      final num v when v == v.truncateToDouble() => v.toInt(),
+      final num v when v % 1 == 0 => v.toInt(),
       final String v => int.tryParse(v.trim()),
       _ => null,
     };
@@ -77,6 +77,14 @@ final class BackendConfig {
     final bool emulatorRequested = emulatorHost.isNotEmpty || rawPort != null;
     if (!liveRequested && !emulatorRequested) {
       // Default: unconfigured/offline boot, no error.
+    } else if (_isPlaceholder(apiKey) ||
+        _isPlaceholder(appId) ||
+        _isPlaceholder(projectId)) {
+      // Fail closed: the shipped example file holds YOUR- sentinels only.
+      // A copy that was never filled in must never select a cloud target.
+      error =
+          'firebase options still hold placeholder values (fields starting '
+          'with YOUR-); fill in real values from the Firebase console';
     } else if (apiKey.isEmpty || appId.isEmpty || projectId.isEmpty) {
       error =
           'firebase options are incomplete: apiKey, appId, and projectId '
@@ -133,6 +141,53 @@ final class BackendConfig {
     }
   }
 
+  /// Reads build-time configuration from `--dart-define` values.
+  ///
+  /// Empty (absent) defines resolve to [CompanionBackendMode.unconfigured]
+  /// offline boot, exactly like a missing options file. Present values flow
+  /// through [BackendConfig.parse], so placeholders and partial files fail
+  /// closed the same way. Only public client options are read; there are
+  /// no secrets, identities, or credentials.
+  factory BackendConfig.fromEnvironment() {
+    String define(String key) => switch (key) {
+      'COMPANION_FIREBASE_API_KEY' => const String.fromEnvironment(
+        'COMPANION_FIREBASE_API_KEY',
+      ).trim(),
+      'COMPANION_FIREBASE_APP_ID' => const String.fromEnvironment(
+        'COMPANION_FIREBASE_APP_ID',
+      ).trim(),
+      'COMPANION_FIREBASE_PROJECT_ID' => const String.fromEnvironment(
+        'COMPANION_FIREBASE_PROJECT_ID',
+      ).trim(),
+      'COMPANION_FUNCTIONS_REGION' => const String.fromEnvironment(
+        'COMPANION_FUNCTIONS_REGION',
+      ).trim(),
+      'COMPANION_FUNCTIONS_EMULATOR_HOST' => const String.fromEnvironment(
+        'COMPANION_FUNCTIONS_EMULATOR_HOST',
+      ).trim(),
+      'COMPANION_FUNCTIONS_EMULATOR_PORT' => const String.fromEnvironment(
+        'COMPANION_FUNCTIONS_EMULATOR_PORT',
+      ).trim(),
+      _ => '',
+    };
+    final Map<String, Object?> json = <String, Object?>{
+      'apiKey': define('COMPANION_FIREBASE_API_KEY'),
+      'appId': define('COMPANION_FIREBASE_APP_ID'),
+      'projectId': define('COMPANION_FIREBASE_PROJECT_ID'),
+      'functionsRegion': define('COMPANION_FUNCTIONS_REGION'),
+    };
+    final String emulatorHost = define('COMPANION_FUNCTIONS_EMULATOR_HOST');
+    final String emulatorPort = define('COMPANION_FUNCTIONS_EMULATOR_PORT');
+    if (emulatorHost.isNotEmpty) {
+      json['functionsEmulatorHost'] = emulatorHost;
+    }
+    if (emulatorPort.isNotEmpty) {
+      json['functionsEmulatorPort'] =
+          int.tryParse(emulatorPort) ?? emulatorPort;
+    }
+    return BackendConfig.parse(json);
+  }
+
   static const String defaultFunctionsRegion = 'us-central1';
 
   final CompanionBackendMode mode;
@@ -154,6 +209,11 @@ final class BackendConfig {
   /// True when the Functions emulator is the selected target.
   bool get useEmulator =>
       isLiveConfigured && mode == CompanionBackendMode.emulator;
+
+  /// Placeholder sentinel check: the shipped `config/firebase.example.json`
+  /// holds `YOUR-` values only, and a copied-but-never-filled file must
+  /// fail closed instead of selecting a cloud target.
+  static bool _isPlaceholder(String value) => value.startsWith('YOUR-');
 
   /// Public client options, or `null` when unconfigured.
   ///

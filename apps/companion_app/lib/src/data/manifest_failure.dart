@@ -24,6 +24,9 @@ enum ManifestFailureKind {
   configuration,
 
   /// Caller identity was rejected (`UNAUTHENTICATED`).
+  ///
+  /// There is no login in this app: this means the device is not
+  /// provisioned for the party.
   unauthenticated,
 
   /// Party/device pair is not an active registration (`FORBIDDEN`).
@@ -34,6 +37,9 @@ enum ManifestFailureKind {
 
   /// The request was rejected (`INVALID_ARGUMENT`).
   invalidArgument,
+
+  /// The published lineup expired (`CLIP_EXPIRED`). Never labeled current.
+  expired,
 
   /// Transient backend failure (`PROVIDER_UNAVAILABLE`, `BUDGET_EXCEEDED`).
   unavailable,
@@ -138,7 +144,7 @@ final class ManifestFailure {
       case 'UNAUTHENTICATED':
         return const ManifestFailure._(
           ManifestFailureKind.unauthenticated,
-          'Sign-in is required.',
+          'This device is not provisioned for this party.',
           false,
         );
       case 'FORBIDDEN':
@@ -167,10 +173,15 @@ final class ManifestFailure {
           true,
         );
       case 'MANIFEST_MISMATCH':
-      case 'CLIP_EXPIRED':
         return const ManifestFailure._(
           ManifestFailureKind.malformed,
           'The manifest data was invalid.',
+          false,
+        );
+      case 'CLIP_EXPIRED':
+        return const ManifestFailure._(
+          ManifestFailureKind.expired,
+          'This lineup has expired.',
           false,
         );
       case 'INTERNAL':
@@ -184,7 +195,7 @@ final class ManifestFailure {
       case 'unauthenticated':
         return const ManifestFailure._(
           ManifestFailureKind.unauthenticated,
-          'Sign-in is required.',
+          'This device is not provisioned for this party.',
           false,
         );
       case 'permission-denied':

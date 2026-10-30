@@ -142,9 +142,38 @@ void main() {
         );
       }
 
+      // Fail closed: a copied-but-never-filled file must never select a
+      // cloud target, even though every required field is non-empty.
       final BackendConfig config = BackendConfig.parse(json);
-      expect(config.error, isNull);
+      expect(config.mode, CompanionBackendMode.unconfigured);
+      expect(config.isLiveConfigured, isFalse);
+      expect(config.firebaseOptions, isNull);
+      expect(config.error, contains('placeholder'));
       expect(config.functionsRegion, 'us-central1');
+    });
+
+    test('YOUR- sentinel in any single field fails closed', () {
+      final BackendConfig config = BackendConfig.parse(<String, Object?>{
+        'apiKey': 'test-api-key',
+        'appId': '1:123:android:abc',
+        'projectId': 'YOUR-FIREBASE-PROJECT-ID',
+      });
+
+      expect(config.mode, CompanionBackendMode.unconfigured);
+      expect(config.isLiveConfigured, isFalse);
+      expect(config.firebaseOptions, isNull);
+      expect(config.error, contains('placeholder'));
+    });
+
+    test('fromEnvironment defaults to unconfigured offline boot', () {
+      // No --dart-define values in the test environment.
+      final BackendConfig config = BackendConfig.fromEnvironment();
+
+      expect(config.mode, CompanionBackendMode.unconfigured);
+      expect(config.isLiveConfigured, isFalse);
+      expect(config.useEmulator, isFalse);
+      expect(config.error, isNull);
+      expect(config.firebaseOptions, isNull);
     });
   });
 }

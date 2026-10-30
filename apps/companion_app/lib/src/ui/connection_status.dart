@@ -145,7 +145,9 @@ final class ConnectionStatus extends StatelessWidget {
                 ),
               ],
             ),
-            if (detail != null && detail.isNotEmpty) ...<Widget>[
+            if (detail != null &&
+                detail.isNotEmpty &&
+                detail != heading) ...<Widget>[
               const SizedBox(height: 8),
               Text(detail, style: const TextStyle(fontSize: 16)),
             ],

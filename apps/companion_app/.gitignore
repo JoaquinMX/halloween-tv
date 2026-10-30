@@ -40,6 +40,11 @@ android/key.properties
 *.jks
 *.keystore
 
+# Companion backend options: real values must never be committed. Copy
+# config/firebase.example.json (placeholders only) to config/firebase.json
+# and fill in real values locally; the real file is always ignored.
+/config/firebase.json
+
 # NOTE: pubspec.lock IS committed for this app (standard for applications).
 
 # Symbolication related
