@@ -9,7 +9,7 @@ plugins {
 
 android {
     namespace = "com.joaquinmx.companion_app"
-    compileSdk = flutter.compileSdkVersion
+    compileSdk = 37
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
