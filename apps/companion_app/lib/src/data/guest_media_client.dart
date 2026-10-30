@@ -8,6 +8,10 @@ const String kCompleteGuestUpload = 'completeGuestUpload';
 const String kGetGuestMediaStatus = 'getGuestMediaStatus';
 const String kWithdrawGuestMedia = 'withdrawGuestMedia';
 
+/// Server-side consent envelope (mirror backend/functions/src/config.ts).
+const String kGuestConsentTextVersion = 'v1';
+const String kGuestConsentPurpose = 'guest_cameo';
+
 abstract interface class GuestMediaCallableInvoker {
   Future<Object?> call(String name, Map<String, Object?> payload);
 }
@@ -70,6 +74,7 @@ final class GuestMediaClient {
   Future<GuestUploadCapability> requestUpload({
     required String partyId,
     required String deviceId,
+    required String channelId,
     required String contentType,
     required int byteSize,
     required bool affirmativeConsent,
@@ -80,10 +85,14 @@ final class GuestMediaClient {
     final raw = await _invoker
         .call(kRequestGuestUpload, {
           ..._scope(partyId, deviceId),
+          'channelId': channelId,
           'contentType': contentType,
           'byteSize': byteSize,
-          'consent': true,
-          'consentVersion': 'guest-photo-v1',
+          'consent': {
+            'accepted': true,
+            'textVersion': kGuestConsentTextVersion,
+            'purpose': kGuestConsentPurpose,
+          },
         })
         .timeout(const Duration(seconds: 15));
     if (raw is! Map ||

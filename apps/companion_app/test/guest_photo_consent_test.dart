@@ -21,6 +21,16 @@ class Boundary implements GuestMediaCallableInvoker {
   Future<Object?> call(String name, Map<String, Object?> payload) async {
     if (name == kRequestGuestUpload) {
       requests++;
+      if (payload['channelId'] != 'cctv') {
+        throw StateError('channelId is required (got ${payload['channelId']})');
+      }
+      final Object? consent = payload['consent'];
+      if (consent is! Map<String, Object?> ||
+          consent['accepted'] != true ||
+          consent['textVersion'] != 'v1' ||
+          consent['purpose'] != 'guest_cameo') {
+        throw StateError('affirmative consent object is required');
+      }
       return {
         'submissionId': 'receipt_12345',
         'uploadUrl': 'https://signed.example/upload',
@@ -75,6 +85,7 @@ void main() {
         client: GuestMediaClient(invoker: boundary, transport: Upload()),
         partyId: 'party',
         deviceId: 'device',
+        channelId: 'cctv',
         tempDirectory: () async => dir,
       );
       await tester.pumpWidget(

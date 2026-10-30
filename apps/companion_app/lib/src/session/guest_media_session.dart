@@ -11,12 +11,13 @@ final class GuestMediaSession {
     required this.client,
     required this.partyId,
     required this.deviceId,
+    required this.channelId,
     Future<SharedPreferences> Function()? preferences,
     Future<Directory> Function()? tempDirectory,
   }) : _preferences = preferences ?? SharedPreferences.getInstance,
        _tempDirectory = tempDirectory ?? getTemporaryDirectory;
   final GuestMediaClient client;
-  final String partyId, deviceId;
+  final String partyId, deviceId, channelId;
   final Future<SharedPreferences> Function() _preferences;
   final Future<Directory> Function() _tempDirectory;
   static const receiptKey = 'companion.guest_media_receipt.v1';
@@ -45,6 +46,7 @@ final class GuestMediaSession {
       final capability = await client.requestUpload(
         partyId: partyId,
         deviceId: deviceId,
+        channelId: channelId,
         contentType: 'image/jpeg',
         byteSize: await staged.length(),
         affirmativeConsent: consent,
