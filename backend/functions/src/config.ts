@@ -21,6 +21,19 @@ export const CHEAP_DEMO_PRESET = Object.freeze({
   autoUpscale: false as const,
 });
 
+/** Guest upload/consent controls. Server-side only; never trust caller-supplied paths. */
+export const GUEST_CONSENT_TEXT_VERSION = "v1";
+export const GUEST_CONSENT_PURPOSE = "guest_cameo";
+/** Short-lived upload capability lifetime (signed PUT bound to object + content type). */
+export const GUEST_UPLOAD_TTL_MS = 15 * 60 * 1000;
+/** Abandoned/expired guest inputs are removed within a capped 24h deadline. */
+export const GUEST_INPUT_TTL_MS = 24 * 60 * 60 * 1000;
+export const GUEST_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+export const GUEST_ALLOWED_CONTENT_TYPES = ["image/jpeg", "image/png"] as const;
+export type GuestAllowedContentType = (typeof GUEST_ALLOWED_CONTENT_TYPES)[number];
+/** Exactly one provider-generated camera in a guest-bound job; the rest are local fixtures. */
+export const GUEST_PROVIDER_CAMERA_ID = "CAM-01" as const;
+
 export const ERROR_CODES = [
   "UNAUTHENTICATED",
   "FORBIDDEN",

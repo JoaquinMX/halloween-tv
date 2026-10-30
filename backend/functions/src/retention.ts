@@ -20,6 +20,7 @@ export interface RetentionResult {
   expiredJobs: number;
   deletedExpiredObjects: number;
   deletedOrphanObjects: number;
+  expiredGuestInputs: number;
 }
 
 /** Scheduled TTL transition plus orphan cleanup; object deletion is idempotent. */
@@ -68,10 +69,48 @@ export async function sweepExpiredMedia(
 
   const references = new Set<string>();
   const liveJobPairs = new Set<string>();
-  const [manifests, jobs] = await Promise.all([
+  const [manifests, jobs, guestMedia] = await Promise.all([
     db.collectionGroup("manifests").get(),
     db.collectionGroup("jobs").get(),
+    db.collectionGroup("guestMedia").get(),
   ]);
+  // Guest consent inputs: live (unexpired, not withdrawn) ingest objects are
+  // protected from the orphan sweep. Abandoned pending uploads and expired
+  // eligible inputs are removed within the capped 24h input TTL below.
+  let expiredGuestInputs = 0;
+  for (const guestDoc of guestMedia.docs) {
+    const guest = guestDoc.data();
+    const objectPath = typeof guest.objectPath === "string" ? guest.objectPath : undefined;
+    const expiry = expiryDate(guest.expiresAt);
+    const liveGuest = (guest.status === "pending_upload" || guest.status === "eligible") &&
+      expiry !== undefined && expiry > now;
+    if (liveGuest && objectPath && objectPath.startsWith("parties/")) {
+      references.add(objectPath);
+      continue;
+    }
+    if ((guest.status === "pending_upload" || guest.status === "eligible") && objectPath && objectPath.startsWith("parties/")) {
+      let deleted = false;
+      for (let attempt = 0; attempt < 3 && !deleted; attempt += 1) {
+        try {
+          await bucket.file(objectPath).delete({ ignoreNotFound: true });
+          deleted = true;
+        } catch {
+          deleted = false;
+        }
+      }
+      if (deleted) expiredGuestInputs += 1;
+      // Minimize retained audit metadata once the deadline passes.
+      await guestDoc.ref.update({
+        status: "expired",
+        sourceHash: FieldValue.delete(),
+        sourceSizeBytes: FieldValue.delete(),
+        sourceGeneration: FieldValue.delete(),
+        contentType: FieldValue.delete(),
+        expiredAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      }).catch(() => undefined);
+    }
+  }
   for (const manifestDoc of manifests.docs) {
     const manifest = manifestDoc.data();
     const expiry = expiryDate(manifest.expiresAt);
@@ -126,7 +165,7 @@ export async function sweepExpiredMedia(
     await file.delete({ ignoreNotFound: true });
     deletedOrphanObjects += 1;
   }
-  return { expiredJobs, deletedExpiredObjects, deletedOrphanObjects };
+  return { expiredJobs, deletedExpiredObjects, deletedOrphanObjects, expiredGuestInputs };
 }
 
 export function createRetentionService(db: Firestore, bucket: Bucket, clock?: () => Date) {

@@ -57,9 +57,13 @@ export class FakeVideoGenerationPort implements VideoGenerationPort {
   }
 }
 
-export function createVideoGenerationProviderFromEnvironment(): VideoGenerationPort {
+export function createVideoGenerationProviderFromEnvironment(fixtureDirectory?: string): VideoGenerationPort {
   const selected = (process.env.VIDEO_GENERATION_PROVIDER ?? "fake").trim().toLowerCase();
-  if (selected === "fake") return new FakeVideoGenerationPort();
+  if (selected === "fake") {
+    return new FakeVideoGenerationPort(
+      typeof fixtureDirectory === "string" && fixtureDirectory.trim() !== "" ? fixtureDirectory : undefined,
+    );
+  }
   if (selected === "alibaba") {
     // Lazy import avoids requiring provider credentials when the offline provider is selected.
     const { createAlibabaProviderFromEnvironment } = require("./alibaba") as typeof import("./alibaba");

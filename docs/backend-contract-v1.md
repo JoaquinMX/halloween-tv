@@ -30,6 +30,18 @@ an idempotency key.
 | `getDeliveryUrls` | callable | party/device-scoped TV |
 | `acknowledgeDelivery` | callable | party/device-scoped TV |
 | `sweepExpiredMedia` | schedule `every 15 minutes` | runtime |
+| `requestGuestUpload` | callable | party/device-scoped guest |
+| `completeGuestUpload` | callable | party/device-scoped guest |
+| `getGuestMediaStatus` | callable | party/device-scoped guest |
+| `withdrawGuestMedia` | callable | party/device-scoped guest |
+
+Guest ingest objects live under
+`parties/{partyId}/guests/{deviceId}/ingest/{submissionId}/photo.jpg` with
+server-generated `submissionId` values only; caller-supplied paths and any
+cross-party/cross-device/channel substitution are rejected with `FORBIDDEN`.
+Firestore guest consent/media docs are callable-only (explicit deny in
+`firestore.rules`); Storage guest objects are callable-only (explicit deny in
+`storage.rules`, signed URLs bypass rules with backend validation).
 
 Firestore layout: `parties/{partyId}` (`ownerUid`, `status`, `activeChannelId`),
 `channels/{channelId}`, `manifests/current_{channelId}` (`version`,
@@ -144,6 +156,61 @@ Admin SDK. Direct client device writes stay denied by `firestore.rules`.
   docs) still read the current manifest via `getCurrentManifest` — but the
   updated companion no longer prompts for typed codes.
 
+## Guest upload, consent, and withdrawal
+
+Anonymous registered-device bearer model: no Firebase Auth, no login, no
+display name. The same party/device/channel registration gate authorizes every
+guest callable.
+
+- `requestGuestUpload { partyId, deviceId, channelId, consent: { accepted: true, textVersion: "v1", purpose: "guest_cameo" }, contentType: "image/jpeg"|"image/png" }`
+  records affirmative consent server-side (consent-text version, purpose,
+  timestamps, device binding, `pending_upload` status, 15-minute expiry) BEFORE
+  issuing a narrowly scoped short-lived signed PUT capability bound to the
+  server-generated object path and the content type. The capability is returned
+  and never persisted in Firestore or logs.
+- `completeGuestUpload { partyId, deviceId, channelId, submissionId }` verifies
+  the actual image bytes (JPEG/PNG magic, size within 10 MB), SHA-256, object
+  ownership, consent, and expiry before marking the submission `eligible` with
+  an immutable source hash/generation and consent revision. Repeats are
+  idempotent. Non-image bytes are rejected and never become eligible.
+- `getGuestMediaStatus { partyId, deviceId, channelId, submissionId }` returns
+  status and consent revision for the owning device only. Signed URLs are never
+  included.
+- `withdrawGuestMedia { partyId, deviceId, channelId, submissionId }` revokes
+  eligibility first (blocking new submissions and publication), deletes the
+  source plus attributable remaining cloud derivatives, verifies absence with
+  retried deletes, and retains a minimal tombstone. A PUT after withdrawal
+  never restores eligibility and is deleted by the `onGuestIngestFinalized`
+  cleanup handler. Pending uploads are protected from the orphan sweep;
+  abandoned/expired inputs are removed within the capped 24h input TTL.
+- `onGuestIngestFinalized` (storage trigger) deletes ingest objects with no
+  consent record, a mismatched device binding, or a withdrawn/expired status,
+  and leaves pending/eligible objects untouched.
+
+## Consent-bound generation
+
+- `requestGeneration` accepts an optional `guestMediaId` bound to an eligible
+  guest submission (same party/device/channel, live consent, unexpired). The
+  binding (submission ID, immutable source hash, consent revision) is stored on
+  the job and rechecked at request time, at worker submission time, and
+  transactionally at publication. Withdrawal fails the bound job closed,
+  discards already-running results, and cleans staged bytes.
+- Guest execution plan: exactly ONE provider-generated camera slot (`CAM-01`,
+  carrying the validated `referenceImage` binding) plus three locally prepared
+  fixture slots (`CAM-02`–`CAM-04`). The four-camera manifest contract is kept
+  with truthful provenance: fixture slots record `fixture: true` with a null
+  provider task ID and null charge; they are never given fabricated provider
+  task IDs or charges. The single provider usage row keeps the synthetic zero
+  of the offline fake, explicitly not a measured charge.
+- Cheap-demo limits are unchanged (`wan3.0-video`, 480p, 2s, silent, 1
+  output); text-only behavior is preserved. The Alibaba adapter maps a present
+  `referenceImage` to a `reference_image { storage_ref, sha256 }` input via the
+  pure offline-tested `buildAlibabaSubmitBody` serializer.
+- Provider selection is explicit: a packaged `fixtureDirectory` never silently
+  forces fake mode over another configured provider. Fake selection consumes
+  the packaged directory; Alibaba selection resolves lazily so discovery and
+  local tests never require provider credentials.
+
 ## Budget guards
 
 - Max 1 generation in flight per party (`BUDGET_EXCEEDED` otherwise).
@@ -187,7 +254,10 @@ The detail preserves the backend code above; Firebase codes are respectively
 From `backend/functions`, `npm run build` checks the TypeScript deployment
 composition. `npm run test:emulator` runs Firestore and Storage emulator tests
 serially. These tests use the deterministic fake provider and repository MP4
-fixtures; they make no provider network calls. Keep generation disabled during
+fixtures; they make no provider network calls. The emulator signing
+substitutes (deterministic capability strings) are not equivalent to cloud v4
+signed URLs / IAM signing; they only prove per-submission scoping without
+persistence. Keep generation disabled during
 module discovery and normal local development. A deliberate runtime opt-in is
 `GENERATION_ENABLED=true`; selecting the fake provider with
 `VIDEO_GENERATION_PROVIDER=fake` remains offline. Deployment and provider
@@ -206,5 +276,10 @@ refusal paths against the emulator), `qr_join_e2e.test.ts` (PIN-gated join,
 rejoin, TV listing, and legacy manifest read through the real exported Functions
 emulator endpoints with no auth), `delivery.test.ts` (URL scoping, manifest callable, ACK hash
 checks, bounded retry purge), and `retention.test.ts` (TTL transitions, orphan
-sweeper). Emulator-backed cases skip when `FIRESTORE_EMULATOR_HOST` is unset;
+sweeper). Guest flows are covered by `guest_upload.test.ts` (consent refusal,
+completion, scoping, withdrawal, deletion retry, TTL/orphan protection,
+generation refusal), `guest_upload_e2e.test.ts` (real-bytes endpoint lifecycle),
+`guest_media_generation.test.ts` (one provider camera plus three fixture slots,
+truthful usage, withdrawal races), and `alibaba.test.ts` (offline guest-image
+serialization fixture, zero network). Emulator-backed cases skip when `FIRESTORE_EMULATOR_HOST` is unset;
 run `npm run test:emulator` (project `demo-halloween-tv`) for the full suite.

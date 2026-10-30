@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { BackendError, parseAck, parseJoinPartyInput, parseRequestGeneration, requireIdentity } from "../src/contracts";
+import { buildCheapDemoRequest, validateCheapDemoControls, validateGuestImageReference } from "../src/video_generation_port";
+import { createVideoGenerationProviderFromEnvironment, FakeVideoGenerationPort } from "../src/providers/fake";
+import { AlibabaVideoGenerationPort } from "../src/providers/alibaba";
 import { createDeliveryServices } from "../src/delivery";
 import { createEmulatorContext, clearParty, HAS_FIRESTORE_EMULATOR, randomPartyId, seedParty, disposeEmulatorContext } from "./support/emulators";
 
@@ -75,5 +78,54 @@ test("registered callable enforces one in-flight job, idempotency, sanitized err
   } finally {
     await clearParty(db, bucket, partyId);
     await disposeEmulatorContext(app);
+  }
+});
+
+test("guest-bound generation contracts keep cheap_demo locked with a validated image reference", () => {
+  const reference = {
+    objectPath: "parties/pilot/guests/p-1/ingest/gsub-1/photo.jpg",
+    sha256: "a".repeat(64),
+    consentRevision: "v1:2026-10-30T00:00:00.000Z",
+  };
+  const parsed = parseRequestGeneration({
+    partyId: "party", deviceId: "tv", channelId: "main", jobId: "job-1",
+    idempotencyKey: "job-1", presetId: "cheap_demo", guestMediaId: "gsub-1",
+  });
+  assert.equal(parsed.guestMediaId, "gsub-1");
+  expectCode(() => parseRequestGeneration({
+    partyId: "party", deviceId: "tv", channelId: "main", jobId: "job-1",
+    idempotencyKey: "job-1", presetId: "cheap_demo", guestMediaId: "",
+  }), "INVALID_ARGUMENT");
+  const request = buildCheapDemoRequest("job-1", "idem-1", "CAM-01", reference);
+  assert.equal(request.modelId, "wan3.0-video");
+  assert.equal(request.resolution, "480P");
+  assert.equal(request.secondsOut, 2);
+  assert.equal(request.audio, false);
+  assert.equal(request.outputs, 1);
+  assert.deepEqual(request.referenceImage, reference);
+  const textOnly = buildCheapDemoRequest("job-1", "idem-1", "CAM-01");
+  assert.equal(textOnly.referenceImage, undefined);
+  expectCode(() => validateCheapDemoControls({ presetId: "cheap_demo", resolution: "720P" }), "INVALID_ARGUMENT");
+  expectCode(() => validateGuestImageReference({ ...reference, objectPath: "parties/other/photo.jpg" }), "INVALID_ARGUMENT");
+  expectCode(() => validateGuestImageReference({ ...reference, sha256: "zzz" }), "INVALID_ARGUMENT");
+  expectCode(() => validateGuestImageReference({ ...reference, consentRevision: "" }), "INVALID_ARGUMENT");
+});
+
+test("a supplied fixture directory never silently forces fake mode over alibaba", () => {
+  const previous = process.env.VIDEO_GENERATION_PROVIDER;
+  try {
+    process.env.VIDEO_GENERATION_PROVIDER = "alibaba";
+    process.env.ALIBABA_API_KEY = "fixture-key";
+    process.env.ALIBABA_WORKSPACE_ID = "workspace";
+    const alibaba = createVideoGenerationProviderFromEnvironment("/packaged/runtime/fixtures");
+    assert.ok(alibaba instanceof AlibabaVideoGenerationPort);
+    process.env.VIDEO_GENERATION_PROVIDER = "fake";
+    const fake = createVideoGenerationProviderFromEnvironment("/packaged/runtime/fixtures");
+    assert.ok(fake instanceof FakeVideoGenerationPort);
+  } finally {
+    if (previous === undefined) delete process.env.VIDEO_GENERATION_PROVIDER;
+    else process.env.VIDEO_GENERATION_PROVIDER = previous;
+    delete process.env.ALIBABA_API_KEY;
+    delete process.env.ALIBABA_WORKSPACE_ID;
   }
 });

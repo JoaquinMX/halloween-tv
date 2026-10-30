@@ -1,0 +1,39 @@
+{
+  "request": {
+    "jobId": "job-guest-1",
+    "idempotencyKey": "idem-guest-1:CAM-01",
+    "cameraId": "CAM-01",
+    "prompt": "A two-second, silent 16:9 Halloween security-camera scene for CAM-01.",
+    "modelId": "wan3.0-video",
+    "presetId": "cheap_demo",
+    "region": "singapore",
+    "resolution": "480P",
+    "secondsOut": 2,
+    "aspectRatio": "16:9",
+    "audio": false,
+    "outputs": 1,
+    "autoUpscale": false,
+    "referenceImage": {
+      "objectPath": "parties/pilot/guests/p-guest001/ingest/gsub-guest001/photo.jpg",
+      "sha256": "990113ea6cec90564cdc9e64917fd5fc2b1172a6220d20f8848225c084eb316a",
+      "consentRevision": "v1:2026-10-30T00:00:00.000Z"
+    }
+  },
+  "body": {
+    "model": "wan3.0-video",
+    "input": {
+      "prompt": "A two-second, silent 16:9 Halloween security-camera scene for CAM-01.",
+      "reference_image": {
+        "storage_ref": "parties/pilot/guests/p-guest001/ingest/gsub-guest001/photo.jpg",
+        "sha256": "990113ea6cec90564cdc9e64917fd5fc2b1172a6220d20f8848225c084eb316a"
+      }
+    },
+    "parameters": {
+      "resolution": "480P",
+      "ratio": "16:9",
+      "duration": 2,
+      "audio": false,
+      "watermark": false
+    }
+  }
+}

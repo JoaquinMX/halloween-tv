@@ -20,6 +20,8 @@ export interface RequestGenerationInput extends Identity {
   jobId: string;
   idempotencyKey: string;
   presetId: typeof CHEAP_DEMO_PRESET.presetId;
+  /** Optional consent-bound guest media submission bound at request time. */
+  guestMediaId?: string;
 }
 
 export interface CanonicalClip {
@@ -82,6 +84,13 @@ export function parseRequestGeneration(value: unknown): RequestGenerationInput {
     if (key in value && value[key] !== expected) {
       throw new BackendError("INVALID_ARGUMENT", `Unsupported ${key}.`);
     }
+  }
+  if ("guestMediaId" in value && value.guestMediaId !== undefined) {
+    if (typeof value.guestMediaId !== "string" || !value.guestMediaId) {
+      throw new BackendError("INVALID_ARGUMENT", "guestMediaId is invalid.");
+    }
+    validateId(value.guestMediaId, "guestMediaId");
+    return { ...identity, jobId, idempotencyKey, presetId: CHEAP_DEMO_PRESET.presetId, guestMediaId: value.guestMediaId };
   }
   return { ...identity, jobId, idempotencyKey, presetId: CHEAP_DEMO_PRESET.presetId };
 }

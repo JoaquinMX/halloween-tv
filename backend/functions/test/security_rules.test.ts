@@ -69,3 +69,36 @@ test("anonymous clients cannot self-register, list devices, or read party PIN st
     await env.cleanup();
   }
 });
+
+test("anonymous clients cannot read or mutate guest consent and media records", { skip: !HAS_FIRESTORE_EMULATOR }, async () => {
+  const host = emulatorHost();
+  const rules = await readFile(resolve(__dirname, "../../firestore.rules"), "utf8");
+  assert.ok(rules.includes("guestMedia"), "firestore rules carry an explicit guest consent/media section");
+  const env: RulesTestEnvironment = await initializeTestEnvironment({
+    projectId: PROJECT_ID,
+    firestore: { host: host.host, port: host.port, rules },
+  });
+  try {
+    await env.withSecurityRulesDisabled(async (context) => {
+      const firestore = context.firestore();
+      await setDoc(doc(firestore, "parties/guest-party"), { status: "active", activeChannelId: "main" });
+      await setDoc(doc(firestore, "parties/guest-party/devices/p-1"), { partyId: "guest-party", status: "active" });
+      await setDoc(doc(firestore, "parties/guest-party/guestMedia/gsub-1"), {
+        submissionId: "gsub-1", partyId: "guest-party", deviceId: "p-1", channelId: "main", status: "eligible",
+      });
+    });
+    const client = env.unauthenticatedContext().firestore();
+    await assertFails(getDoc(doc(client, "parties/guest-party/guestMedia/gsub-1")));
+    await assertFails(setDoc(doc(client, "parties/guest-party/guestMedia/gsub-1"), { status: "withdrawn" }));
+    await assertFails(setDoc(doc(client, "parties/guest-party/guestMedia/gsub-forged"), { status: "eligible" }));
+  } finally {
+    await env.cleanup();
+  }
+});
+
+test("storage rules keep the guest-ingest prefix denied for direct access", async () => {
+  const rules = await readFile(resolve(__dirname, "../../storage.rules"), "utf8");
+  assert.ok(rules.includes("guests/{deviceId}/ingest"), "storage rules carry an explicit guest-ingest section");
+  const guestSection = rules.slice(rules.indexOf("guests/{deviceId}/ingest"));
+  assert.ok(guestSection.includes("allow read, write: if false"), "guest ingest stays denied for direct reads/writes/deletes");
+});

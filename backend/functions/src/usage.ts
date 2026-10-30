@@ -22,6 +22,8 @@ export interface UsageOutcome {
   creditsCharged?: number | null;
   providerTaskId?: string | null;
   errorCode?: string;
+  /** Locally prepared fixture slot: no provider submission, no provider charge. */
+  fixture?: boolean;
 }
 
 export function usageLedgerId(jobId: string, cameraId: CameraId): string {
@@ -68,6 +70,9 @@ export async function recordUsageOutcome(
   };
   if (outcome.providerTaskId !== undefined) patch.provider_task_id = outcome.providerTaskId;
   if (outcome.errorCode) patch.errorCode = outcome.errorCode;
+  // Fixture slots keep truthful provenance: no fabricated provider task ID or
+  // charge. Synthetic provider zero stays on the single generated camera only.
+  if (outcome.fixture !== undefined) patch.fixture = outcome.fixture;
   const ref = db.doc(usageLedgerPath(input));
   await db.runTransaction(async (transaction) => {
     const existing = await transaction.get(ref);
@@ -106,6 +111,9 @@ export async function reconcileUsage(db: Firestore): Promise<UsageReconciliation
         const requiredFields = ["model_id", "preset_id", "seconds_out", "seconds_in", "credits_charged", "provider_task_id", "created_at", "success", "partyId", "deviceId", "channelId", "manifestVersion", "timestamp", "idempotencyKey"];
         if (requiredFields.some((field) => !(field in data))) {
           issues.push({ partyId: job.partyId, jobId: job.jobId, cameraId, code: "INCOMPLETE_LEDGER" });
+        } else if (data.fixture === true && data.provider_task_id === null) {
+          // Locally prepared fixture slot in a consent-bound guest job: no
+          // provider submission is expected, so task-ID checks do not apply.
         } else if (job.state === "ready" && typeof taskId !== "string") {
           issues.push({ partyId: job.partyId, jobId: job.jobId, cameraId, code: "MISSING_PROVIDER_TASK_ID" });
         } else if (typeof taskId === "string" && data.provider_task_id !== taskId) {

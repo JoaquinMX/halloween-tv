@@ -53,6 +53,34 @@ function parseStatus(value: unknown): ProviderTaskStatus {
   throw new Error("Alibaba returned an unrecognized task state.");
 }
 
+/** Pure request serialization: covered offline by the guest-request fixture, zero network. */
+export function buildAlibabaSubmitBody(request: VideoGenerationRequest): {
+  model: string;
+  input: Record<string, unknown>;
+  parameters: Record<string, unknown>;
+} {
+  validateVideoGenerationRequest(request);
+  const input: Record<string, unknown> = { prompt: request.prompt };
+  if (request.referenceImage !== undefined) {
+    // Consent-bound guest photo for the cameo camera. The object reference is
+    // server-side storage state; provider credentials never leave the backend.
+    input.reference_image = {
+      storage_ref: request.referenceImage.objectPath,
+      sha256: request.referenceImage.sha256,
+    };
+  }
+  return {
+    model: request.modelId,
+    input,
+    parameters: {
+      resolution: request.resolution,
+      ratio: request.aspectRatio,
+      duration: request.secondsOut,
+      audio: request.audio,
+      watermark: false,
+    },
+  };
+}
 /** Alibaba Model Studio's asynchronous Wan video API, pinned to Singapore. */
 export class AlibabaVideoGenerationPort implements VideoGenerationPort {
   private readonly fetchImpl: typeof fetch;
@@ -83,17 +111,7 @@ export class AlibabaVideoGenerationPort implements VideoGenerationPort {
           "X-DashScope-Async": "enable",
           "X-DashScope-Idempotency-Key": request.idempotencyKey,
         },
-        body: JSON.stringify({
-          model: request.modelId,
-          input: { prompt: request.prompt },
-          parameters: {
-            resolution: request.resolution,
-            ratio: request.aspectRatio,
-            duration: request.secondsOut,
-            audio: request.audio,
-            watermark: false,
-          },
-        }),
+        body: JSON.stringify(buildAlibabaSubmitBody(request)),
       });
     } catch {
       // A network failure has an unknown outcome: the server may have accepted it.
