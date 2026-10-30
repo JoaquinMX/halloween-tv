@@ -27,12 +27,13 @@
 //                     -> {submissionId, status:"withdrawn",
 //                         deletedObjects, verifiedAbsent:true}
 //
-// NOTE: the in-app [GuestMediaClient]/[GuestMediaSession] request shapes
-// predate this contract (no channelId, `consent:true` instead of the
-// consent object, `contentType` echo + https-only URL + non-"withdrawn"
-// status expectations), so the happy path below drives the real callable
-// wire envelope (`{"data": ...}`, identical to what `firebase_functions`
-// sends) directly, while the consent gate and the byte PUT still go
+// NOTE: the in-app [GuestMediaClient]/[GuestMediaSession] request envelope
+// matches this contract (channelId + consent:{accepted:true,
+// textVersion:"v1", purpose:"guest_cameo"} named constants). The happy path
+// below still drives the real callable wire envelope (`{"data": ...}`,
+// identical to what `firebase_functions` sends) directly for the
+// capability mint (the client validates https-only URLs while the emulator
+// signs http URLs), while the consent gate and the byte PUT still go
 // through the real client/transport classes. The assertions are
 // falsifiable end to end: capability -> signed PUT -> complete(eligible,
 // backend-computed sha256/sizeBytes) -> status -> withdraw -> object
@@ -290,6 +291,7 @@ void main() {
           client: client,
           partyId: partyId,
           deviceId: deviceId,
+          channelId: channelId,
           preferences: () async => prefs,
           tempDirectory: () async => dir,
         );
@@ -299,6 +301,7 @@ void main() {
           client.requestUpload(
             partyId: partyId,
             deviceId: deviceId,
+            channelId: channelId,
             contentType: 'image/jpeg',
             byteSize: _kSyntheticJpeg.length,
             affirmativeConsent: false,

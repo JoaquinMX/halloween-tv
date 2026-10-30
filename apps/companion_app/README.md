@@ -97,12 +97,18 @@ Optional flow behind "Submit a guest photo" on the now-playing screen:
   retained in cloud storage; a copy already downloaded to the TV may not be
   removable while that TV is offline.
 
-Backend status: the guest-media callables above are NOT implemented
-server-side yet (`backend/functions/src/index.ts` has no guest handlers),
-so consented attempts are currently refused at the callable boundary with
-no bytes uploaded and no receipt stored. The emulator contract test pins
-this refusal until the backend ships; replace its refusal assertions with
-the positive completion flow at that point.
+Backend status: the guest-media callables are implemented server-side
+(`backend/functions/src/guest_upload.ts`, wired in
+`backend/functions/src/index.ts`). `requestGuestUpload` requires
+`{partyId, deviceId, channelId, contentType, byteSize,
+consent:{accepted:true, textVersion:'v1', purpose:'guest_cameo'}}` and mints
+a per-submission signed PUT capability bound to a server-assigned object
+path; `completeGuestUpload`, `getGuestMediaStatus`, and `withdrawGuestMedia`
+are scoped by `{partyId, deviceId, channelId, submissionId}`. The emulator
+contract test (`integration_test/guest_photo_emulator_test.dart`) pins this
+envelope end to end; it currently proceeds through capability issuance and
+fails at the signed PUT step because the Storage emulator has no XML-API
+PUT route (HTTP 501), before any completion.
 
 ## Getting Started
 

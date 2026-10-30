@@ -267,6 +267,7 @@ final class _CompanionAppState extends State<CompanionApp>
                 client: _baseDependencies!.guestMediaClient!,
                 partyId: join.partyId.value,
                 deviceId: join.deviceId.value,
+                channelId: join.channelId,
               );
               Navigator.of(context).push(
                 MaterialPageRoute<void>(
