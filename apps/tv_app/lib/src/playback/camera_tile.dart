@@ -1,4 +1,5 @@
-/// One wall tile: owns its video controller, handles failure, D-pad focus.
+/// One wall tile: owns its video controller, handles failure, D-pad focus,
+/// and controlled source replacement.
 library;
 
 import 'dart:async';
@@ -6,47 +7,30 @@ import 'dart:async';
 import 'package:core_ui/core_ui.dart';
 import 'package:flutter/material.dart';
 
-import 'tile_video_controller.dart';
+import 'package:tv_app/src/playback/tile_video_controller.dart';
 
-/// Wall slot showing a single camera feed.
-///
-/// Lifecycle ownership (design s13): this widget creates exactly one
-/// [TileVideoController] for its [cameraId], initializes it, forces looping,
-/// mutes it, starts playback, and disposes it. When initialization or
-/// playback fails the tile renders [SignalLost] instead of the surface —
-/// the other three tiles keep playing.
 class CameraTile extends StatefulWidget {
-  /// Creates a tile for wall [index].
   const CameraTile({
     super.key,
     required this.index,
     required this.cameraId,
-    required this.assetPath,
+    required this.source,
     required this.focusNode,
     required this.controllerFactory,
     this.onFocusChange,
+    this.onSourceSettled,
+    this.onInitialSettled,
     this.autofocus = false,
   });
 
-  /// Wall slot index (`0..3`).
   final int index;
-
-  /// Camera id, e.g. `CAM-01`.
   final String cameraId;
-
-  /// Bundled clip path (see [kCameraAssetPaths]).
-  final String assetPath;
-
-  /// Focus node owned by the wall's D-pad controller.
+  final TileMediaSource source;
   final FocusNode focusNode;
-
-  /// Builds the decoder for this tile.
   final TileVideoControllerFactory controllerFactory;
-
-  /// Reports focus changes back to the wall (focus ring + traversal state).
   final ValueChanged<bool>? onFocusChange;
-
-  /// Whether this tile requests focus once it is mounted.
+  final ValueChanged<bool>? onSourceSettled;
+  final VoidCallback? onInitialSettled;
   final bool autofocus;
 
   @override
@@ -55,19 +39,19 @@ class CameraTile extends StatefulWidget {
 
 class _CameraTileState extends State<CameraTile> {
   TileVideoController? _controller;
+  late TileMediaSource _activeSource;
   int _generation = 0;
   bool _initialized = false;
   bool _failed = false;
-  String? _error;
+  bool _replacing = false;
   bool _focused = false;
+  String? _error;
 
   @override
   void initState() {
     super.initState();
-    final TileVideoController controller = widget.controllerFactory(
-      cameraId: widget.cameraId,
-      assetPath: widget.assetPath,
-    );
+    _activeSource = widget.source;
+    final TileVideoController controller = _create(widget.source);
     _controller = controller;
     controller.addListener(_onControllerUpdate);
     unawaited(_start(controller, _generation));
@@ -83,76 +67,99 @@ class _CameraTileState extends State<CameraTile> {
   @override
   void didUpdateWidget(CameraTile oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // Asset swap for a reconfigured slot (same stable tile key, new camera
-    // feed): dispose-before-create keeps the decoder budget at one live
-    // controller per tile (four wall-wide) instead of transiently doubling.
-    if (oldWidget.cameraId != widget.cameraId ||
-        oldWidget.assetPath != widget.assetPath) {
-      _swapController();
+    if (widget.source != _activeSource) {
+      unawaited(_replaceSource(widget.source));
     }
   }
 
-  /// Releases the old decoder before allocating its replacement.
-  Future<void> _swapController() async {
+  TileVideoController _create(TileMediaSource source) =>
+      widget.controllerFactory(cameraId: widget.cameraId, source: source);
+
+  Future<void> _replaceSource(TileMediaSource target) async {
     final int generation = ++_generation;
+    final TileMediaSource previous = _activeSource;
     final TileVideoController? old = _controller;
     _controller = null;
-    setState(() {
-      _initialized = false;
-      _failed = false;
-      _error = null;
-    });
-    if (old != null) {
-      old.removeListener(_onControllerUpdate);
-      try {
-        await old.dispose();
-      } catch (_) {
-        // A failing teardown must not block the replacement feed.
-      }
+    if (mounted) {
+      setState(() {
+        _initialized = false;
+        _failed = false;
+        _replacing = true;
+        _error = null;
+      });
     }
-    if (!mounted || generation != _generation) {
+    await _disposeController(old);
+    if (!mounted || generation != _generation) return;
+
+    final TileVideoController replacement = _create(target);
+    _controller = replacement;
+    replacement.addListener(_onControllerUpdate);
+    if (await _configure(replacement, generation)) {
+      if (!mounted || generation != _generation) return;
+      _activeSource = target;
+      setState(() {
+        _initialized = true;
+        _failed = false;
+        _replacing = false;
+      });
+      widget.onSourceSettled?.call(true);
       return;
     }
-    final TileVideoController next = widget.controllerFactory(
-      cameraId: widget.cameraId,
-      assetPath: widget.assetPath,
-    );
-    _controller = next;
-    next.addListener(_onControllerUpdate);
-    await _start(next, generation);
+
+    if (!mounted || generation != _generation) return;
+    final TileVideoController? failed = _controller;
+    _controller = null;
+    await _disposeController(failed);
+    if (!mounted || generation != _generation) return;
+
+    // One tile at a time is replaced, and the old source is recreated if the
+    // new decoder fails. This stays within four decoders and keeps the other
+    // wall slots running while this slot rolls back.
+    final TileVideoController rollback = _create(previous);
+    _controller = rollback;
+    rollback.addListener(_onControllerUpdate);
+    final bool restored = await _configure(rollback, generation);
+    if (!mounted || generation != _generation) return;
+    setState(() {
+      _activeSource = previous;
+      _initialized = restored;
+      _failed = !restored;
+      _replacing = false;
+      _error = restored ? null : 'replacement and rollback failed';
+    });
+    widget.onSourceSettled?.call(false);
   }
-  /// Initialize -> loop -> mute -> autoplay. Every step is guarded: a
-  /// decoder/platform failure marks this tile lost but never rethrows.
-  /// [generation] guards against a stale async start after a swap/dispose.
-  Future<void> _start(TileVideoController controller, int generation) async {
+
+  Future<bool> _configure(
+    TileVideoController controller,
+    int generation,
+  ) async {
     try {
       await controller.initialize();
-      if (!mounted || generation != _generation) {
-        return;
-      }
+      if (!mounted || generation != _generation) return false;
       await controller.setLooping(true);
       await controller.setVolume(0);
       await controller.play();
-      if (!mounted || generation != _generation) {
-        return;
-      }
-      setState(() => _initialized = true);
-    } catch (error) {
-      if (!mounted || generation != _generation) {
-        return;
-      }
-      setState(() {
-        _failed = true;
-        _error = error.toString();
-      });
+      return mounted && generation == _generation && !controller.hasError;
+    } on Object catch (error) {
+      if (mounted && generation == _generation) _error = error.toString();
+      return false;
     }
   }
 
-  /// Decoder errors can also arrive after a successful initialize().
+  Future<void> _start(TileVideoController controller, int generation) async {
+    final bool success = await _configure(controller, generation);
+    if (!mounted || generation != _generation) return;
+    setState(() {
+      _initialized = success;
+      _failed = !success;
+      _error ??= controller.errorDescription;
+    });
+    widget.onInitialSettled?.call();
+  }
+
   void _onControllerUpdate() {
-    if (!mounted || _failed) {
-      return;
-    }
+    if (!mounted || _failed) return;
     final TileVideoController? controller = _controller;
     if (controller != null && controller.hasError) {
       setState(() {
@@ -167,21 +174,18 @@ class _CameraTileState extends State<CameraTile> {
     _generation++;
     final TileVideoController? controller = _controller;
     _controller = null;
-    if (controller != null) {
-      controller.removeListener(_onControllerUpdate);
-      // Never let a teardown failure escape dispose (would crash the wall);
-      // the decoder is released best-effort.
-      unawaited(_disposeQuietly(controller));
-    }
+    controller?.removeListener(_onControllerUpdate);
+    unawaited(_disposeController(controller));
     super.dispose();
   }
 
-  /// Best-effort controller teardown that swallows decoder errors.
-  static Future<void> _disposeQuietly(TileVideoController controller) async {
+  Future<void> _disposeController(TileVideoController? controller) async {
+    if (controller == null) return;
+    controller.removeListener(_onControllerUpdate);
     try {
       await controller.dispose();
-    } catch (_) {
-      // Intentionally ignored: dispose must never throw.
+    } on Object {
+      // A platform teardown failure must not strand a replacement.
     }
   }
 
@@ -192,55 +196,48 @@ class _CameraTileState extends State<CameraTile> {
       );
     }
     final TileVideoController? controller = _controller;
-    if (!_initialized || controller == null) {
+    if (!_initialized || _replacing || controller == null) {
       return const _ConnectingFeed();
     }
     return controller.buildSurface(context);
   }
 
   @override
-  Widget build(BuildContext context) {
-    return Focus(
-      focusNode: widget.focusNode,
-      debugLabel: 'wall-tile-${widget.index}',
-      onFocusChange: (bool hasFocus) {
-        setState(() => _focused = hasFocus);
-        widget.onFocusChange?.call(hasFocus);
-      },
-      child: Stack(
-        fit: StackFit.expand,
-        children: <Widget>[
-          _surface(context),
-          if (_focused)
-            DecoratedBox(
-              key: ValueKey<String>('tile-focus-ring-${widget.index}'),
-              decoration: BoxDecoration(
-                border: Border.all(color: const Color(0xFFB8FFB8), width: 3),
-              ),
-              child: const SizedBox.expand(),
+  Widget build(BuildContext context) => Focus(
+    focusNode: widget.focusNode,
+    debugLabel: 'wall-tile-${widget.index}',
+    onFocusChange: (bool focused) {
+      setState(() => _focused = focused);
+      widget.onFocusChange?.call(focused);
+    },
+    child: Stack(
+      fit: StackFit.expand,
+      children: <Widget>[
+        _surface(context),
+        if (_focused)
+          DecoratedBox(
+            key: ValueKey<String>('tile-focus-ring-${widget.index}'),
+            decoration: BoxDecoration(
+              border: Border.all(color: const Color(0xFFB8FFB8), width: 3),
             ),
-          if (_failed)
-            Semantics(
-              label: '${widget.cameraId} feed lost: ${_error ?? 'unknown'}',
-              child: const SizedBox.expand(),
-            ),
-        ],
-      ),
-    );
-  }
+            child: const SizedBox.expand(),
+          ),
+        if (_failed)
+          Semantics(
+            label: '${widget.cameraId} feed lost: ${_error ?? 'unknown'}',
+            child: const SizedBox.expand(),
+          ),
+      ],
+    ),
+  );
 }
 
-/// Pre-first-frame placeholder; deliberately dark and quiet.
 class _ConnectingFeed extends StatelessWidget {
   const _ConnectingFeed();
 
   @override
-  Widget build(BuildContext context) {
-    return const ColoredBox(
-      color: Color(0xFF050505),
-      child: Center(
-        child: Text('CONNECTING…', style: CctvTheme.badgeStyle),
-      ),
-    );
-  }
+  Widget build(BuildContext context) => const ColoredBox(
+    color: Color(0xFF050505),
+    child: Center(child: Text('CONNECTING…', style: CctvTheme.badgeStyle)),
+  );
 }

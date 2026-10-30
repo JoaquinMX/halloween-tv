@@ -1,13 +1,19 @@
 /// Wall widget tests: real channel chrome + app-owned decoders.
 library;
 
+import 'dart:io';
+
+import 'package:channel_api/channel_api.dart';
 import 'package:channel_cctv/channel_cctv.dart';
+import 'package:core_cache/core_cache.dart';
 import 'package:core_effects/core_effects.dart';
 import 'package:core_playlist/core_playlist.dart';
 import 'package:core_ui/core_ui.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:infra_settings/infra_settings.dart' show SharedPreferencesSettings;
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:testing_toolkit/testing_toolkit.dart';
 import 'package:tv_app/src/playback/camera_tile.dart';
 import 'package:tv_app/src/playback/tile_video_controller.dart';
@@ -20,6 +26,10 @@ Widget wallHarness({
   required TileVideoControllerFactory factory,
   required FakeClock clock,
   Future<PlaybackManifest?> Function()? onRetryCached,
+  Map<String, CachedMedia> mediaByClipId = const <String, CachedMedia>{},
+  Future<bool> Function(String path)? fileExists,
+  SettingsPort? settings,
+  bool initialEffectsDisabled = false,
   bool recoveryEnabled = true,
 }) {
   return MaterialApp(
@@ -27,10 +37,14 @@ Widget wallHarness({
     home: WallScreen(
       plugin: const HauntedSurveillancePlugin(),
       manifest: manifest,
+      mediaByClipId: mediaByClipId,
+      settings: settings,
+      initialEffectsDisabled: initialEffectsDisabled,
       clock: clock,
       profile: cctvProfile(),
       tileControllerFactory: factory,
       onRetryCached: onRetryCached,
+      fileExists: fileExists,
       recoveryEnabled: recoveryEnabled,
     ),
   );
@@ -55,8 +69,126 @@ PlaybackManifest wallManifest({int version = 1}) => manifestFixture(
       version: version,
     );
 
+/// Real on-disk bytes for the verified-local-file test.
+///
+/// Created once in setUpAll (real async zone): testWidgets bodies run in a
+/// FakeAsync zone where real dart:io never completes, so file setup cannot
+/// live in the test body.
+/// Late-initialized in setUpAll; torn down in tearDownAll.
+late Directory wallFilesRoot;
+
 void main() {
   final FakeClock clock = FakeClock(DateTime.utc(2026, 10, 31, 20));
+
+  setUpAll(() async {
+    wallFilesRoot = await Directory.systemTemp.createTemp('tv-wall-files-');
+    for (var index = 1; index <= 4; index++) {
+      final File file = File('${wallFilesRoot.path}/local-clip-$index.media');
+      await file.writeAsBytes(<int>[1, 2, 3, index], flush: true);
+    }
+  });
+
+  tearDownAll(() async {
+    if (await wallFilesRoot.exists()) {
+      await wallFilesRoot.delete(recursive: true);
+    }
+  });
+
+  testWidgets('committed clip IDs resolve to their verified local file sources',
+      (WidgetTester tester) async {
+    final List<ClipDescriptor> clips = <ClipDescriptor>[
+      for (var index = 1; index <= 4; index++)
+        ClipDescriptor(
+          id: 'local-clip-$index',
+          cameraId: 'CAM-0$index',
+          storageObjectId: 'assets/cam0$index.mp4',
+          sha256: sha256Hex(<int>[1, 2, 3, index]),
+          sizeBytes: 4,
+          duration: const Duration(seconds: 2),
+          mimeType: 'video/mp4',
+        ),
+    ];
+    final PlaybackManifest manifest = PlaybackManifest(
+      partyId: 'local-party',
+      channelId: hauntedSurveillanceChannelId,
+      version: 1,
+      clips: clips,
+      publishedAt: DateTime.utc(2026, 10, 31),
+    );
+    final Map<String, CachedMedia> media = <String, CachedMedia>{};
+    for (var index = 0; index < manifest.clips.length; index++) {
+      final ClipDescriptor clip = manifest.clips[index];
+      final File file = File('${wallFilesRoot.path}/${clip.id}.media');
+      media[clip.id] = CachedMedia(
+        clipId: clip.id,
+        localRef: file.absolute.path,
+        sha256: clip.sha256,
+      );
+    }
+    final Map<String, FakeTileVideoController> sink =
+        <String, FakeTileVideoController>{};
+
+    final Set<String> committedPaths = <String>{
+      for (final CachedMedia entry in media.values) entry.localRef,
+    };
+    await tester.pumpWidget(wallHarness(
+      manifest: manifest,
+      clock: clock,
+      factory: fakeControllerFactory(sink: sink),
+      mediaByClipId: media,
+      fileExists: (String path) async => committedPaths.contains(path),
+    ));
+    await pumpWall(tester);
+
+    for (final ClipDescriptor clip in manifest.clips) {
+      expect(sink[clip.cameraId]!.source, isA<LocalFileSource>());
+      expect((sink[clip.cameraId]!.source as LocalFileSource).path,
+          media[clip.id]!.localRef);
+    }
+    await teardownWall(tester);
+  });
+
+  testWidgets('effects preference persists by party and restores on the next wall',
+      (WidgetTester tester) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    final SharedPreferencesSettings settings = SharedPreferencesSettings();
+    await tester.pumpWidget(wallHarness(
+      manifest: wallManifest(),
+      clock: clock,
+      factory: fakeControllerFactory(),
+      settings: settings,
+    ));
+    await pumpWall(tester);
+    await tester.sendKeyEvent(LogicalKeyboardKey.contextMenu);
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey<String>('recovery-toggle-effects')));
+    await tester.pump();
+    expect(await settings.getBool(
+      partyId: PartyId('local-party'),
+      key: CctvWallSettingsKeys.effectsDisabled,
+    ), isTrue);
+    expect(await settings.getBool(
+      partyId: PartyId('other-party'),
+      key: CctvWallSettingsKeys.effectsDisabled,
+    ), isNull);
+    await teardownWall(tester);
+
+    await tester.pumpWidget(wallHarness(
+      manifest: wallManifest(),
+      clock: clock,
+      factory: fakeControllerFactory(),
+      settings: settings,
+      initialEffectsDisabled: await settings.getBool(
+        partyId: PartyId('local-party'),
+        key: CctvWallSettingsKeys.effectsDisabled,
+      ) ?? false,
+    ));
+    await pumpWall(tester);
+    expect(find.byWidgetPredicate(
+      (Widget widget) => widget is CctvTile && widget.disableEffects,
+    ), findsNWidgets(4));
+    await teardownWall(tester);
+  });
 
   testWidgets('renders four camera tiles with a ticking HUD per tile',
       (WidgetTester tester) async {
@@ -308,11 +440,11 @@ void main() {
         <String, FakeTileVideoController>{};
     TileVideoController trackingFactory({
       required String cameraId,
-      required String assetPath,
+      required TileMediaSource source,
     }) {
       final FakeTileVideoController inner = FakeTileVideoController(
         cameraId: cameraId,
-        assetPath: assetPath,
+        source: source,
       );
       sink[cameraId] = inner;
       return _LiveBudgetController(
@@ -477,11 +609,11 @@ void main() {
         <String, FakeTileVideoController>{};
     TileVideoController trackingFactory({
       required String cameraId,
-      required String assetPath,
+      required TileMediaSource source,
     }) {
       final FakeTileVideoController inner = FakeTileVideoController(
         cameraId: cameraId,
-        assetPath: assetPath,
+        source: source,
       );
       innerSink['$cameraId#${inner.hashCode}'] = inner;
       return _LiveBudgetController(
@@ -499,7 +631,7 @@ void main() {
               key: const ValueKey<String>('slot-0'),
               index: 0,
               cameraId: cameraId,
-              assetPath: 'assets/${cameraId.toLowerCase()}.mp4',
+              source: BundledAssetSource('assets/${cameraId.toLowerCase()}.mp4'),
               focusNode: focusNode,
               controllerFactory: trackingFactory,
             ),
@@ -532,6 +664,79 @@ void main() {
 
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
+  });
+
+  testWidgets('failed local decoder restores the previous bundled source',
+      (WidgetTester tester) async {
+    final List<FakeTileVideoController> controllers =
+        <FakeTileVideoController>[];
+    int liveDecoders = 0;
+    int maximumLiveDecoders = 0;
+    bool? settled;
+    TileVideoController rollbackFactory({
+      required String cameraId,
+      required TileMediaSource source,
+    }) {
+      final FakeTileVideoController inner = FakeTileVideoController(
+        cameraId: cameraId,
+        source: source,
+        failOnInitialize: source is LocalFileSource,
+      );
+      controllers.add(inner);
+      return _LiveBudgetController(
+        inner: inner,
+        onInitialize: () {
+          liveDecoders++;
+          if (liveDecoders > maximumLiveDecoders) {
+            maximumLiveDecoders = liveDecoders;
+          }
+        },
+        onDispose: () {
+          if (inner.isInitialized) liveDecoders--;
+        },
+      );
+    }
+
+    final FocusNode focusNode = FocusNode(debugLabel: 'rollback-tile');
+    addTearDown(focusNode.dispose);
+    Widget tile(TileMediaSource source) => MaterialApp(
+          home: Scaffold(
+            body: CameraTile(
+              key: const ValueKey<String>('rollback-slot'),
+              index: 0,
+              cameraId: 'CAM-01',
+              source: source,
+              focusNode: focusNode,
+              controllerFactory: rollbackFactory,
+              onSourceSettled: (bool success) => settled = success,
+            ),
+          ),
+        );
+
+    const BundledAssetSource previous = BundledAssetSource('assets/cam01.mp4');
+    await tester.pumpWidget(tile(previous));
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('LIVE CAM-01'), findsOneWidget);
+
+    await tester.pumpWidget(tile(const LocalFileSource('/cache/rejected.mp4')));
+    for (var frame = 0; frame < 8; frame++) {
+      await tester.pump(const Duration(milliseconds: 1));
+    }
+
+    expect(settled, isFalse);
+    expect(find.text('LIVE CAM-01'), findsOneWidget);
+    expect(find.text('SIGNAL LOST'), findsNothing);
+    expect(controllers, hasLength(3));
+    expect(controllers[0].disposed, isTrue);
+    expect(controllers[1].disposed, isTrue);
+    expect(controllers[2].source, previous);
+    expect(controllers[2].playing, isTrue);
+    expect(maximumLiveDecoders, 1);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    expect(liveDecoders, 0);
   });
 }
 

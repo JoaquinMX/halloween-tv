@@ -7,9 +7,9 @@ library;
 
 import 'package:flutter/material.dart';
 
-import 'src/app.dart';
-import 'src/wall/manifest_store.dart';
-import 'src/wall/wall_boot.dart';
+import 'package:tv_app/src/app.dart';
+import 'package:tv_app/src/bootstrap/playback_dependencies.dart';
+import 'package:tv_app/src/wall/manifest_store.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -18,9 +18,10 @@ Future<void> main() async {
   await lockLandscape();
   // The wall is muted (each tile sets volume 0) and keep-screen-on is
   // requested by the Android activity window flag — no Dart-side wakelock.
+  final PlaybackDependencies dependencies = await PlaybackDependencies.create();
   runApp(
-    const HalloweenTvApp(
-      boot: WallBoot(store: PrefsManifestStore()),
+    HalloweenTvApp(
+      boot: dependencies.createWallBoot(store: const PrefsManifestStore()),
     ),
   );
 }

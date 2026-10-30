@@ -2,22 +2,25 @@
 library;
 
 import 'dart:async';
+import 'dart:io';
 
-import 'package:channel_api/channel_api.dart';
 import 'package:channel_cctv/channel_cctv.dart';
+import 'package:core_cache/core_cache.dart';
 import 'package:core_effects/core_effects.dart';
 import 'package:core_foundation/core_foundation.dart';
 import 'package:core_playlist/core_playlist.dart';
 import 'package:core_ui/core_ui.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-
-import '../media/feed_assets.dart';
-import '../playback/camera_tile.dart';
-import '../playback/tile_video_controller.dart';
-import 'playback_handle.dart';
-import 'recovery_overlay.dart';
-import 'wall_focus.dart';
+import 'package:kernel_app/kernel_app.dart';
+import 'package:tv_app/src/media/feed_assets.dart';
+import 'package:tv_app/src/playback/camera_tile.dart';
+import 'package:tv_app/src/playback/tile_video_controller.dart';
+import 'package:tv_app/src/wall/live_wall_session.dart';
+import 'package:tv_app/src/wall/playback_handle.dart';
+import 'package:tv_app/src/wall/recovery_overlay.dart';
+import 'package:tv_app/src/wall/wall_boot.dart';
+import 'package:tv_app/src/wall/wall_focus.dart';
 
 /// Key of the status banner shown above the wall after recovery actions.
 const Key kWallStatusBannerKey = ValueKey<String>('wall-status-banner');
@@ -45,10 +48,15 @@ class WallScreen extends StatefulWidget {
     required this.manifest,
     required this.tileControllerFactory,
     required this.clock,
+    this.mediaByClipId = const <String, CachedMedia>{},
+    this.liveSession,
+    this.settings,
     this.profile,
     this.partyId = 'local-party',
     this.glitchSeed = 0x4A11,
     this.onRetryCached,
+    this.onRetryCachedPlayback,
+    this.fileExists,
     this.recoveryEnabled = true,
     this.initialEffectsDisabled = false,
     this.overscanPadding = const EdgeInsets.symmetric(
@@ -70,6 +78,15 @@ class WallScreen extends StatefulWidget {
   /// Clock used by the tile HUDs (injectable for deterministic tests).
   final Clock clock;
 
+  /// Verified committed files keyed by manifest clip id.
+  final Map<String, CachedMedia> mediaByClipId;
+
+  /// Live subscription started after offline rendering.
+  final LiveWallSession? liveSession;
+
+  /// Party-scoped persistent settings.
+  final SettingsPort? settings;
+
   /// Effect profile for tile overlays; defaults to [cctvProfile].
   final EffectProfile? profile;
 
@@ -81,6 +98,16 @@ class WallScreen extends StatefulWidget {
 
   /// Reloads the last cached manifest; null result means "nothing cached".
   final Future<PlaybackManifest?> Function()? onRetryCached;
+
+  /// Re-verifies the durable remote index without interrupting live work.
+  final Future<VerifiedWallPlayback?> Function()? onRetryCachedPlayback;
+
+  /// Existence check for verified local files.
+  ///
+  /// Defaults to real `File(path).exists()`. Injectable because `testWidgets`
+  /// bodies run in a FakeAsync zone where real dart:io never completes;
+  /// production passes nothing and keeps the real filesystem check.
+  final Future<bool> Function(String path)? fileExists;
 
   /// Whether OK long-press / MENU reveals the recovery panel.
   final bool recoveryEnabled;
@@ -100,9 +127,15 @@ class WallScreen extends StatefulWidget {
 
 class _WallScreenState extends State<WallScreen> {
   late final WallFocusController _focus;
-  final WallPlaybackHandle _handle = WallPlaybackHandle();
+  late final WallPlaybackHandle _handle;
 
   late PlaybackManifest _manifest;
+  late Map<String, CachedMedia> _mediaByClipId;
+  late Map<String, TileMediaSource> _tileSources;
+  final Map<String, Completer<bool>> _sourceSettles =
+      <String, Completer<bool>>{};
+  final Set<String> _initialSettledCameras = <String>{};
+  bool _liveStarted = false;
   late bool _effectsDisabled;
   bool _recoveryVisible = false;
   bool _okHeld = false;
@@ -117,13 +150,19 @@ class _WallScreenState extends State<WallScreen> {
     super.initState();
     _focus = WallFocusController();
     _manifest = widget.manifest;
+    _mediaByClipId = Map<String, CachedMedia>.of(widget.mediaByClipId);
+    _tileSources = _sourcesFor(_manifest, _mediaByClipId);
     _effectsDisabled = widget.initialEffectsDisabled;
+    _handle = WallPlaybackHandle(
+      prepareAction: _prepareCurrentVersion,
+      activateAction: _activateCurrentVersion,
+    );
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || _activatedHandle) {
         return;
       }
       _activatedHandle = true;
-      unawaited(_handle.activate());
+      unawaited(_bootHandle());
     });
   }
 
@@ -132,6 +171,11 @@ class _WallScreenState extends State<WallScreen> {
     _okHoldTimer?.cancel();
     _recoveryFocus.dispose();
     _focus.dispose();
+    for (final Completer<bool> settle in _sourceSettles.values) {
+      if (!settle.isCompleted) settle.complete(false);
+    }
+    final LiveWallSession? session = widget.liveSession;
+    if (session != null) unawaited(session.dispose());
     super.dispose();
   }
 
@@ -146,9 +190,14 @@ class _WallScreenState extends State<WallScreen> {
       key: ValueKey<String>('camera-tile-$cameraId'),
       index: index,
       cameraId: cameraId,
-      assetPath: assetPathForCamera(cameraId),
+      source: _tileSources[cameraId]!,
       focusNode: _focus.nodeAt(index),
       controllerFactory: widget.tileControllerFactory,
+      onSourceSettled: (bool success) {
+        final Completer<bool>? settle = _sourceSettles[cameraId];
+        if (settle != null && !settle.isCompleted) settle.complete(success);
+      },
+      onInitialSettled: () => _onInitialTileSettled(cameraId),
       autofocus: index == 0,
       onFocusChange: (bool hasFocus) {
         if (hasFocus) {
@@ -156,6 +205,168 @@ class _WallScreenState extends State<WallScreen> {
         }
       },
     );
+  }
+
+  void _onInitialTileSettled(String cameraId) {
+    _initialSettledCameras.add(cameraId);
+    if (!_liveStarted &&
+        _initialSettledCameras.length == cctvCameraIds.length) {
+      _liveStarted = true;
+      widget.liveSession?.start(activate: _activateLiveVersion);
+    }
+  }
+
+  Future<void> _bootHandle() async {
+    try {
+      await _handle.prepare();
+    } on Object catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _status = 'OFFLINE VERIFY FAILED · KEEPING CURRENT FEED';
+        _recoveryStatus = error.toString();
+      });
+      return;
+    }
+    if (!mounted) return;
+    try {
+      await _handle.activate();
+    } on Object catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _status = 'WALL ACTIVATE FAILED · KEEPING CURRENT FEED';
+        _recoveryStatus = error.toString();
+      });
+    }
+  }
+
+  Future<void> _prepareCurrentVersion() =>
+      _verifyPlayableSources(_manifest, _mediaByClipId);
+
+  Future<void> _activateCurrentVersion() async {
+    if (!mounted) throw StateError('wall has been disposed');
+    _restoreTileFocus();
+  }
+
+  Future<void> _activateLiveVersion(PlaybackSyncSnapshot snapshot) async {
+    final PlaybackManifest? manifest = snapshot.manifest;
+    if (manifest == null || !snapshot.hasCompleteMedia) {
+      throw StateError('live activation requires complete verified media');
+    }
+    final WallPlaybackHandle staged = WallPlaybackHandle(
+      prepareAction: () =>
+          _verifyPlayableSources(manifest, snapshot.mediaByClipId),
+      activateAction: () =>
+          _applyVerifiedVersion(manifest, snapshot.mediaByClipId),
+    );
+    await staged.prepare();
+    await staged.activate();
+  }
+
+  Future<void> _verifyPlayableSources(
+    PlaybackManifest manifest,
+    Map<String, CachedMedia> mediaByClipId,
+  ) async {
+    final Future<bool> Function(String path) exists =
+        widget.fileExists ?? _realFileExists;
+    for (final TileMediaSource source in _sourcesFor(
+      manifest,
+      mediaByClipId,
+    ).values) {
+      if (source case LocalFileSource(:final path)) {
+        if (!await exists(path)) {
+          throw FileSystemException('verified playback file is missing', path);
+        }
+      }
+    }
+  }
+
+  static Future<bool> _realFileExists(String path) =>
+      File(path).exists();
+
+
+  Map<String, TileMediaSource> _sourcesFor(
+    PlaybackManifest manifest,
+    Map<String, CachedMedia> mediaByClipId,
+  ) {
+    final Map<String, TileMediaSource> sources = <String, TileMediaSource>{};
+    for (final String cameraId in cctvCameraIds) {
+      final ClipDescriptor clip = manifest.clips.firstWhere(
+        (ClipDescriptor value) => value.cameraId == cameraId,
+      );
+      final CachedMedia? cached = mediaByClipId[clip.id];
+      if (cached != null) {
+        if (cached.clipId != clip.id ||
+            cached.sha256.toLowerCase() != clip.sha256.toLowerCase() ||
+            cached.localRef.trim().isEmpty) {
+          throw StateError('verified media entry does not match ${clip.id}');
+        }
+        sources[cameraId] = LocalFileSource(cached.localRef);
+        continue;
+      }
+      if (mediaByClipId.isNotEmpty) {
+        throw StateError('committed media is missing ${clip.id}');
+      }
+      final String? assetPath = assetPathForClip(clip);
+      sources[cameraId] = BundledAssetSource(
+        assetPath ?? assetPathForCamera(cameraId),
+      );
+    }
+    return sources;
+  }
+
+  Future<void> _applyVerifiedVersion(
+    PlaybackManifest manifest,
+    Map<String, CachedMedia> mediaByClipId,
+  ) async {
+    if (!mounted) throw StateError('wall has been disposed');
+    final Map<String, TileMediaSource> oldSources =
+        Map<String, TileMediaSource>.of(_tileSources);
+    final Map<String, TileMediaSource> targetSources = _sourcesFor(
+      manifest,
+      mediaByClipId,
+    );
+    final List<String> switched = <String>[];
+    try {
+      for (final String cameraId in cctvCameraIds) {
+        final TileMediaSource target = targetSources[cameraId]!;
+        if (oldSources[cameraId] == target) continue;
+        if (!await _replaceTileSource(cameraId, target)) {
+          throw StateError('decoder rejected replacement for $cameraId');
+        }
+        switched.add(cameraId);
+      }
+    } on Object {
+      for (final String cameraId in switched.reversed) {
+        await _replaceTileSource(cameraId, oldSources[cameraId]!);
+      }
+      if (mounted) setState(() => _tileSources = oldSources);
+      rethrow;
+    }
+    if (!mounted) throw StateError('wall was disposed during activation');
+    setState(() {
+      _manifest = manifest;
+      _mediaByClipId = Map<String, CachedMedia>.of(mediaByClipId);
+      _tileSources = targetSources;
+      _status = 'WALL UPDATED · v${manifest.version}';
+    });
+  }
+
+  Future<bool> _replaceTileSource(
+    String cameraId,
+    TileMediaSource source,
+  ) async {
+    if (_tileSources[cameraId] == source) return true;
+    final Completer<bool> settled = Completer<bool>();
+    _sourceSettles[cameraId] = settled;
+    setState(() => _tileSources[cameraId] = source);
+    await WidgetsBinding.instance.endOfFrame;
+    try {
+      return await settled.future.timeout(const Duration(seconds: 15));
+    } finally {
+      if (identical(_sourceSettles[cameraId], settled)) {
+        _sourceSettles.remove(cameraId);
+      }
+    }
   }
 
   /// Builds the resolved channel with this app's surfaces.
@@ -216,6 +427,42 @@ class _WallScreenState extends State<WallScreen> {
   }
 
   Future<void> _retryCached() async {
+    final Future<VerifiedWallPlayback?> Function()? retryPlayback =
+        widget.onRetryCachedPlayback;
+    if (retryPlayback != null) {
+      VerifiedWallPlayback? restored;
+      try {
+        restored = await retryPlayback();
+      } on Object {
+        restored = null;
+      }
+      if (restored != null) {
+        try {
+          await _activateLiveVersion(
+            PlaybackSyncSnapshot(
+              state: PlaybackSyncState.ready,
+              manifest: restored.manifest,
+              mediaByClipId: restored.mediaByClipId,
+            ),
+          );
+        } on Object {
+          if (mounted) {
+            setState(() {
+              _recoveryStatus = 'Cached media could not be activated.';
+              _status = 'CACHE RESTORE FAILED · KEEPING CURRENT FEED';
+            });
+          }
+          return;
+        }
+        if (!mounted) return;
+        setState(() {
+          _recoveryVisible = false;
+          _recoveryStatus = null;
+        });
+        _restoreTileFocus();
+        return;
+      }
+    }
     final Future<PlaybackManifest?> Function()? retry = widget.onRetryCached;
     PlaybackManifest? reloaded;
     if (retry != null) {
@@ -228,27 +475,51 @@ class _WallScreenState extends State<WallScreen> {
     if (!mounted) {
       return;
     }
-    setState(() {
-      if (reloaded == null) {
+    if (reloaded == null) {
+      setState(() {
         _recoveryStatus = 'No cached wall stored yet.';
         _status = 'NO CACHED WALL · KEEPING CURRENT FEED';
-      } else {
-        _manifest = reloaded;
+      });
+      return;
+    }
+    final PlaybackManifest restored = reloaded;
+    try {
+      await _applyVerifiedVersion(restored, const <String, CachedMedia>{});
+    } on Object {
+      if (mounted) {
+        setState(() {
+          _recoveryStatus = 'Cached wall could not be activated.';
+          _status = 'CACHE RESTORE FAILED · KEEPING CURRENT FEED';
+        });
+      }
+      return;
+    }
+    if (mounted) {
+      setState(() {
         _recoveryVisible = false;
         _recoveryStatus = null;
-        _status = 'WALL RESTORED · v${reloaded.version}';
-      }
-    });
-    if (reloaded != null) {
+        _status = 'WALL RESTORED · v${restored.version}';
+      });
       _restoreTileFocus();
     }
   }
 
   void _toggleEffects() {
+    final bool value = !_effectsDisabled;
     setState(() {
-      _effectsDisabled = !_effectsDisabled;
+      _effectsDisabled = value;
       _status = _effectsDisabled ? 'EFFECTS DISABLED' : 'EFFECTS ENABLED';
     });
+    final SettingsPort? settings = widget.settings;
+    if (settings != null) {
+      unawaited(
+        settings.setBool(
+          partyId: PartyId(widget.partyId),
+          key: CctvWallSettingsKeys.effectsDisabled,
+          value: value,
+        ),
+      );
+    }
   }
 
   void _restoreTileFocus() {

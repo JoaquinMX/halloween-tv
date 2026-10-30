@@ -46,7 +46,7 @@ final class InMemoryManifestStore implements WallManifestStore {
 final class FakeTileVideoController implements TileVideoController {
   FakeTileVideoController({
     required this.cameraId,
-    required this.assetPath,
+    required this.source,
     this.failOnInitialize = false,
     this.lateErrorOnInitialize = false,
   });
@@ -55,7 +55,8 @@ final class FakeTileVideoController implements TileVideoController {
   final String cameraId;
 
   /// Asset the tile asked for.
-  final String assetPath;
+  final TileMediaSource source;
+  String get assetPath => source.reference;
 
   /// Throws from [initialize].
   final bool failOnInitialize;
@@ -116,10 +117,10 @@ final class FakeTileVideoController implements TileVideoController {
 
   @override
   Widget buildSurface(BuildContext context) => ColoredBox(
-        key: ValueKey<String>('video-surface-$cameraId'),
-        color: const Color(0xFF10241A),
-        child: Center(child: Text('LIVE $cameraId')),
-      );
+    key: ValueKey<String>('video-surface-$cameraId'),
+    color: const Color(0xFF10241A),
+    child: Center(child: Text('LIVE $cameraId')),
+  );
 
   @override
   Future<void> setLooping(bool value) async {
@@ -159,10 +160,10 @@ TileVideoControllerFactory fakeControllerFactory({
   Set<String> lateError = const <String>{},
   Map<String, FakeTileVideoController>? sink,
 }) {
-  return ({required String cameraId, required String assetPath}) {
+  return ({required String cameraId, required TileMediaSource source}) {
     final FakeTileVideoController controller = FakeTileVideoController(
       cameraId: cameraId,
-      assetPath: assetPath,
+      source: source,
       failOnInitialize: failing.contains(cameraId),
       lateErrorOnInitialize: lateError.contains(cameraId),
     );

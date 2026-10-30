@@ -38,10 +38,20 @@ dependencies:
     path: ../../packages/core_effects
   core_ui:
     path: ../../packages/core_ui
+  infra_firestore:
+    path: ../../packages/infra_firestore
+  infra_signed_urls:
+    path: ../../packages/infra_signed_urls
+  infra_settings:
+    path: ../../packages/infra_settings
 
   # Playback + local persistence.
   video_player: ^2.10.0
   shared_preferences: ^2.5.3
+  firebase_core: ^3.13.1
+  cloud_firestore: ^5.6.12
+  cloud_functions: ^5.6.2
+  path_provider: ^2.1.5
 
   cupertino_icons: ^1.0.8
 
