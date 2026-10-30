@@ -12,7 +12,7 @@ import { HAS_FIRESTORE_EMULATOR, clearParty, createEmulatorContext, disposeEmula
 const PACKAGE_ROOT = process.cwd();
 const ASSETS = resolve(PACKAGE_ROOT, "../../apps/tv_app/assets");
 const PROJECT_ID = process.env.GCLOUD_PROJECT ?? "demo-halloween-tv";
-const BUCKET = process.env.FIREBASE_STORAGE_BUCKET ?? `${PROJECT_ID}.appspot.com`;
+const BUCKET = process.env.STORAGE_BUCKET ?? `${PROJECT_ID}.appspot.com`;
 const HAS_EMULATORS = HAS_FIRESTORE_EMULATOR && Boolean(process.env.STORAGE_EMULATOR_HOST);
 const IS_LINUX_X64 = process.platform === "linux" && process.arch === "x64";
 
@@ -32,7 +32,7 @@ function runTool(script: string, args: string[], env: NodeJS.ProcessEnv, cwd = P
 function cleanEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
   for (const name of ["FIRESTORE_EMULATOR_HOST", "STORAGE_EMULATOR_HOST", "GCLOUD_PROJECT", "GOOGLE_CLOUD_PROJECT",
-    "FIREBASE_STORAGE_BUCKET", "PILOT_PARTY_ID", "PILOT_DEVICE_ID", "PILOT_CHANNEL_ID", "FFMPEG_PATH", "FFPROBE_PATH"]) {
+    "STORAGE_BUCKET", "PILOT_PARTY_ID", "PILOT_DEVICE_ID", "PILOT_CHANNEL_ID", "FFMPEG_PATH", "FFPROBE_PATH"]) {
     delete env[name];
   }
   return env;
@@ -44,7 +44,7 @@ function emulatorEnv(partyId: string, deviceId = "tv-pilot", channelId = "haunte
     FIRESTORE_EMULATOR_HOST: process.env.FIRESTORE_EMULATOR_HOST!,
     STORAGE_EMULATOR_HOST: process.env.STORAGE_EMULATOR_HOST!,
     GCLOUD_PROJECT: PROJECT_ID,
-    FIREBASE_STORAGE_BUCKET: BUCKET,
+    STORAGE_BUCKET: BUCKET,
     PILOT_PARTY_ID: partyId,
     PILOT_DEVICE_ID: deviceId,
     PILOT_CHANNEL_ID: channelId,
@@ -58,7 +58,7 @@ function fakeEmulatorEnv(projectId = "real-project-12345"): NodeJS.ProcessEnv {
     FIRESTORE_EMULATOR_HOST: "127.0.0.1:8080",
     STORAGE_EMULATOR_HOST: "127.0.0.1:9199",
     GCLOUD_PROJECT: projectId,
-    FIREBASE_STORAGE_BUCKET: `${projectId}.appspot.com`,
+    STORAGE_BUCKET: `${projectId}.appspot.com`,
   };
 }
 
@@ -94,7 +94,7 @@ test("operator tools refuse missing, mixed, and implicit cloud targets", () => {
 
   const mixedEnv = cleanEnv();
   mixedEnv.FIRESTORE_EMULATOR_HOST = "127.0.0.1:8080";
-  mixedEnv.FIREBASE_STORAGE_BUCKET = BUCKET;
+  mixedEnv.STORAGE_BUCKET = BUCKET;
   const mixed = runTool("tools/seed_pilot.ts", ["--target=emulator", "--apply"], mixedEnv);
   assert.notEqual(mixed.status, 0);
   assert.match(mixed.stderr, /partial emulator target/);
@@ -238,7 +238,7 @@ exports.runGeneration = (0, tasks_1.onTaskDispatched)({ timeoutSeconds: ${option
 function preflightEnv(): NodeJS.ProcessEnv {
   return {
     ...cleanEnv(),
-    FIREBASE_STORAGE_BUCKET: "artifact-bucket-123456",
+    STORAGE_BUCKET: "artifact-bucket-123456",
     VIDEO_GENERATION_PROVIDER: "fake",
     FFMPEG_PATH: "runtime/bin/ffmpeg",
     FFPROBE_PATH: "runtime/bin/ffprobe",

@@ -180,11 +180,11 @@ async function main(): Promise<void> {
       projectId !== (process.env.GCLOUD_PROJECT ?? process.env.GOOGLE_CLOUD_PROJECT)) {
     fail("Explicit --project disagrees with the ambient Firebase project.");
   }
-  const bucketName = argument("bucket") ?? process.env.FIREBASE_STORAGE_BUCKET;
-  if (!bucketName) fail("Verification requires an explicit --bucket or FIREBASE_STORAGE_BUCKET.");
+  const bucketName = argument("bucket") ?? process.env.STORAGE_BUCKET;
+  if (!bucketName) fail("Verification requires an explicit --bucket or STORAGE_BUCKET.");
   if (bucketName.startsWith("gs://") || /\s/.test(bucketName)) fail("Bucket must be a bare bucket name.");
-  if (target === "cloud" && process.env.FIREBASE_STORAGE_BUCKET && bucketName !== process.env.FIREBASE_STORAGE_BUCKET) {
-    fail("--bucket disagrees with FIREBASE_STORAGE_BUCKET for this cloud target.");
+  if (target === "cloud" && process.env.STORAGE_BUCKET && bucketName !== process.env.STORAGE_BUCKET) {
+    fail("--bucket disagrees with STORAGE_BUCKET for this cloud target.");
   }
   const partyId = argument("party");
   const deviceId = argument("device");

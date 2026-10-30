@@ -18,7 +18,7 @@ import { join, resolve } from "node:path";
 const REQUIRED_EXPORTS = ["requestGeneration", "runGeneration", "getCurrentManifest", "getDeliveryUrls", "acknowledgeDelivery", "sweepExpiredMedia"];
 const EXPECTED_NORMALIZATION = { codec: "h264", pixelFormat: "yuv420p", frameRate: "24/1", width: 854, height: 480, durationMs: 2000 };
 const CONFIG_KEYS = new Set([
-  "FIREBASE_STORAGE_BUCKET", "FFMPEG_PATH", "FFPROBE_PATH", "GENERATION_WORKER_TIMEOUT_SECONDS",
+  "STORAGE_BUCKET", "FFMPEG_PATH", "FFPROBE_PATH", "GENERATION_WORKER_TIMEOUT_SECONDS",
   "PROVIDER_POLL_TIMEOUT_SECONDS", "NORMALIZATION_HEADROOM_SECONDS", "VIDEO_GENERATION_PROVIDER",
   "FIRESTORE_EMULATOR_HOST", "STORAGE_EMULATOR_HOST", "FAKE_FIXTURE_DIR",
   "GENERATION_ENABLED", "PROVIDER_POLL_INTERVAL_MS", "PROVIDER_TIMEOUT_MS",
@@ -118,11 +118,11 @@ export async function runPreflight(): Promise<Record<string, unknown>> {
     throw new Error(`Demo project ${projectId} cannot be a cloud deployment target; use --target=emulator.`);
   }
   const config = await readEnvironmentFiles(functionsRoot, projectId);
-  const bucket = argument("bucket") ?? process.env.FIREBASE_STORAGE_BUCKET ?? config.FIREBASE_STORAGE_BUCKET;
-  if (!bucket) throw new Error("An explicit bucket is required via --bucket or FIREBASE_STORAGE_BUCKET; the Admin SDK default bucket is never assumed.");
+  const bucket = argument("bucket") ?? process.env.STORAGE_BUCKET ?? config.STORAGE_BUCKET;
+  if (!bucket) throw new Error("An explicit bucket is required via --bucket or STORAGE_BUCKET; the Admin SDK default bucket is never assumed.");
   if (bucket.startsWith("gs://") || /\s/.test(bucket)) throw new Error(`Bucket must be a bare bucket name (found ${bucket}).`);
-  if (argument("bucket") && config.FIREBASE_STORAGE_BUCKET && argument("bucket") !== config.FIREBASE_STORAGE_BUCKET) {
-    throw new Error("--bucket disagrees with FIREBASE_STORAGE_BUCKET in the selected Functions environment file.");
+  if (argument("bucket") && config.STORAGE_BUCKET && argument("bucket") !== config.STORAGE_BUCKET) {
+    throw new Error("--bucket disagrees with STORAGE_BUCKET in the selected Functions environment file.");
   }
   const firestoreEmulator = process.env.FIRESTORE_EMULATOR_HOST ?? config.FIRESTORE_EMULATOR_HOST;
   const storageEmulator = process.env.STORAGE_EMULATOR_HOST ?? config.STORAGE_EMULATOR_HOST;

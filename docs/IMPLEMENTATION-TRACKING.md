@@ -42,7 +42,7 @@ The runbook provides concrete future project, IAM/signing, APIs/task/scheduler, 
 
 ## Actual deployment
 
-**None in this cycle.** No Firebase project, bucket, rules, indexes, Functions, Scheduler job, lifecycle policy, pilot manifest, or real provider configuration was changed. Prepared files and emulator outcomes are not deployment evidence.
+**Cycle-7 live (2026-10-30).** Deployed to project `halloween-tv`: firestore.rules, firestore.indexes, storage.rules (deny-all-direct; media via signed URLs), and all 7 Functions v2 nodejs22 (requestGeneration, runGeneration taskQueue, getDeliveryUrls, getCurrentManifest, acknowledgeDelivery, listPartyDevices, sweepExpiredMedia) + artifact cleanup policy. Live callable check passed (FORBIDDEN on unregistered IDs; INVALID_ARGUMENT on missing channelId) — no billable work. Cloud Storage initialized by Joaquin (production mode). Web Firebase apps registered for tv_app + companion_app (shared web app ID). Companion release APK (49.2MB, live flags) installed + launched on physical Pixel 4 XL with screenshot proof; release web built; 73/73 companion tests pass in Chrome, 51/51 tv tests, 20/20 backend unit tests. Env rename: FIREBASE_STORAGE_BUCKET -> STORAGE_BUCKET (11 files) — firebase-tools rejects FIREBASE_*/GCLOUD_PROJECT keys in deploy env files; runtime provides GCLOUD_PROJECT automatically. Runtime/ stays gitignored (Linux-prepared, 141MB). Still pending: cloud party/guest seeding + scheduler/lifecycle console review + TV live-flag build for the real TV.
 
 ## Hardware validation
 

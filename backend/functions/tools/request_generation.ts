@@ -75,7 +75,7 @@ async function main(): Promise<void> {
   }
   const app = initializeApp({
     projectId: process.env.GCLOUD_PROJECT ?? process.env.GOOGLE_CLOUD_PROJECT,
-    storageBucket: process.env.FIREBASE_STORAGE_BUCKET,
+    storageBucket: process.env.STORAGE_BUCKET,
   }, `request-generation-${Date.now()}`);
   try {
     const services = createGenerationServices({

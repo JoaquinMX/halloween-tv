@@ -34,8 +34,8 @@ async function main(): Promise<void> {
   }
   const projectId = process.env.GCLOUD_PROJECT ?? process.env.GOOGLE_CLOUD_PROJECT ?? "demo-halloween-tv";
   if (!projectId.startsWith("demo-")) fail("Fake E2E requires a demo Firebase project ID.");
-  const bucketName = process.env.FIREBASE_STORAGE_BUCKET;
-  if (!bucketName) fail("Fake E2E requires explicit FIREBASE_STORAGE_BUCKET.");
+  const bucketName = process.env.STORAGE_BUCKET;
+  if (!bucketName) fail("Fake E2E requires explicit STORAGE_BUCKET.");
   const fixtureDirectory = existsSync(resolve(process.cwd(), "runtime/fixtures/cam01.mp4"))
     ? resolve(process.cwd(), "runtime/fixtures")
     : resolve(process.cwd(), "../../apps/tv_app/assets");

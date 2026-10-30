@@ -6,7 +6,7 @@ import type { Bucket } from "@google-cloud/storage";
 export function getAdminApp(): App {
   return getApps()[0] ?? initializeApp({
     projectId: process.env.GCLOUD_PROJECT ?? process.env.GOOGLE_CLOUD_PROJECT,
-    storageBucket: process.env.FIREBASE_STORAGE_BUCKET,
+    storageBucket: process.env.STORAGE_BUCKET,
   });
 }
 

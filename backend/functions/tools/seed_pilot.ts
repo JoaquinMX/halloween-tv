@@ -68,8 +68,8 @@ function selectEnvironment(options: Options): { projectId: string; bucketName: s
       fail("Emulator apply requires a demo project ID; cloud project IDs must use the explicit cloud path.");
     }
     const projectId = options.project ?? process.env.GCLOUD_PROJECT ?? process.env.GOOGLE_CLOUD_PROJECT ?? "demo-halloween-tv";
-    const bucketName = options.bucket ?? process.env.FIREBASE_STORAGE_BUCKET;
-    if (!bucketName) fail("Emulator seeding requires explicit FIREBASE_STORAGE_BUCKET or --bucket.");
+    const bucketName = options.bucket ?? process.env.STORAGE_BUCKET;
+    if (!bucketName) fail("Emulator seeding requires explicit STORAGE_BUCKET or --bucket.");
     if (!/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(projectId)) fail("Firebase project ID is invalid.");
     if (bucketName.startsWith("gs://") || /\s/.test(bucketName)) fail("Storage bucket must be a bucket name, without gs:// or whitespace.");
     return { projectId, bucketName };
@@ -81,8 +81,8 @@ function selectEnvironment(options: Options): { projectId: string; bucketName: s
   }
   const ambientProject = process.env.GCLOUD_PROJECT ?? process.env.GOOGLE_CLOUD_PROJECT;
   if (ambientProject && ambientProject !== options.project) fail("Explicit --project disagrees with GCLOUD_PROJECT/GOOGLE_CLOUD_PROJECT; clear the conflicting target.");
-  if (process.env.FIREBASE_STORAGE_BUCKET && process.env.FIREBASE_STORAGE_BUCKET !== options.bucket) {
-    fail("Explicit --bucket disagrees with FIREBASE_STORAGE_BUCKET; clear the conflicting configuration before cloud seeding.");
+  if (process.env.STORAGE_BUCKET && process.env.STORAGE_BUCKET !== options.bucket) {
+    fail("Explicit --bucket disagrees with STORAGE_BUCKET; clear the conflicting configuration before cloud seeding.");
   }
   if (options.project.startsWith("demo-")) fail("Cloud seed target cannot use a demo project ID.");
   if (!/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(options.project)) fail("Firebase project ID is invalid.");
