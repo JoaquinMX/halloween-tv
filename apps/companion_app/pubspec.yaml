@@ -1,0 +1,45 @@
+name: companion_app
+description: "Party companion guest app (Android, iOS, Web) for Halloween TV — join flow lands in a later partition."
+publish_to: none
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.8.1
+
+# Pub Workspaces resolution is intentionally not enabled yet: it requires a
+# root pubspec.yaml declaring `workspace:`, which is out of scope for this
+# cycle. Classic Melos-managed path dependencies are used instead; see
+# docs/ADRs/0001-package-mapping.md.
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # Monorepo packages (guest join flow).
+  channel_api:
+    path: ../../packages/channel_api
+  core_foundation:
+    path: ../../packages/core_foundation
+  core_playlist:
+    path: ../../packages/core_playlist
+  core_ui:
+    path: ../../packages/core_ui
+  infra_firestore:
+    path: ../../packages/infra_firestore
+
+  # Firebase versions mirror apps/tv_app + packages/infra_firestore exactly.
+  firebase_core: ^3.13.1
+  cloud_firestore: ^5.6.12
+  cloud_functions: ^5.6.2
+
+  cupertino_icons: ^1.0.8
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  integration_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
