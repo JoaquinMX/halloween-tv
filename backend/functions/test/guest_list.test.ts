@@ -43,3 +43,36 @@ test("TV device lists guest codes; guests and strangers get FORBIDDEN", { skip: 
     await disposeEmulatorContext(app);
   }
 });
+
+test("host listing tolerates label-absent guests and surfaces joinPin only when configured", { skip: !HAS_FIRESTORE_EMULATOR }, async () => {
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  const tvDevice = "tv-host";
+  const channelId = "main";
+  try {
+    await db.doc(`parties/${partyId}`).set({ ownerUid: null, status: "active", activeChannelId: channelId, joinPin: "004201" });
+    await db.doc(`parties/${partyId}/channels/${channelId}`).set({ partyId, channelId, status: "active" });
+    await db.doc(`parties/${partyId}/devices/${tvDevice}`).set({ partyId, deviceId: tvDevice, label: "TV", role: "tv", status: "active" });
+    await db.doc(`parties/${partyId}/devices/p-nolabel`).set({ partyId, deviceId: "p-nolabel", role: "guest", status: "active" });
+    await db.doc(`parties/${partyId}/devices/p-emptylabel`).set({ partyId, deviceId: "p-emptylabel", label: "", role: "guest", status: "active" });
+    await db.doc(`parties/${partyId}/devices/p-named`).set({ partyId, deviceId: "p-named", label: "Named", role: "guest", status: "active" });
+
+    const runtime = createRuntimeServices({ db, bucket });
+    const listing = await runtime.listPartyDevices({ partyId, deviceId: tvDevice, channelId });
+    assert.equal(listing.devices.length, 3);
+    assert.equal(listing.joinPin, "004201");
+    const byId = new Map(listing.devices.map((entry) => [entry.deviceId, entry]));
+    assert.ok(!("label" in byId.get("p-nolabel")!));
+    assert.ok(!("label" in byId.get("p-emptylabel")!));
+    assert.equal(byId.get("p-named")!.label, "Named");
+    assert.ok(listing.devices.every((entry) => entry.role === "guest" && entry.status === "active"));
+    assert.ok(!listing.devices.some((entry) => entry.deviceId === tvDevice));
+
+    await db.doc(`parties/${partyId}`).update({ joinPin: "" });
+    const unpinned = await runtime.listPartyDevices({ partyId, deviceId: tvDevice, channelId });
+    assert.ok(!("joinPin" in unpinned));
+  } finally {
+    await db.recursiveDelete(db.doc(`parties/${partyId}`));
+    await disposeEmulatorContext(app);
+  }
+});

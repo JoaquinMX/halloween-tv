@@ -10,6 +10,7 @@ import 'package:channel_api/channel_api.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:companion_app/src/join/guest_join_data.dart';
 import 'package:companion_app/src/session/guest_session.dart';
+import 'package:companion_app/src/data/party_join_client.dart';
 import 'package:companion_app/src/session/guest_session_state.dart';
 import 'package:core_foundation/core_foundation.dart';
 import 'package:core_playlist/core_playlist.dart';
@@ -48,6 +49,14 @@ final class FakeClock implements Clock {
 
   @override
   DateTime now() => current;
+}
+
+final class FakeRegistrationInvoker implements PartyJoinCallableInvoker {
+  FakeRegistrationInvoker(this.pending);
+  final Completer<Object?> pending;
+  @override
+  Future<Object?> call(String name, Map<String, Object?> payload) =>
+      pending.future;
 }
 
 PlaybackManifest makeManifest({
@@ -123,6 +132,65 @@ void main() {
   });
 
   group('GuestSession', () {
+    test(
+      'registration completes before the first manifest subscription',
+      () async {
+        final Completer<Object?> registration = Completer<Object?>();
+        final GuestSession session = GuestSession(
+          source: source,
+          clock: clock,
+          joinClient: PartyJoinClient(
+            invoker: FakeRegistrationInvoker(registration),
+          ),
+        );
+        final Future<void> joining = session.join(joinFor());
+        expect(session.state.status, GuestSessionStatus.loading);
+        expect(source.watchCalls, 0);
+        registration.complete(<String, Object?>{
+          'partyId': 'party-1',
+          'deviceId': 'device-9',
+          'channelId': 'cctv',
+          'role': 'guest',
+          'status': 'active',
+          'created': true,
+        });
+        await joining;
+        expect(source.watchCalls, 1);
+        expect(session.state.status, GuestSessionStatus.loading);
+        source.controllers.single.add(makeManifest());
+        await pumpEvents();
+        expect(session.state.status, GuestSessionStatus.ready);
+        await session.dispose();
+      },
+    );
+
+    test(
+      'leave during registration prevents an obsolete manifest read',
+      () async {
+        final Completer<Object?> registration = Completer<Object?>();
+        final GuestSession session = GuestSession(
+          source: source,
+          clock: clock,
+          joinClient: PartyJoinClient(
+            invoker: FakeRegistrationInvoker(registration),
+          ),
+        );
+        final Future<void> joining = session.join(joinFor());
+        await session.leave();
+        registration.complete(<String, Object?>{
+          'partyId': 'party-1',
+          'deviceId': 'device-9',
+          'channelId': 'cctv',
+          'role': 'guest',
+          'status': 'active',
+          'created': true,
+        });
+        await joining;
+        expect(source.watchCalls, 0);
+        expect(session.state.status, GuestSessionStatus.idle);
+        await session.dispose();
+      },
+    );
     test('starts idle with no manifest', () {
       final GuestSession session = GuestSession(source: source, clock: clock);
       expect(session.state.status, GuestSessionStatus.idle);

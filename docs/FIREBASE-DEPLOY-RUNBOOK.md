@@ -207,6 +207,53 @@ FIREBASE_STORAGE_BUCKET=demo-halloween-tv.appspot.com firebase --config ../fireb
 
 Expected evidence: four URL DTO entries; independently checked bytes and playable streams; retained files at `backend/functions/delivery-output/...`; two identical ACK IDs; matching Firestore ACK/job state; and no delivery objects. The tool checks the callable response hash against the stored canonical manifest. For a real Firebase project, omit all emulator variables and use explicit `--target=cloud --project=... --bucket=... --functions-url=...`; the cloud path uses actual signed HTTPS URLs and must be run only under a separately approved pilot.
 
+## 9b. Provision the join PIN (QR self-registration)
+
+After the party/channel/TV exist (seeded by §9 or a prior rollout), provision
+the six-digit join PIN that the TV embeds in its session QR and that
+`joinParty` challenges companions with. The tool only merges `joinPin` onto the
+existing party doc: it creates no guest devices, collects no labels, uploads no
+media, and calls no providers. Preview first; the emulator form is safe for
+rehearsal:
+
+```sh
+cd backend/functions
+export FIRESTORE_EMULATOR_HOST='127.0.0.1:8080'
+export GCLOUD_PROJECT='demo-halloween-tv'
+npx tsx tools/seed_join.ts --target=emulator --party=pilot --channel=haunted_surveillance --tv-device=tv-pilot --join-pin=004201
+npx tsx tools/seed_join.ts --target=emulator --party=pilot --channel=haunted_surveillance --tv-device=tv-pilot --join-pin=004201 --apply
+```
+
+The PIN is exactly six ASCII digits as a string; leading zeros are significant
+(`004201` stays `004201`). Repeating the identical provisioning is a no-op
+(`already-provisioned`); omitting `--join-pin` with `--apply` leaves an
+existing PIN untouched (`unchanged`) and never clears it. The tool refuses a
+missing/inactive party, a channel that is not the party's `activeChannelId`, a
+missing/inactive TV device (or a non-`tv` role on that device), and malformed
+PINs — without writing anything — and it preserves unrelated party fields via
+a merge write.
+
+For an owner-approved cloud party, select the cloud target with all four
+explicit options plus the project; first omit `--apply` to preview. Cloud
+seeding refuses the guessable `pilot` / `tv-pilot` defaults and demo project
+IDs, refuses emulator environment variables, and uses operator ADC (never
+service-account keys). Party/device IDs are the TV authorization credential
+(no login gate by owner decision), so a real deployment must use unguessable
+provisioned values:
+
+```sh
+npx tsx tools/seed_join.ts --target=cloud --project="$PROJECT_ID" --party='<PILOT_PARTY>' --channel=haunted_surveillance --tv-device='<REGISTERED_TV_DEVICE>' --join-pin='<SIX_DIGITS>'
+npx tsx tools/seed_join.ts --target=cloud --project="$PROJECT_ID" --party='<PILOT_PARTY>' --channel=haunted_surveillance --tv-device='<REGISTERED_TV_DEVICE>' --join-pin='<SIX_DIGITS>' --apply
+```
+
+Expected evidence: `provisioned` with the exact six-digit string echoed back by
+the tool (operator-side only; the `joinParty` callable never echoes the PIN),
+`already-provisioned` on repeat, and the TV host panel listing both guests and
+the configured `joinPin` via `listPartyDevices`. Cloud provisioning is a
+project mutation and was not run in this cycle. Typed guest codes
+(`seed_guests.ts`) are unchanged; new parties use QR + PIN while pre-seeded
+legacy guests keep working.
+
 ## 10. Verify TTL and orphan cleanup
 
 The emulator suite includes a due job, expired media, and an orphan object and verifies the real retention service deletes all three. Run it serially:

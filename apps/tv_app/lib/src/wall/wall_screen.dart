@@ -161,9 +161,6 @@ class _WallScreenState extends State<WallScreen> {
   late bool _effectsDisabled;
   bool _recoveryVisible = false;
   bool _guestCodesVisible = false;
-  bool _guestCodesLoading = false;
-  List<GuestCodeEntry>? _guestCodes;
-  String? _guestCodesError;
   bool _okHeld = false;
   bool _activatedHandle = false;
   String? _status;
@@ -439,11 +436,11 @@ class _WallScreenState extends State<WallScreen> {
     });
   }
 
-  /// Opens the host guest-code page and loads the guest list once.
+  /// Opens the host guest-code page.
   ///
   /// Offline builds never reach here (no GUEST CODES button without a
-  /// [GuestCodeClient]); a read failure stays inline on the panel and keeps
-  /// the TV code + QR visible.
+  /// [GuestCodeClient]). The panel owns its authoritative listing refresh
+  /// (immediate fetch plus bounded interval); the wall only shows/hides it.
   void _openGuestCodes() {
     final GuestCodeClient? client = widget.guestCodeClient;
     if (!mounted || _guestCodesVisible || client == null) {
@@ -451,32 +448,11 @@ class _WallScreenState extends State<WallScreen> {
     }
     setState(() {
       _guestCodesVisible = true;
-      _guestCodesLoading = true;
-      _guestCodesError = null;
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted && _guestCodesVisible) {
         _recoveryFocus.requestFocus();
       }
-    });
-    client.fetchGuestCodes().then((List<GuestCodeEntry> entries) {
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _guestCodes = entries;
-        _guestCodesLoading = false;
-      });
-    }, onError: (Object error) {
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _guestCodesLoading = false;
-        _guestCodesError = error is GuestCodeException
-            ? error.message
-            : 'unexpected guest list failure';
-      });
     });
   }
 
@@ -712,17 +688,8 @@ class _WallScreenState extends State<WallScreen> {
                 key: kRecoveryOverlayKey,
                 child: _guestCodesVisible
                   ? GuestCodePanel(
-                      partyId: widget.partyId,
+                      client: widget.guestCodeClient!,
                       tvDeviceId: widget.tvDeviceId,
-                      channelId: widget.channelId,
-                      joinPayload: buildJoinPayload(
-                        partyId: widget.partyId,
-                        deviceId: widget.tvDeviceId,
-                        channelId: widget.channelId,
-                      ),
-                      guests: _guestCodes,
-                      isLoadingGuests: _guestCodesLoading,
-                      guestsError: _guestCodesError,
                       primaryFocusNode: _recoveryFocus,
                       onBack: _closeGuestCodes,
                       onClose: _closeRecovery,

@@ -29,6 +29,7 @@ import 'dart:async';
 import 'package:channel_api/channel_api.dart' show ManifestSource;
 import 'package:companion_app/src/bootstrap/companion_dependencies.dart';
 import 'package:companion_app/src/config/backend_config.dart';
+import 'package:companion_app/src/data/party_join_client.dart';
 import 'package:companion_app/src/join/guest_join_data.dart';
 import 'package:companion_app/src/session/guest_session.dart';
 import 'package:companion_app/src/session/guest_session_state.dart';
@@ -50,6 +51,7 @@ final class CompanionApp extends StatefulWidget {
     this.clock,
     this.firebaseBootstrap,
     this.invokerOverride,
+    this.partyJoinInvokerOverride,
   });
 
   /// Backend configuration override. Defaults to unconfigured/offline boot.
@@ -66,6 +68,7 @@ final class CompanionApp extends StatefulWidget {
 
   /// Test/emulator seam: substitutes only the callable-invoker boundary.
   final FirebaseManifestCallableInvoker? invokerOverride;
+  final PartyJoinCallableInvoker? partyJoinInvokerOverride;
 
   @override
   State<CompanionApp> createState() => _CompanionAppState();
@@ -111,6 +114,7 @@ final class _CompanionAppState extends State<CompanionApp>
           config: resolved,
           firebaseBootstrap: widget.firebaseBootstrap,
           invokerOverride: widget.invokerOverride,
+          partyJoinInvokerOverride: widget.partyJoinInvokerOverride,
         );
     if (!mounted) {
       return;
@@ -156,9 +160,14 @@ final class _CompanionAppState extends State<CompanionApp>
           config: _resolvedConfig ?? BackendConfig.unconfigured(),
           firebaseBootstrap: widget.firebaseBootstrap,
           invokerOverride: widget.invokerOverride,
+          partyJoinInvokerOverride: widget.partyJoinInvokerOverride,
         )).manifestSourceForJoin(data);
     final GuestSession? previous = _session;
-    final GuestSession session = GuestSession(source: source, clock: clock);
+    final GuestSession session = GuestSession(
+      source: source,
+      clock: clock,
+      joinClient: base?.partyJoinClient,
+    );
     _attach(session);
     if (previous != null) {
       await previous.dispose();

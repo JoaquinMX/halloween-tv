@@ -1,223 +1,68 @@
-/// Manual guest join form: party/device/channel fields plus an optional
-/// pasted join-data field.
-///
-/// Identifiers are parsed through the real p3 parsers
-/// ([parseGuestJoinFields] for manual entry, [parseGuestJoinPayload] for
-/// pasted JSON). Well-formed only — never proof of registration: the server
-/// still decides access at manifest-read time. Validation and parse failures
-/// render inline as the invalid-data state; the [onJoin] callback fires only
-/// for well-formed [GuestJoinData].
-///
-/// No Firebase Auth, no registration, no network traffic here.
+/// Anonymous party join form backed by a persisted local phone identity.
 library;
-
+import 'package:companion_app/src/join/device_identity_store.dart';
 import 'package:companion_app/src/join/guest_join_data.dart';
+import 'package:companion_app/src/join/join_payload_scanner.dart';
 import 'package:core_foundation/core_foundation.dart';
 import 'package:flutter/material.dart';
 
-/// Manual join form. Calls [onJoin] exactly once per successful parse.
 final class JoinScreen extends StatefulWidget {
-  const JoinScreen({super.key, required this.onJoin, this.configurationIssue});
-
-  /// Invoked with well-formed join identifiers (never with invalid input).
+  const JoinScreen({super.key, required this.onJoin, this.configurationIssue, this.identityStore, this.scanner = const UnavailableJoinPayloadScanner()});
   final Future<void> Function(GuestJoinData data) onJoin;
-
-  /// Composition-root configuration problem shown as a banner, if any.
   final String? configurationIssue;
-
+  final DeviceIdentityStore? identityStore;
+  final JoinPayloadScanner scanner;
   static const Key partyFieldKey = Key('join-party-id');
-  static const Key deviceFieldKey = Key('join-device-id');
   static const Key channelFieldKey = Key('join-channel-id');
+  static const Key pinFieldKey = Key('join-pin');
   static const Key payloadFieldKey = Key('join-payload');
   static const Key submitKey = Key('join-submit');
   static const Key errorKey = Key('join-error');
-
-  @override
-  State<JoinScreen> createState() => _JoinScreenState();
+  static const Key scanKey = Key('join-scan');
+  @override State<JoinScreen> createState() => _JoinScreenState();
 }
 
 final class _JoinScreenState extends State<JoinScreen> {
-  final TextEditingController _party = TextEditingController();
-  final TextEditingController _device = TextEditingController();
-  final TextEditingController _channel = TextEditingController();
-  final TextEditingController _payload = TextEditingController();
-  String? _error;
+  final _party = TextEditingController(), _channel = TextEditingController(), _pin = TextEditingController(), _payload = TextEditingController();
+  late final DeviceIdentityStore _identityStore = widget.identityStore ?? DeviceIdentityStore();
+  String? _deviceId, _error;
   bool _submitting = false;
-
-  @override
-  void dispose() {
-    _party.dispose();
-    _device.dispose();
-    _channel.dispose();
-    _payload.dispose();
-    super.dispose();
-  }
-
+  @override void initState() { super.initState(); _initialize(); }
+  Future<void> _initialize() async { try { final id = await _identityStore.getDeviceId(); if (mounted) setState(() => _deviceId = id); } catch (_) { if (mounted) setState(() => _error = 'Could not save this device identity. Retry to continue.'); } }
+  @override void dispose() { _party.dispose(); _channel.dispose(); _pin.dispose(); _payload.dispose(); super.dispose(); }
   Future<void> _submit() async {
-    if (_submitting) {
-      return;
-    }
-    final String pasted = _payload.text.trim();
+    if (_submitting || _deviceId == null) return;
+    final pasted = _payload.text.trim();
     final Result<GuestJoinData> result = pasted.isEmpty
-        ? parseGuestJoinFields(
-            partyId: _party.text,
-            deviceId: _device.text,
-            channelId: _channel.text,
-          )
-        : parseGuestJoinPayload(pasted);
+      ? parseGuestJoinFields(partyId: _party.text, localDeviceId: _deviceId!, channelId: _channel.text, joinPin: _pin.text)
+      : parseGuestJoinPayload(pasted, localDeviceId: _deviceId!);
     switch (result) {
       case Ok(:final GuestJoinData value):
-        setState(() {
-          _error = null;
-          _submitting = true;
-        });
-        try {
-          await widget.onJoin(value);
-        } finally {
-          if (mounted) {
-            setState(() {
-              _submitting = false;
-            });
-          }
-        }
-      case Err(:final String message):
-        setState(() {
-          _error = message;
-        });
+        setState(() { _error = null; _submitting = true; });
+        try { await widget.onJoin(value); } finally { if (mounted) setState(() => _submitting = false); }
+      case Err(:final String message): setState(() => _error = message);
     }
   }
-
-  @override
-  Widget build(BuildContext context) {
-    final String? configurationIssue = widget.configurationIssue;
-    return Scaffold(
-      appBar: AppBar(title: const Text('Join party')),
-      body: Center(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(24),
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 560),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              mainAxisSize: MainAxisSize.min,
-              children: <Widget>[
-                const Text(
-                  'Ask the organizer for the party ID, device ID, and '
-                  'channel ID, then enter them below. Entering identifiers '
-                  'only checks they are well-formed; the party server '
-                  'decides whether this device may join.',
-                  style: TextStyle(fontSize: 18),
-                ),
-                const SizedBox(height: 16),
-                if (configurationIssue != null &&
-                    configurationIssue.isNotEmpty) ...<Widget>[
-                  Card(
-                    key: const Key('join-config-banner'),
-                    margin: EdgeInsets.zero,
-                    child: Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Text(
-                        'Backend is not configured: $configurationIssue',
-                        style: const TextStyle(fontSize: 16),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                ],
-                TextField(
-                  key: JoinScreen.partyFieldKey,
-                  controller: _party,
-                  decoration: const InputDecoration(
-                    labelText: 'Party ID',
-                    hintText: 'e.g. haunted-house-1',
-                    border: OutlineInputBorder(),
-                  ),
-                  style: const TextStyle(fontSize: 18),
-                  textInputAction: TextInputAction.next,
-                  autocorrect: false,
-                  enableSuggestions: false,
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  key: JoinScreen.deviceFieldKey,
-                  controller: _device,
-                  decoration: const InputDecoration(
-                    labelText: 'Device ID',
-                    hintText: 'e.g. guest-phone-7',
-                    border: OutlineInputBorder(),
-                  ),
-                  style: const TextStyle(fontSize: 18),
-                  textInputAction: TextInputAction.next,
-                  autocorrect: false,
-                  enableSuggestions: false,
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  key: JoinScreen.channelFieldKey,
-                  controller: _channel,
-                  decoration: const InputDecoration(
-                    labelText: 'Channel ID',
-                    hintText: 'e.g. cctv',
-                    border: OutlineInputBorder(),
-                  ),
-                  style: const TextStyle(fontSize: 18),
-                  textInputAction: TextInputAction.next,
-                  autocorrect: false,
-                  enableSuggestions: false,
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  key: JoinScreen.payloadFieldKey,
-                  controller: _payload,
-                  decoration: const InputDecoration(
-                    labelText: 'Pasted join data (optional)',
-                    hintText:
-                        '{"partyId": "…", "deviceId": "…", "channelId": "…"}',
-                    border: OutlineInputBorder(),
-                    helperText:
-                        'Paste the JSON object from the organizer instead '
-                        'of typing the fields above.',
-                    helperMaxLines: 3,
-                  ),
-                  style: const TextStyle(fontSize: 16),
-                  textInputAction: TextInputAction.done,
-                  minLines: 1,
-                  maxLines: 4,
-                  autocorrect: false,
-                  enableSuggestions: false,
-                  onSubmitted: (_) => _submit(),
-                ),
-                if (_error != null) ...<Widget>[
-                  const SizedBox(height: 12),
-                  Text(
-                    _error!,
-                    key: JoinScreen.errorKey,
-                    style: TextStyle(
-                      fontSize: 16,
-                      color: Theme.of(context).colorScheme.error,
-                    ),
-                  ),
-                ],
-                const SizedBox(height: 20),
-                ElevatedButton(
-                  key: JoinScreen.submitKey,
-                  onPressed: _submitting ? null : _submit,
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 4),
-                    child: _submitting
-                        ? const SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Text('Join', style: TextStyle(fontSize: 20)),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
+  Future<void> _scan() async {
+    final result = await widget.scanner.scan();
+    if (!mounted) return;
+    if (result case JoinPayloadText(:final text)) { setState(() => _payload.text = text); await _submit(); }
+    else { setState(() => _error = 'Scanner is unavailable on this device.'); }
   }
+  @override Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('Join party')),
+    body: Center(child: SingleChildScrollView(padding: const EdgeInsets.all(24), child: ConstrainedBox(constraints: const BoxConstraints(maxWidth: 560), child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, mainAxisSize: MainAxisSize.min, children: <Widget>[
+      const Text('Enter the party and channel details from the organizer. The party server decides whether this device may join.', style: TextStyle(fontSize: 18)),
+      if (widget.configurationIssue?.isNotEmpty == true) Text('Backend is not configured: ${widget.configurationIssue}'),
+      const SizedBox(height: 16),
+      _field(JoinScreen.partyFieldKey, _party, 'Party ID'), const SizedBox(height: 12),
+      _field(JoinScreen.channelFieldKey, _channel, 'Channel ID'), const SizedBox(height: 12),
+      _field(JoinScreen.pinFieldKey, _pin, 'Join PIN (optional)'), const SizedBox(height: 12),
+      TextField(key: JoinScreen.payloadFieldKey, controller: _payload, decoration: const InputDecoration(labelText: 'Pasted join data (optional)', hintText: '{"partyId":"…","channelId":"…","joinPin":"004201"}', border: OutlineInputBorder()), minLines: 1, maxLines: 4, autocorrect: false, enableSuggestions: false),
+      TextButton(key: JoinScreen.scanKey, onPressed: _scan, child: const Text('Scan QR')),
+      if (_error != null) Text(_error!, key: JoinScreen.errorKey, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+      const SizedBox(height: 16), ElevatedButton(key: JoinScreen.submitKey, onPressed: _deviceId == null || _submitting ? null : _submit, child: _submitting ? const CircularProgressIndicator() : const Text('Join')),
+      if (_deviceId == null) const Text('Preparing this device…'),
+    ])))));
+  Widget _field(Key key, TextEditingController controller, String label) => TextField(key: key, controller: controller, decoration: InputDecoration(labelText: label, border: const OutlineInputBorder()), autocorrect: false, enableSuggestions: false);
 }

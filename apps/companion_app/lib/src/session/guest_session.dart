@@ -24,6 +24,7 @@ import 'dart:developer' as developer;
 
 import 'package:channel_api/channel_api.dart';
 import 'package:companion_app/src/data/manifest_failure.dart';
+import 'package:companion_app/src/data/party_join_client.dart';
 import 'package:companion_app/src/join/guest_join_data.dart';
 import 'package:companion_app/src/session/guest_session_state.dart';
 import 'package:core_foundation/core_foundation.dart';
@@ -38,11 +39,14 @@ final class GuestSession {
   GuestSession({
     required ManifestSource<PlaybackManifest> source,
     required Clock clock,
+    PartyJoinClient? joinClient,
   }) : _source = source,
-       _clock = clock;
+       _clock = clock,
+       _joinClient = joinClient;
 
   final ManifestSource<PlaybackManifest> _source;
   final Clock _clock;
+  final PartyJoinClient? _joinClient;
 
   final StreamController<GuestSessionState> _states =
       StreamController<GuestSessionState>.broadcast();
@@ -70,6 +74,7 @@ final class GuestSession {
 
   /// Guards [refresh] (and [resume] reads) against overlap.
   bool _refreshing = false;
+  bool _registered = false;
   bool _disposed = false;
 
   void _emit(GuestSessionState next) {
@@ -105,6 +110,7 @@ final class GuestSession {
       return;
     }
     _refreshing = false;
+    _registered = false;
     _emit(
       GuestSessionState(
         status: GuestSessionStatus.loading,
@@ -112,6 +118,23 @@ final class GuestSession {
         message: 'Joining ${data.partyId.value}/${data.channelId}',
       ),
     );
+    final PartyJoinClient? client = _joinClient;
+    if (client != null) {
+      try {
+        await client.register(
+          partyId: data.partyId.value,
+          deviceId: data.deviceId.value,
+          channelId: data.channelId,
+        );
+      } on Object catch (error) {
+        if (generation == _generation && !_disposed) {
+          _handleError(error, generation);
+        }
+        return;
+      }
+      if (generation != _generation || _disposed) return;
+      _registered = true;
+    }
     _subscribe(data, generation);
   }
 
@@ -315,6 +338,10 @@ final class GuestSession {
     if (bound == null) {
       return;
     }
+    if (_joinClient != null && !_registered) {
+      await join(bound);
+      return;
+    }
     _refreshing = true;
     _generation++;
     final int generation = _generation;
@@ -392,6 +419,10 @@ final class GuestSession {
     }
     final GuestJoinData? bound = _state.join;
     if (bound == null) {
+      return;
+    }
+    if (_joinClient != null && !_registered) {
+      await join(bound);
       return;
     }
     // A fresh generation both ignores late events from the suspended

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BackendError, parseAck, parseRequestGeneration, requireIdentity } from "../src/contracts";
+import { BackendError, parseAck, parseJoinPartyInput, parseRequestGeneration, requireIdentity } from "../src/contracts";
 import { createDeliveryServices } from "../src/delivery";
 import { createEmulatorContext, clearParty, HAS_FIRESTORE_EMULATOR, randomPartyId, seedParty, disposeEmulatorContext } from "./support/emulators";
 
@@ -23,6 +23,22 @@ test("payload contracts reject missing identity, unsupported models, and noncano
     partyId: "party", deviceId: "tv", channelId: "main", jobId: "job-1", idempotencyKey: "job-1", presetId: "cheap_demo",
   });
   assert.equal(parsed.presetId, "cheap_demo");
+});
+
+test("joinParty parser enforces identity, channel, and six-digit PIN shape", () => {
+  expectCode(() => parseJoinPartyInput({}), "UNAUTHENTICATED");
+  expectCode(() => parseJoinPartyInput({ partyId: "party", channelId: "main" }), "UNAUTHENTICATED");
+  expectCode(() => parseJoinPartyInput({ deviceId: "p-x", channelId: "main" }), "UNAUTHENTICATED");
+  expectCode(() => parseJoinPartyInput({ partyId: "party", deviceId: "p-x" }), "INVALID_ARGUMENT");
+  expectCode(() => parseJoinPartyInput({ partyId: "party", deviceId: "p-x", channelId: "" }), "INVALID_ARGUMENT");
+  expectCode(() => parseJoinPartyInput({ partyId: "bad id!", deviceId: "p-x", channelId: "main" }), "INVALID_ARGUMENT");
+  for (const joinPin of ["123", "1234567", "abcdef", "12 456", "", 4201, null, "１２３４５６"]) {
+    expectCode(() => parseJoinPartyInput({ partyId: "party", deviceId: "p-x", channelId: "main", joinPin }), "INVALID_ARGUMENT");
+  }
+  const noPin = parseJoinPartyInput({ partyId: "party", deviceId: "p-x", channelId: "main" });
+  assert.ok(!("joinPin" in noPin));
+  const leadingZeros = parseJoinPartyInput({ partyId: "party", deviceId: "p-x", channelId: "main", joinPin: "004201" });
+  assert.equal(leadingZeros.joinPin, "004201");
 });
 
 test("registered callable enforces one in-flight job, idempotency, sanitized errors and zero retries", { skip: !HAS_FIRESTORE_EMULATOR }, async () => {

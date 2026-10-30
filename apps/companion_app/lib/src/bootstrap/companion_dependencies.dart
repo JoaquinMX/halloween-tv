@@ -31,6 +31,7 @@ import 'package:companion_app/src/config/backend_config.dart';
 import 'package:companion_app/src/data/callable_manifest_invoker.dart';
 import 'package:companion_app/src/data/manifest_connection.dart';
 import 'package:companion_app/src/data/manifest_failure.dart';
+import 'package:companion_app/src/data/party_join_client.dart';
 import 'package:companion_app/src/join/guest_join_data.dart';
 
 /// Injectable Firebase bootstrap for tests and emulator wiring.
@@ -44,6 +45,7 @@ final class CompanionDependencies {
     required this.identity,
     required this.remoteUnavailableReason,
     required FirebaseManifestCallableInvoker? invoker,
+    required this.partyJoinClient,
   }) : _invoker = invoker;
 
   final BackendConfig config;
@@ -51,6 +53,7 @@ final class CompanionDependencies {
   final FirebaseTvIdentity? identity;
   final String? remoteUnavailableReason;
   final FirebaseManifestCallableInvoker? _invoker;
+  final PartyJoinClient? partyJoinClient;
 
   /// True when the manifest source is backed by the live callable.
   bool get isLive => remoteUnavailableReason == null;
@@ -80,6 +83,7 @@ final class CompanionDependencies {
     FirebaseBootstrap? firebaseBootstrap,
     FirebaseFunctions? functionsOverride,
     FirebaseManifestCallableInvoker? invokerOverride,
+    PartyJoinCallableInvoker? partyJoinInvokerOverride,
   }) async {
     final BackendConfig resolved = config ?? BackendConfig.unconfigured();
     if (!resolved.isLiveConfigured) {
@@ -93,6 +97,7 @@ final class CompanionDependencies {
         identity: identity,
         remoteUnavailableReason: resolved.error ?? 'backend is not configured',
         invoker: null,
+        partyJoinClient: null,
       );
     }
     if (identity == null) {
@@ -102,19 +107,14 @@ final class CompanionDependencies {
       // each join scopes its own source through [manifestSourceForJoin].
       try {
         await (firebaseBootstrap ?? _initializeFirebase)(resolved);
+        final FirebaseFunctions functions = _configuredFunctions(
+          resolved,
+          functionsOverride,
+        );
         final FirebaseManifestCallableInvoker invoker;
         if (invokerOverride != null) {
           invoker = invokerOverride;
         } else {
-          final FirebaseFunctions functions =
-              functionsOverride ??
-              FirebaseFunctions.instanceFor(region: resolved.functionsRegion);
-          if (resolved.useEmulator) {
-            functions.useFunctionsEmulator(
-              resolved.functionsEmulatorHost,
-              resolved.functionsEmulatorPort!,
-            );
-          }
           invoker = CallableManifestInvoker(functions: functions);
         }
         return CompanionDependencies._(
@@ -123,6 +123,11 @@ final class CompanionDependencies {
           identity: null,
           remoteUnavailableReason: null,
           invoker: invoker,
+          partyJoinClient: PartyJoinClient(
+            invoker:
+                partyJoinInvokerOverride ??
+                CallablePartyJoinInvoker(functions: functions),
+          ),
         );
       } on Object catch (error) {
         final ManifestFailure failure = ManifestFailure.classify(error);
@@ -133,24 +138,20 @@ final class CompanionDependencies {
           remoteUnavailableReason:
               'Firebase could not be initialized: ${failure.message}',
           invoker: null,
+          partyJoinClient: null,
         );
       }
     }
     try {
       await (firebaseBootstrap ?? _initializeFirebase)(resolved);
+      final FirebaseFunctions functions = _configuredFunctions(
+        resolved,
+        functionsOverride,
+      );
       final FirebaseManifestCallableInvoker invoker;
       if (invokerOverride != null) {
         invoker = invokerOverride;
       } else {
-        final FirebaseFunctions functions =
-            functionsOverride ??
-            FirebaseFunctions.instanceFor(region: resolved.functionsRegion);
-        if (resolved.useEmulator) {
-          functions.useFunctionsEmulator(
-            resolved.functionsEmulatorHost,
-            resolved.functionsEmulatorPort!,
-          );
-        }
         invoker = CallableManifestInvoker(functions: functions);
       }
       return CompanionDependencies._(
@@ -162,6 +163,11 @@ final class CompanionDependencies {
         identity: identity,
         remoteUnavailableReason: null,
         invoker: invoker,
+        partyJoinClient: PartyJoinClient(
+          invoker:
+              partyJoinInvokerOverride ??
+              CallablePartyJoinInvoker(functions: functions),
+        ),
       );
     } on Object catch (error) {
       final ManifestFailure failure = ManifestFailure.classify(error);
@@ -172,6 +178,7 @@ final class CompanionDependencies {
         remoteUnavailableReason:
             'Firebase could not be initialized: ${failure.message}',
         invoker: null,
+        partyJoinClient: null,
       );
     }
   }
@@ -180,6 +187,22 @@ final class CompanionDependencies {
     if (Firebase.apps.isEmpty) {
       await Firebase.initializeApp(options: config.firebaseOptions!);
     }
+  }
+
+  static FirebaseFunctions _configuredFunctions(
+    BackendConfig config,
+    FirebaseFunctions? override,
+  ) {
+    final FirebaseFunctions functions =
+        override ??
+        FirebaseFunctions.instanceFor(region: config.functionsRegion);
+    if (config.useEmulator) {
+      functions.useFunctionsEmulator(
+        config.functionsEmulatorHost,
+        config.functionsEmulatorPort!,
+      );
+    }
+    return functions;
   }
 }
 

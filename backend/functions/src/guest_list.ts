@@ -5,7 +5,9 @@ import { BackendError, CurrentManifestInput, parseCurrentManifestInput } from ".
 /** One registered device visible to the TV host panel. */
 export interface GuestCodeEntry {
   deviceId: string;
-  label: string;
+  /** Absent for self-registered guests: readers fall back to a neutral
+   *  device-based display and never duplicate the id as label+value. */
+  label?: string;
   role: string;
   status: string;
 }
@@ -16,6 +18,8 @@ export interface GuestCodeListing {
   channelId: string;
   tvDeviceId: string;
   devices: GuestCodeEntry[];
+  /** Present only when the party has a join PIN configured. */
+  joinPin?: string;
 }
 
 export interface GuestListServiceOptions {
@@ -45,21 +49,31 @@ export function createGuestListService(options: GuestListServiceOptions): {
       const devices: GuestCodeEntry[] = snapshot.docs
         .map((doc) => {
           const data = doc.data() ?? {};
-          return {
-            deviceId: String(data.deviceId ?? doc.id),
-            label: typeof data.label === "string" && data.label ? String(data.label) : String(data.deviceId ?? doc.id),
+          const deviceId = String(data.deviceId ?? doc.id);
+          const rawLabel = data.label;
+          const entry: GuestCodeEntry = {
+            deviceId,
             role: typeof data.role === "string" ? String(data.role) : "unknown",
             status: typeof data.status === "string" ? String(data.status) : "unknown",
           };
+          if (typeof rawLabel === "string" && rawLabel.length > 0) {
+            entry.label = rawLabel;
+          }
+          return entry;
         })
         .filter((entry) => entry.deviceId !== registered.deviceId)
-        .sort((a, b) => a.label.localeCompare(b.label) || a.deviceId.localeCompare(b.deviceId));
-      return {
+        .sort((a, b) => (a.label ?? a.deviceId).localeCompare(b.label ?? b.deviceId) || a.deviceId.localeCompare(b.deviceId));
+      const listing: GuestCodeListing = {
         partyId: registered.partyId,
         channelId: registered.channelId,
         tvDeviceId: registered.deviceId,
         devices,
       };
+      const storedPin = registered.party.joinPin;
+      if (typeof storedPin === "string" && storedPin.length > 0) {
+        listing.joinPin = storedPin;
+      }
+      return listing;
     },
   };
 }

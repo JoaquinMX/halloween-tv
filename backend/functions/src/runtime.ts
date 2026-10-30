@@ -4,6 +4,7 @@ import { createDeliveryServices, DeliveryServiceOptions, GenerationTask } from "
 import { BackendError, DeliveryManifest } from "./contracts";
 import { createGenerationServices, GenerationServiceOptions } from "./generation";
 import { createGuestListService } from "./guest_list";
+import { createJoinPartyService } from "./join_party";
 import { FakeVideoGenerationPort } from "./providers/fake";
 import { CameraId, ProviderResult, VideoGenerationPort } from "./video_generation_port";
 
@@ -35,6 +36,7 @@ export interface RuntimeServices {
   getDeliveryUrls: ReturnType<typeof createDeliveryServices>["getDeliveryUrls"];
   acknowledgeDelivery: ReturnType<typeof createDeliveryServices>["acknowledgeDelivery"];
   listPartyDevices: ReturnType<typeof createGuestListService>["listPartyDevices"];
+  joinParty: ReturnType<typeof createJoinPartyService>["joinParty"];
 }
 
 /**
@@ -60,6 +62,7 @@ export function createRuntimeServices(options: RuntimeServiceOptions): RuntimeSe
     })
     : undefined;
   const guestList = createGuestListService({ db: options.db });
+  const joinPartyService = createJoinPartyService({ db: options.db });
   const delivery = createDeliveryServices({
     db: options.db,
     bucket: options.bucket,
@@ -116,5 +119,6 @@ export function createRuntimeServices(options: RuntimeServiceOptions): RuntimeSe
     getDeliveryUrls: delivery.getDeliveryUrls,
     acknowledgeDelivery: delivery.acknowledgeDelivery,
     listPartyDevices: guestList.listPartyDevices,
+    joinParty: joinPartyService.joinParty,
   };
 }

@@ -82,6 +82,10 @@ export const getCurrentManifest = onCall({ maxInstances: 10 }, (request) =>
 export const listPartyDevices = onCall({ maxInstances: 2 }, (request) =>
   callable(() => services.listPartyDevices(request.data)));
 
+/** Anonymous phone callable; self-registers a guest device for the active channel (PIN-gated when configured). */
+export const joinParty = onCall({ maxInstances: 10 }, (request) =>
+  callable(() => services.joinParty(request.data)));
+
 /** Anonymous TV callable; ACK and purge are idempotent by device/channel/version. */
 export const acknowledgeDelivery = onCall({ maxInstances: 10 }, (request) =>
   callable(() => services.acknowledgeDelivery(request.data)));

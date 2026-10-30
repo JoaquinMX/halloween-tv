@@ -114,6 +114,33 @@ export function parseCurrentManifestInput(value: unknown): CurrentManifestInput 
   return identity;
 }
 
+export interface JoinPartyInput extends Identity {
+  joinPin?: string;
+}
+
+/** Exactly six ASCII digits; leading zeros are significant. */
+export const JOIN_PIN_RE = /^[0-9]{6}$/;
+
+export function parseJoinPartyInput(value: unknown): JoinPartyInput {
+  if (!isRecord(value) || typeof value.partyId !== "string" || !value.partyId ||
+      typeof value.deviceId !== "string" || !value.deviceId) {
+    throw new BackendError("UNAUTHENTICATED", "A registered partyId and deviceId are required.");
+  }
+  const partyId = validateId(value.partyId, "partyId");
+  const deviceId = validateId(value.deviceId, "deviceId");
+  if (typeof value.channelId !== "string" || !value.channelId) {
+    throw new BackendError("INVALID_ARGUMENT", "channelId is required.");
+  }
+  const channelId = validateId(value.channelId, "channelId");
+  if (value.joinPin === undefined) {
+    return { partyId, deviceId, channelId };
+  }
+  if (typeof value.joinPin !== "string" || !JOIN_PIN_RE.test(value.joinPin)) {
+    throw new BackendError("INVALID_ARGUMENT", "joinPin must be six digits.");
+  }
+  return { partyId, deviceId, channelId, joinPin: value.joinPin };
+}
+
 export function validateId(value: unknown, label: string): string {
   if (typeof value !== "string" || !ID_RE.test(value)) {
     throw new BackendError("INVALID_ARGUMENT", `${label} is invalid.`);

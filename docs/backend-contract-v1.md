@@ -73,6 +73,60 @@ prefixes are worker-internal. Lifecycle TTL (`storage.lifecycle.json`,
   expiry or a newer manifest publication. A conflicting hash is rejected;
   objects belonging to a newer version are never purged by an older ACK.
 
+## QR join (PIN-gated self-registration)
+
+Anonymous by default: no Firebase Auth, no names, no emails. The TV renders a
+session QR; the companion scans it (or pastes the same JSON) and self-registers
+through the `joinParty` callable, which writes the guest device doc with the
+Admin SDK. Direct client device writes stay denied by `firestore.rules`.
+
+- Session QR JSON (TV display, companion parse): an object with EXACTLY these
+  keys: `{ "partyId": string, "channelId": string }` plus OPTIONAL
+  `"joinPin"`: exactly six ASCII digits as a string (leading zeros significant,
+  e.g. `"004201"`). NEVER a deviceId, URL, or secret. Extra keys in
+  scanned/pasted input are ignored.
+- `joinParty { partyId, deviceId, channelId, joinPin? }` →
+  `{ partyId, deviceId, channelId, role: "guest", status: "active", created }`.
+  `deviceId` is the phone-generated installation ID (below). `created` is true
+  on first registration and false on rejoin; rejoin never rewrites the stored
+  doc. The PIN is never echoed in the response.
+- `joinParty` failures use `BackendError` codes (same callable `details`
+  mapping as above): `FORBIDDEN` (unknown/inactive party, channel
+  mismatch/inactive, wrong/missing PIN when configured, deviceId colliding
+  with a tv-role or mismatched doc), `UNAUTHENTICATED` (missing
+  party/device), `INVALID_ARGUMENT` (malformed ids or PIN shape).
+- `listPartyDevices` (TV-only caller, unchanged gate `device.role === "tv"`;
+  guests get `FORBIDDEN`) response gains OPTIONAL `"joinPin"` (string when a
+  PIN is configured, absent otherwise). Device entries are
+  `{ deviceId, label?, role, status }`; `label` may be absent or empty for
+  self-registered guests — readers must fall back to a neutral device-based
+  display, never duplicate the id as label+value, never prompt for names.
+  Device `label` is reserved for later: omit it on create, tolerate
+  absent/empty on read, never require it.
+- PIN provisioning: `backend/functions/tools/seed_join.ts` merges `joinPin`
+  onto the existing party doc after validating the ACTIVE party, channel
+  (`== activeChannelId`), and TV registration. Explicit `--join-pin=NNNNNN`
+  (six digits, leading zeros preserved); preview by default, `--apply` for
+  writes; repeated identical provisioning is idempotent, omitting `--join-pin`
+  leaves an existing PIN untouched. Creates NO guest devices, collects NO
+  labels, uploads NO media, calls NO providers. Target guards mirror
+  `seed_guests.ts` (`--target=emulator|cloud`, explicit `--project` for cloud,
+  operator ADC, no service-account keys).
+- Phone installation-ID lifetime (companion): `"p-"` + 32 lowercase hex chars
+  from 128 bits of `Random.secure` entropy, persisted under one app-wide
+  `SharedPreferences` key and reused across launches, retries, leave, and
+  party changes. Corrupt stored values are replaced and re-persisted;
+  persistence/entropy failure surfaces retry and never proceeds unpersisted.
+- Camera deferral (companion): camera permission is requested only when the
+  user explicitly starts a scan, never at launch; paste remains available
+  without camera access.
+- Migration away from typed guest codes: new parties use QR + PIN
+  self-registration. The typed-code path (`tools/guest_codes.ts`,
+  `tools/seed_guests.ts`, verbal dictation via `listPartyDevices`) is
+  unchanged and stays working — pre-seeded legacy guests (labelled device
+  docs) still read the current manifest via `getCurrentManifest` — but the
+  updated companion no longer prompts for typed codes.
+
 ## Budget guards
 
 - Max 1 generation in flight per party (`BUDGET_EXCEEDED` otherwise).
@@ -128,8 +182,12 @@ credential setup are outside this contract change.
 `backend_contract_fixture.test.ts` (shared JSON fixture through parsing, hashing,
 callable service paths, delivery, and ACK), `runtime.test.ts` (disabled default,
 queue failure, and fake four-camera generation through handler composition),
-`security_rules.test.ts` (party/device-scoped registration reads and denied
-manifest reads), `delivery.test.ts` (URL scoping, manifest callable, ACK hash
+`security_rules.test.ts` (party/device-scoped registration reads, denied client
+registration writes, denied device listing and party/PIN reads, denied manifest
+reads), `seed_join.test.ts` (PIN provisioning preview/apply/idempotency/omit and
+refusal paths against the emulator), `qr_join_e2e.test.ts` (PIN-gated join,
+rejoin, TV listing, and legacy manifest read through the real exported Functions
+emulator endpoints with no auth), `delivery.test.ts` (URL scoping, manifest callable, ACK hash
 checks, bounded retry purge), and `retention.test.ts` (TTL transitions, orphan
 sweeper). Emulator-backed cases skip when `FIRESTORE_EMULATOR_HOST` is unset;
 run `npm run test:emulator` (project `demo-halloween-tv`) for the full suite.
