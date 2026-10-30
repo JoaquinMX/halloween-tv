@@ -57,3 +57,69 @@ with party/TV-device/channel IDs returned manifest v1, 4 clips
 - Docker daemon on the Mac mini never answered (`docker ps` hung) — not
   needed for this rehearsal, but Linux runtime prep stays blocked until it
   recovers.
+
+## 5. TV diagnosis — baked channel vs seeded channel (root cause of offline wall)
+
+- First live TV build (party `rehearsal-7ecd…`) booted to the verified offline
+  wall; recovery panel said "Wall running on local fixtures" and the guest
+  panel failed with "unexpected guest list failure".
+- Cause: the TV hardcodes channel `haunted_surveillance`
+  (`packages/channel_cctv/lib/src/plugin.dart`), but the cycle-9 party's
+  ACTIVE channel is the generated `haunt-7c9acf9c4e747858da9c`. Server
+  (`auth.ts`) requires `activeChannelId === channelId`, so every TV-identity
+  call with `haunted_surveillance` was rejected. The TV live path fails
+  closed to the offline wall by design — no crash, no fabricated state.
+- Fix within approved tooling: seeded a NEW party whose active channel IS
+  `haunted_surveillance` (new `seed_pilot cloud --apply`, no provider calls):
+  party `rehearsal-e845ecefdcd7a7e047c607a5`, TV
+  `tv-a0d4693b89d085d0b48c`, channel `haunted_surveillance`, manifest v1
+  (same 4 fixture hashes), expires 2026-10-31T21:14:02Z. Then
+  `seed_guests cloud --count=6 --apply` for the host sheet:
+  g-ce554d87f04385e2, g-a8d2618b18492d9e, g-e9efd5d907c3abd0,
+  g-cd96fe3c1a61e80b, g-06f9e6b8596681f2, g-a9516bb56cc6c0b2.
+
+## 6. TV live install + host panel — PASS (Canvas TV 192.168.1.19, adb network)
+
+- Rebuilt TV live APK with `TV_PARTY_ID=rehearsal-e845ecefdcd7a7e047c607a5`
+  (50,015,XXX bytes, sha256 69ef1abbb460b18289eb60130a3ebbfe05ef6c81cdc624115;
+  party string confirmed in lib/arm64-v8a/libapp.so). Uninstalled the stale
+  debug-signed build, installed release, confirmed via `adb devices`.
+- TV boots the 2x2 wall (Evidence: `tv-wall.png`). Guest codes panel shows
+  the TV code, `party rehearsal-e845… · haunted_surveillance · no PIN
+  required`, a session QR, and the 6 seeded guests
+  (Evidence: `tv-guest-codes-qr.png`).
+- Phone rejoined the NEW party via retyped codes: join accepted, Now playing
+  shows manifest v1 published 2026-10-30T21:14:04Z + 4 cameras
+  (Evidence: `phone-new-party-lineup.png`).
+- TV guest list then shows all 6 seeded guests PLUS the phone as
+  "Guest device: p-2f47257f15aebbedd1cc134cb647c7c8"
+  (Evidence: `tv-guest-list-with-phone.png`). Full join→host-panel loop
+  proven live on hardware.
+
+## 7. BLOCKER — `getDeliveryUrls` 500s, wall stays on local fixtures
+
+- The TV polls `getDeliveryUrls` every few seconds (userAgent okhttp in cloud
+  logs); each returns HTTP 500 `INTERNAL`. `getCurrentManifest`,
+  `joinParty`, and `listPartyDevices` all work — only the signed-URL step
+  fails. Per `delivery.ts`, INTERNAL here can only come from `signReadUrl`
+  (`file.getSignedUrl` v4) throwing.
+- IAM read-back: the functions runtime SA
+  `897751802522-compute@developer.gserviceaccount.com` has ZERO bindings on
+  itself — no `roles/iam.serviceAccountTokenCreator`, so v4 signing cannot
+  work. This was never exercised before: cycle-7/9 only tested validation
+  paths (FORBIDDEN/INVALID_ARGUMENT), never a successful delivery URL.
+- Needed Joaquin/owner console-or-gcloud one-liner (IAM change, outside the
+  seeding-only approval, so NOT applied here):
+  `gcloud iam service-accounts add-iam-policy-binding 897751802522-compute@developer.gserviceaccount.com --member=serviceAccount:897751802522-compute@developer.gserviceaccount.com --role=roles/iam.serviceAccountTokenCreator --project=halloween-tv`
+- Wi-Fi-kill cached-playback test NOT run: with the wall on bundled fixtures
+  (not cached cloud clips) the test would be misleading, and the resync half
+  cannot succeed until delivery URLs mint. Run it right after the IAM grant
+  when the wall shows the live session.
+
+## Open questions
+
+- Same as §4 + the IAM grant above. After the grant: re-run TV wall check,
+  then Wi-Fi kill/resync, then close out.
+- gcloud CLI user auth on the Mac mini is expired (`invalid_grant`); ADC file
+  (refreshed 14:08 today) still works for tools + read-only REST. Joaquin
+  may want to `gcloud auth login` at some point.
