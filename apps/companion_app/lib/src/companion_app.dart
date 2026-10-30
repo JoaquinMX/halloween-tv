@@ -33,6 +33,7 @@ import 'package:companion_app/src/data/party_join_client.dart';
 import 'package:companion_app/src/join/guest_join_data.dart';
 import 'package:companion_app/src/session/guest_session.dart';
 import 'package:companion_app/src/session/guest_session_state.dart';
+import 'package:companion_app/src/join/join_payload_scanner.dart';
 import 'package:companion_app/src/ui/join_screen.dart';
 import 'package:companion_app/src/ui/now_playing_screen.dart';
 import 'package:core_foundation/core_foundation.dart' show Clock, SystemClock;
@@ -240,6 +241,7 @@ final class _CompanionAppState extends State<CompanionApp>
       return JoinScreen(
         onJoin: _handleJoin,
         configurationIssue: _unavailableReason,
+        scanner: CameraJoinPayloadScanner(contextOf: () => context),
       );
     }
     final GuestSessionState snapshot = session.state;
@@ -247,6 +249,7 @@ final class _CompanionAppState extends State<CompanionApp>
       return JoinScreen(
         onJoin: _handleJoin,
         configurationIssue: _unavailableReason,
+        scanner: CameraJoinPayloadScanner(contextOf: () => context),
       );
     }
     return NowPlayingScreen(

@@ -50,6 +50,11 @@ final class _JoinScreenState extends State<JoinScreen> {
       final result = await widget.scanner.scan();
       if (!mounted) return;
       if (result case JoinPayloadText(:final text)) { setState(() => _payload.text = text); await _submit(); }
+      else if (result case JoinPayloadPermissionDenied(:final permanently)) {
+        setState(() => _error = permanently
+          ? 'Camera access is off. Allow camera access in Settings to scan QR codes, or paste the join data instead.'
+          : 'Camera permission is needed to scan QR codes. Allow access and try again, or paste the join data instead.');
+      }
       else { setState(() => _error = 'Scanner is unavailable on this device.'); }
     } finally {
       if (mounted) setState(() => _scanning = false);

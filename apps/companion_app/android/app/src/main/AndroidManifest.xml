@@ -1,6 +1,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- Guest app talks to Firebase / emulator endpoints over the network. -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- QR join-code scanning (mobile_scanner). Runtime permission is requested in-app. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
     <application
         android:label="Halloween TV - Guests"
         android:name="${applicationName}"

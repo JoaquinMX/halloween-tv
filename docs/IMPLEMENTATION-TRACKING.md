@@ -62,6 +62,23 @@ Test success does not change deployment, device, or live-spend statuses above.
 - Orchestrator-fixed defects (with tests): boot prepare-before-activate order; `fileExists` seam + setUpAll file setup (real dart:io hangs in testWidgets FakeAsync zone); serial emulator suite + shared-emulator count assertion; operator seed ACK ordering per persisted-ACK contract.
 - Emulator suite must stay serial (`--test-concurrency=1`): parallel files sharing one emulator raced the TTL sweeper against generation staging.
 
+## Cycle-8: QR join + camera scanning (branch `orchestrator-cycle-8-qr-join`, 2026-10-30)
+
+- Cycle-7 scope carried over: QR-join (phone-generated device ID + server first-join registration) landed as p1–p5 plus 4 review-findings batches on this branch.
+- Camera scanning implemented on top: `mobile_scanner ^7.4.2` + `permission_handler ^13.0.2` (both maintained); `CameraJoinPayloadScanner` (permission check → request → graceful denial, cancelled scan falls back to type-or-paste); `QrScanScreen` full-screen capture whose text reuses `parseGuestJoinPayload` validation and the existing first-join registration/error states. Android `CAMERA` permission + iOS `NSCameraUsageDescription` added.
+- Evidence: `flutter analyze` clean; companion suite 90/90 pass, including new `test/camera_join_scan_test.dart` (faked-scanner submit through shared validation, scanned-garbage parse error, denial + permanent-denial messages, paste-still-works-after-denial, scanner-unit denial paths with no double-prompt). Granted-camera live capture is NOT covered by widget tests — needs physical-device proof.
+- Harness planning/coding/review cycle was not executed through `harness-run.sh` (no harness tooling in this checkout and no billable generation calls allowed); implemented directly with tests as evidence instead.
+- Rehearsal party seeding (cloud `halloween-tv`): PREPARED but BLOCKED — operator ADC expired (`gcloud auth application-default` invalid_grant; even read-only seed preview needs ADC). IDs generated and ready: party `rehearsal-694fea0caf4fe874a28a5d37`, channel `haunt-5ee7e75a2c3c0c0765a969c8`, TV device `tv-038cfd269aa25ff59b32cd9d`; guest codes via generated `--count`. Exact commands recorded in the cycle report; Joaquin must run `gcloud auth application-default login` first.
+
+## Owner decisions 2026-10-30 (rehearsal + QR scanning)
+
+- PIN brute-force risk accepted for one night; no lockout.
+- Guest cap and stale-entry removal deferred.
+- Camera scanning approved and being implemented (this cycle).
+- Companion display name: Halloween TV - Guests (confirmed; already the Android label and CFBundleDisplayName).
+- Emulator by default; the TV and physical device 9A291FFBA00654 may be used for proof.
+- No billable generation calls. Seeding only (no provider invocation).
+
 ## Owner decisions 2026-10-30 (Firebase live, companion, distribution)
 
 - Firebase project `halloween-tv` created by Joaquin; firebase + flutterfire CLIs installed. Remaining: flutterfire configure wiring, `.firebaserc` alias, deploy rules/indexes/storage/functions to the real project, switch live `--dart-define` build flags from emulator to the real project, verify with a cheap read-only callable check. No billable generation without explicit action. Ask Joaquin for help when blocked (logins, console steps).
