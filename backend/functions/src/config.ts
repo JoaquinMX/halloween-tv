@@ -4,6 +4,11 @@ export const DELIVERY_URL_TTL_SECONDS = 15 * 60;
 export const MEDIA_RETENTION_MS = 24 * 60 * 60 * 1000;
 export const REQUIRED_CAMERA_IDS = ["CAM-01", "CAM-02", "CAM-03", "CAM-04"] as const;
 
+/** Generation is inert unless an operator explicitly opts in. */
+export function isGenerationEnabled(environment: NodeJS.ProcessEnv = process.env): boolean {
+  return environment.GENERATION_ENABLED === "true";
+}
+
 export const CHEAP_DEMO_PRESET = Object.freeze({
   presetId: "cheap_demo" as const,
   modelId: "wan3.0-video" as const,

@@ -6,10 +6,12 @@ import {
   ackIdempotencyKey,
   BackendError,
   CanonicalClip,
+  CurrentManifestInput,
   DeliveryManifest,
   Identity,
   canonicalManifestHash,
   parseAck,
+  parseCurrentManifestInput,
   parseRequestGeneration,
   RequestGenerationInput,
   requireIdentity,
@@ -46,6 +48,7 @@ export interface DeliveryServiceOptions {
   enqueueGeneration?: (task: GenerationTask) => Promise<void>;
   generationRunner?: (job: FirebaseFirestore.DocumentData) => Promise<void>;
   signReadUrl?: (file: File, expiresAt: Date) => Promise<string>;
+  deleteDeliveryObject?: (file: File) => Promise<void>;
   now?: () => Date;
 }
 
@@ -54,8 +57,14 @@ export interface DeliveryServices {
   runGeneration(task: GenerationTask): Promise<{ jobId: string; state: string }>;
   normalizeAndStage(jobId: string, clips: GeneratedClipInput[]): Promise<DeliveryManifest>;
   publishManifest(jobId: string, idempotencyKey: string): Promise<DeliveryManifest>;
+  getCurrentManifest(value: unknown): Promise<SerializedDeliveryManifest>;
   getDeliveryUrls(value: unknown): Promise<{ manifestVersion: number; manifestHash: string; clips: Array<{ cameraId: string; sha256: string; url: string; expiresAt: string }> }>;
   acknowledgeDelivery(value: unknown): Promise<{ ackId: string; manifestVersion: number; purged: boolean }>;
+}
+
+export interface SerializedDeliveryManifest extends Omit<DeliveryManifest, "cameraClips" | "createdAt"> {
+  cameraClips: Array<Pick<CanonicalClip, "cameraId" | "objectPath" | "sha256" | "sizeBytes" | "durationMs" | "expiresAt">>;
+  createdAt: string;
 }
 
 const defaultRunner = async (): Promise<void> => {
@@ -88,11 +97,48 @@ function validateDeliveryPath(clip: CanonicalClip, partyId: string, channelId: s
 function manifestFrom(data: FirebaseFirestore.DocumentData | undefined): DeliveryManifest {
   if (!data || !Number.isSafeInteger(data.version) || data.version < 1 ||
       typeof data.partyId !== "string" || typeof data.channelId !== "string" || typeof data.jobId !== "string" ||
-      typeof data.expiresAt !== "string") {
+      !Number.isSafeInteger(data.schemaVersion) || Number(data.schemaVersion) !== SCHEMA_VERSION ||
+      typeof data.expiresAt !== "string" || !Number.isFinite(Date.parse(data.expiresAt))) {
     throw new BackendError("MANIFEST_MISMATCH", "Current manifest is missing or malformed.");
   }
   validateCanonicalClips(data.cameraClips);
   return data as DeliveryManifest;
+}
+
+function timestampIso(value: unknown): string {
+  let date: Date | undefined;
+  if (value instanceof Date) date = value;
+  else if (value && typeof value === "object" && "toDate" in value && typeof (value as { toDate?: unknown }).toDate === "function") {
+    date = (value as { toDate: () => Date }).toDate();
+  } else if (typeof value === "string") {
+    const milliseconds = Date.parse(value);
+    if (Number.isFinite(milliseconds)) date = new Date(milliseconds);
+  }
+  if (!date || !Number.isFinite(date.getTime())) {
+    throw new BackendError("MANIFEST_MISMATCH", "Published manifest timestamp is missing or malformed.");
+  }
+  return date.toISOString();
+}
+
+function serializeManifest(manifest: DeliveryManifest): SerializedDeliveryManifest {
+  for (const clip of manifest.cameraClips) validateDeliveryPath(clip, manifest.partyId, manifest.channelId, manifest.version);
+  return {
+    partyId: manifest.partyId,
+    channelId: manifest.channelId,
+    version: manifest.version,
+    schemaVersion: manifest.schemaVersion,
+    jobId: manifest.jobId,
+    cameraClips: manifest.cameraClips.map((clip) => ({
+      cameraId: clip.cameraId,
+      objectPath: clip.objectPath,
+      sha256: clip.sha256,
+      sizeBytes: clip.sizeBytes,
+      durationMs: clip.durationMs,
+      expiresAt: new Date(Date.parse(clip.expiresAt)).toISOString(),
+    })),
+    createdAt: timestampIso(manifest.createdAt),
+    expiresAt: new Date(Date.parse(manifest.expiresAt)).toISOString(),
+  };
 }
 
 function canonicalClipsMatch(manifest: DeliveryManifest, ack: AckInput): void {
@@ -115,6 +161,9 @@ export function createDeliveryServices(options: DeliveryServiceOptions): Deliver
   const signReadUrl = options.signReadUrl ?? (async (file, expiresAt) => {
     const [url] = await file.getSignedUrl({ action: "read", expires: expiresAt, version: "v4" });
     return url;
+  });
+  const deleteDeliveryObject = options.deleteDeliveryObject ?? (async (file) => {
+    await file.delete({ ignoreNotFound: true });
   });
 
   async function requestGeneration(value: unknown) {
@@ -331,45 +380,61 @@ export function createDeliveryServices(options: DeliveryServiceOptions): Deliver
     return { manifestVersion: manifest.version, manifestHash, clips };
   }
 
+  async function getCurrentManifest(value: unknown): Promise<SerializedDeliveryManifest> {
+    const input: CurrentManifestInput = parseCurrentManifestInput(value);
+    const registered = await assertRegisteredPartyDevice(db, input);
+    if (registered.channel.status !== "active") throw new BackendError("FORBIDDEN", "Channel is not active for this party.");
+    const snapshot = await manifestRef(db, registered.partyId, registered.channelId).get();
+    if (!snapshot.exists) throw new BackendError("NOT_FOUND", "Current manifest does not exist.");
+    const manifest = manifestFrom(snapshot.data());
+    if (manifest.partyId !== registered.partyId || manifest.channelId !== registered.channelId) {
+      throw new BackendError("MANIFEST_MISMATCH", "Current manifest is outside the registered party and channel.");
+    }
+    return serializeManifest(manifest);
+  }
+
   async function acknowledgeDelivery(value: unknown) {
     const ack = parseAck(value);
     await assertRegisteredPartyDevice(db, ack);
     const mRef = manifestRef(db, ack.partyId, ack.channelId);
-    const manifest = manifestFrom((await mRef.get()).data());
-    canonicalClipsMatch(manifest, ack);
-    const currentTime = now().getTime();
-    if (Date.parse(manifest.expiresAt) <= currentTime || manifest.cameraClips.some((clip) => Date.parse(clip.expiresAt) <= currentTime)) {
-      throw new BackendError("CLIP_EXPIRED", "Cannot acknowledge an expired manifest.");
-    }
     const idem = ackIdempotencyKey(ack.deviceId, ack.channelId, ack.manifestVersion);
     const ackId = idem;
     const ackRef = db.doc(`parties/${ack.partyId}/deliveryAcks/${ackId}`);
-    const relatedJobRef = jobRef(db, ack.partyId, manifest.jobId);
-    await db.runTransaction(async (transaction) => {
-      // Firestore requires all transaction reads before any writes.
-      const [existing, relatedJob] = await Promise.all([
-        transaction.get(ackRef),
-        transaction.get(relatedJobRef),
-      ]);
-      if (!existing.exists) {
-        transaction.create(ackRef, {
-          ackId,
-          partyId: ack.partyId,
-          deviceId: ack.deviceId,
-          channelId: ack.channelId,
-          manifestVersion: ack.manifestVersion,
-          manifestHash: canonicalManifestHash(manifest),
-          clipHashes: ack.clipHashes,
-          timestamp: FieldValue.serverTimestamp(),
-          idempotencyKey: idem,
-        });
+    const accepted = await db.runTransaction(async (transaction) => {
+      const existing = await transaction.get(ackRef);
+      if (existing.exists) return validateAcceptedAck(existing.data(), ack, ackId, idem);
+
+      const current = await transaction.get(mRef);
+      const manifest = manifestFrom(current.data());
+      canonicalClipsMatch(manifest, ack);
+      const currentTime = now().getTime();
+      if (Date.parse(manifest.expiresAt) <= currentTime || manifest.cameraClips.some((clip) => Date.parse(clip.expiresAt) <= currentTime)) {
+        throw new BackendError("CLIP_EXPIRED", "Cannot acknowledge an expired manifest.");
       }
+      const relatedJobRef = jobRef(db, ack.partyId, manifest.jobId);
+      const relatedJob = await transaction.get(relatedJobRef);
+      const acceptedAck = {
+        ackId,
+        partyId: ack.partyId,
+        deviceId: ack.deviceId,
+        channelId: ack.channelId,
+        manifestVersion: ack.manifestVersion,
+        manifestHash: canonicalManifestHash(manifest),
+        clipHashes: ack.clipHashes,
+        jobId: manifest.jobId,
+        clips: manifest.cameraClips.map(({ cameraId, objectPath, sha256 }) => ({ cameraId, objectPath, sha256 })),
+        timestamp: FieldValue.serverTimestamp(),
+        idempotencyKey: idem,
+      };
+      transaction.create(ackRef, acceptedAck);
       if (relatedJob.exists && ["ready", "delivering"].includes(String(relatedJob.data()?.state))) {
         transaction.update(relatedJobRef, { state: "delivering", deliveryAckId: ackId, timestamp: FieldValue.serverTimestamp() });
       }
+      return validateAcceptedAck(acceptedAck, ack, ackId, idem);
     });
+    const relatedJobRef = jobRef(db, ack.partyId, accepted.jobId);
     // ACK is idempotent. Repeating it safely retries object deletion after partial failures.
-    await Promise.all(manifest.cameraClips.map((clip) => bucket.file(clip.objectPath).delete({ ignoreNotFound: true })));
+    await Promise.all(accepted.clips.map((clip) => deleteDeliveryObject(bucket.file(clip.objectPath))));
     await db.runTransaction(async (transaction) => {
       const relatedJob = await transaction.get(relatedJobRef);
       if (relatedJob.exists && relatedJob.data()?.deliveryAckId === ackId) {
@@ -379,6 +444,50 @@ export function createDeliveryServices(options: DeliveryServiceOptions): Deliver
     return { ackId, manifestVersion: ack.manifestVersion, purged: true };
   }
 
-  return { requestGeneration, runGeneration, normalizeAndStage, publishManifest, getDeliveryUrls, acknowledgeDelivery };
+  return { requestGeneration, runGeneration, normalizeAndStage, publishManifest, getCurrentManifest, getDeliveryUrls, acknowledgeDelivery };
+}
+
+interface AcceptedAckClip {
+  cameraId: (typeof REQUIRED_CAMERA_IDS)[number];
+  objectPath: string;
+  sha256: string;
+}
+
+interface ValidatedAcceptedAck {
+  jobId: string;
+  clips: AcceptedAckClip[];
+}
+
+function validateAcceptedAck(
+  value: FirebaseFirestore.DocumentData | Record<string, unknown> | undefined,
+  ack: AckInput,
+  ackId: string,
+  idempotencyKey: string,
+): ValidatedAcceptedAck {
+  const mismatch = (): never => { throw new BackendError("MANIFEST_MISMATCH", "ACK conflicts with the previously accepted delivery ACK."); };
+  if (!value || value.ackId !== ackId || value.partyId !== ack.partyId || value.deviceId !== ack.deviceId ||
+      value.channelId !== ack.channelId || value.manifestVersion !== ack.manifestVersion ||
+      value.idempotencyKey !== idempotencyKey || !/^[a-f0-9]{64}$/.test(String(value.manifestHash ?? "")) ||
+      typeof value.jobId !== "string" || !Array.isArray(value.clips) || value.clips.length !== REQUIRED_CAMERA_IDS.length ||
+      !value.clipHashes || typeof value.clipHashes !== "object" || Array.isArray(value.clipHashes) ||
+      Object.keys(value.clipHashes).sort().join(",") !== [...REQUIRED_CAMERA_IDS].sort().join(",") ||
+      !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value.jobId)) return mismatch();
+  for (const cameraId of REQUIRED_CAMERA_IDS) {
+    if ((value.clipHashes as Record<string, unknown>)[cameraId] !== ack.clipHashes[cameraId]) return mismatch();
+  }
+  const byCamera = new Map<string, AcceptedAckClip>();
+  for (const raw of value.clips) {
+    if (!raw || typeof raw !== "object") return mismatch();
+    const clip = raw as Record<string, unknown>;
+    if (typeof clip.cameraId !== "string" || !REQUIRED_CAMERA_IDS.includes(clip.cameraId as AcceptedAckClip["cameraId"]) ||
+        typeof clip.objectPath !== "string" || typeof clip.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(clip.sha256) ||
+        byCamera.has(clip.cameraId)) return mismatch();
+    const cameraId = clip.cameraId as AcceptedAckClip["cameraId"];
+    if (clip.objectPath !== deliveryObjectPath(ack.partyId, ack.channelId, ack.manifestVersion, cameraId) ||
+        clip.sha256 !== ack.clipHashes[cameraId]) return mismatch();
+    byCamera.set(cameraId, { cameraId, objectPath: clip.objectPath, sha256: clip.sha256 });
+  }
+  if (REQUIRED_CAMERA_IDS.some((cameraId) => !byCamera.has(cameraId))) return mismatch();
+  return { jobId: String(value.jobId), clips: REQUIRED_CAMERA_IDS.map((cameraId) => byCamera.get(cameraId)!) };
 }
 

@@ -201,6 +201,38 @@ export class FirestoreGenerationStore {
     };
   }
 
+  /** Records a task queue failure without allowing the worker to auto-retry it. */
+  async failEnqueue(task: GenerationTask): Promise<void> {
+    const ref = jobRef(this.db, task.partyId, task.jobId);
+    const budget = budgetRef(this.db, task.partyId);
+    await this.db.runTransaction(async (transaction) => {
+      const [snapshot, budgetSnapshot] = await Promise.all([transaction.get(ref), transaction.get(budget)]);
+      if (!snapshot.exists) throw new BackendError("NOT_FOUND", "Generation job does not exist.");
+      const job = snapshot.data()!;
+      if (job.idempotencyKey !== task.idempotencyKey || job.deviceId !== task.deviceId || job.channelId !== task.channelId) {
+        throw new BackendError("FORBIDDEN", "Task identity does not match the job.");
+      }
+      const timestamp = FieldValue.serverTimestamp();
+      if (job.state === "queued") {
+        transaction.update(ref, {
+          state: "failed",
+          status: "failed",
+          errorCode: "PROVIDER_UNAVAILABLE",
+          enqueueFailedAt: timestamp,
+          failedAt: timestamp,
+          timestamp,
+        });
+        if (budgetSnapshot.exists && budgetSnapshot.data()?.activeJobId === task.jobId) {
+          transaction.update(budget, { activeJobId: null, state: "idle", updatedAt: timestamp });
+        }
+      } else {
+        // A queue response can be lost after acceptance. Preserve a worker that
+        // already claimed the job, while keeping the ambiguous enqueue visible.
+        transaction.update(ref, { enqueueErrorCode: "PROVIDER_UNAVAILABLE", enqueueFailedAt: timestamp, timestamp });
+      }
+    });
+  }
+
   async claimWorker(task: GenerationTask, leaseMs = 20 * 60 * 1000): Promise<{ claimed: boolean; job: FirebaseFirestore.DocumentData }> {
     const ref = jobRef(this.db, task.partyId, task.jobId);
     return this.db.runTransaction(async (transaction) => {

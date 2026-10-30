@@ -1,1 +1,225 @@
-{"ack":{"channelId":"main","clipHashes":{"CAM-01":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","CAM-02":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","CAM-03":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","CAM-04":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},"deviceId":"tv-pilot","manifestVersion":1,"partyId":"pilot"},"cheapDemoPreset":{"aspectRatio":"16:9","audio":false,"autoUpscale":false,"modelId":"wan3.0-video","outputs":1,"presetId":"cheap_demo","region":"singapore","resolution":"480P","secondsOut":2},"costLogFields":["model_id","preset_id","seconds_out","seconds_in","credits_charged","provider_task_id","created_at","success","partyId","deviceId","channelId","manifestVersion","timestamp","idempotencyKey"],"deliveryUrlsResponse":{"clips":[{"cameraId":"CAM-01","expiresAt":"<iso8601>","sha256":"<hex64>","url":"<signed-v4-read-url>"}],"manifestHash":"<hex64>","manifestVersion":1},"errorCodes":["UNAUTHENTICATED","FORBIDDEN","MANIFEST_MISMATCH","CLIP_EXPIRED","PROVIDER_UNAVAILABLE","BUDGET_EXCEEDED","INVALID_ARGUMENT","NOT_FOUND","INTERNAL"],"jobStates":["queued","running","ready","delivering","purged","failed","expired"],"manifest":{"cameraClips":[{"cameraId":"CAM-01","durationMs":2000,"expiresAt":"<iso8601>","objectPath":"parties/pilot/channels/main/delivery/1/CAM-01.mp4","sha256":"<hex64>","sizeBytes":12345}],"channelId":"main","expiresAt":"<iso8601>","jobId":"job-1","partyId":"pilot","schemaVersion":1,"version":1},"requestGeneration":{"channelId":"main","deviceId":"tv-pilot","idempotencyKey":"job-1","jobId":"job-1","partyId":"pilot","presetId":"cheap_demo"},"services":["requestGeneration","runGeneration","normalizeAndStage","publishManifest","getDeliveryUrls","acknowledgeDelivery","sweepExpiredMedia"]}
+{
+  "schemaVersion": 1,
+  "canonicalManifestHash": "c3114a6601be504d1be045749e00512bc249aa70ca365b804e26695d94265692",
+  "acknowledgeDelivery": {
+    "request": {
+      "partyId": "pilot",
+      "deviceId": "tv-pilot",
+      "channelId": "main",
+      "manifestVersion": 1,
+      "clipHashes": {
+        "CAM-01": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "CAM-02": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "CAM-03": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "CAM-04": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      }
+    },
+    "response": {
+      "ackId": "47aa92e83cf6a4e3cf5ad02a1421357fc29f4fb236f415553e3f6bc8594b1541",
+      "manifestVersion": 1,
+      "purged": true
+    }
+  },
+  "cheapDemoPreset": {
+    "aspectRatio": "16:9",
+    "audio": false,
+    "autoUpscale": false,
+    "modelId": "wan3.0-video",
+    "outputs": 1,
+    "presetId": "cheap_demo",
+    "region": "singapore",
+    "resolution": "480P",
+    "secondsOut": 2
+  },
+  "costLogFields": [
+    "model_id",
+    "preset_id",
+    "seconds_out",
+    "seconds_in",
+    "credits_charged",
+    "provider_task_id",
+    "created_at",
+    "success",
+    "partyId",
+    "deviceId",
+    "channelId",
+    "manifestVersion",
+    "timestamp",
+    "idempotencyKey"
+  ],
+  "deliveryUrls": {
+    "request": {
+      "partyId": "pilot",
+      "deviceId": "tv-pilot",
+      "channelId": "main"
+    },
+    "response": {
+      "manifestHash": "c3114a6601be504d1be045749e00512bc249aa70ca365b804e26695d94265692",
+      "manifestVersion": 1,
+      "clips": [
+        {
+          "cameraId": "CAM-01",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "url": "<signed-v4-read-url>",
+          "expiresAt": "2026-10-29T15:15:00.000Z"
+        },
+        {
+          "cameraId": "CAM-02",
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "url": "<signed-v4-read-url>",
+          "expiresAt": "2026-10-29T15:15:00.000Z"
+        },
+        {
+          "cameraId": "CAM-03",
+          "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "url": "<signed-v4-read-url>",
+          "expiresAt": "2026-10-29T15:15:00.000Z"
+        },
+        {
+          "cameraId": "CAM-04",
+          "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "url": "<signed-v4-read-url>",
+          "expiresAt": "2026-10-29T15:15:00.000Z"
+        }
+      ]
+    }
+  },
+  "errorCodes": [
+    "UNAUTHENTICATED",
+    "FORBIDDEN",
+    "MANIFEST_MISMATCH",
+    "CLIP_EXPIRED",
+    "PROVIDER_UNAVAILABLE",
+    "BUDGET_EXCEEDED",
+    "INVALID_ARGUMENT",
+    "NOT_FOUND",
+    "INTERNAL"
+  ],
+  "jobStates": [
+    "queued",
+    "running",
+    "ready",
+    "delivering",
+    "purged",
+    "failed",
+    "expired"
+  ],
+  "manifest": {
+    "partyId": "pilot",
+    "channelId": "main",
+    "version": 1,
+    "schemaVersion": 1,
+    "jobId": "job-1",
+    "cameraClips": [
+      {
+        "cameraId": "CAM-01",
+        "durationMs": 2000,
+        "expiresAt": "2026-11-29T15:00:00.000Z",
+        "objectPath": "parties/pilot/channels/main/delivery/1/CAM-01.mp4",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "sizeBytes": 12345
+      },
+      {
+        "cameraId": "CAM-02",
+        "durationMs": 2000,
+        "expiresAt": "2026-11-29T15:00:00.000Z",
+        "objectPath": "parties/pilot/channels/main/delivery/1/CAM-02.mp4",
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "sizeBytes": 12346
+      },
+      {
+        "cameraId": "CAM-03",
+        "durationMs": 2000,
+        "expiresAt": "2026-11-29T15:00:00.000Z",
+        "objectPath": "parties/pilot/channels/main/delivery/1/CAM-03.mp4",
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "sizeBytes": 12347
+      },
+      {
+        "cameraId": "CAM-04",
+        "durationMs": 2000,
+        "expiresAt": "2026-11-29T15:00:00.000Z",
+        "objectPath": "parties/pilot/channels/main/delivery/1/CAM-04.mp4",
+        "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "sizeBytes": 12348
+      }
+    ],
+    "createdAt": "2026-10-29T14:00:00.000Z",
+    "expiresAt": "2026-11-29T15:00:00.000Z"
+  },
+  "getCurrentManifest": {
+    "request": {
+      "partyId": "pilot",
+      "deviceId": "tv-pilot",
+      "channelId": "main"
+    },
+    "response": {
+      "partyId": "pilot",
+      "channelId": "main",
+      "version": 1,
+      "schemaVersion": 1,
+      "jobId": "job-1",
+      "cameraClips": [
+        {
+          "cameraId": "CAM-01",
+          "durationMs": 2000,
+          "expiresAt": "2026-11-29T15:00:00.000Z",
+          "objectPath": "parties/pilot/channels/main/delivery/1/CAM-01.mp4",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "sizeBytes": 12345
+        },
+        {
+          "cameraId": "CAM-02",
+          "durationMs": 2000,
+          "expiresAt": "2026-11-29T15:00:00.000Z",
+          "objectPath": "parties/pilot/channels/main/delivery/1/CAM-02.mp4",
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "sizeBytes": 12346
+        },
+        {
+          "cameraId": "CAM-03",
+          "durationMs": 2000,
+          "expiresAt": "2026-11-29T15:00:00.000Z",
+          "objectPath": "parties/pilot/channels/main/delivery/1/CAM-03.mp4",
+          "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "sizeBytes": 12347
+        },
+        {
+          "cameraId": "CAM-04",
+          "durationMs": 2000,
+          "expiresAt": "2026-11-29T15:00:00.000Z",
+          "objectPath": "parties/pilot/channels/main/delivery/1/CAM-04.mp4",
+          "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "sizeBytes": 12348
+        }
+      ],
+      "createdAt": "2026-10-29T14:00:00.000Z",
+      "expiresAt": "2026-11-29T15:00:00.000Z"
+    }
+  },
+  "requestGeneration": {
+    "request": {
+      "partyId": "pilot",
+      "deviceId": "tv-pilot",
+      "channelId": "main",
+      "jobId": "job-1",
+      "idempotencyKey": "job-1",
+      "presetId": "cheap_demo"
+    },
+    "response": {
+      "jobId": "job-1",
+      "state": "queued",
+      "created": true
+    }
+  },
+  "services": [
+    "requestGeneration",
+    "runGeneration",
+    "normalizeAndStage",
+    "publishManifest",
+    "getCurrentManifest",
+    "getDeliveryUrls",
+    "acknowledgeDelivery",
+    "sweepExpiredMedia"
+  ]
+}
