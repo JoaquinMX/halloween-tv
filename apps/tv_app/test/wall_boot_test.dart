@@ -13,6 +13,7 @@ import 'package:core_cache/core_cache.dart';
 import 'package:core_playlist/core_playlist.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:infra_settings/infra_settings.dart' show InMemorySettings;
 import 'package:kernel_app/kernel_app.dart';
 import 'package:tv_app/src/wall/wall_boot.dart';
 
@@ -88,6 +89,36 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   group('WallBoot', () {
+    test('restores effects-disabled setting from the party-scoped port', () async {
+      final Map<String, List<int>> bytesByAsset = _realBytes();
+      final InMemorySettings settings = InMemorySettings();
+      await settings.setBool(
+        partyId: PartyId('local-party'),
+        key: CctvWallSettingsKeys.effectsDisabled,
+        value: true,
+      );
+      final WallBoot boot = WallBoot(
+        store: InMemoryManifestStore(),
+        settings: settings,
+        fixture: ({required String partyId, required String channelId}) =>
+            _manifestFor(bytesByAsset, partyId: partyId, channelId: channelId),
+        assetBytesLoader: _bytesLoader(bytesByAsset),
+        bundleLoader: (_) async => throw StateError('fixture override is used'),
+      );
+
+      final result = await boot.boot();
+
+      expect(result.isReady, isTrue, reason: result.unavailableReason);
+      expect(result.initialEffectsDisabled, isTrue);
+      expect(
+        await settings.getBool(
+          partyId: PartyId('someone-else'),
+          key: CctvWallSettingsKeys.effectsDisabled,
+        ),
+        isNull,
+      );
+    });
+
     test('boots from the bundled fixture when bytes verify', () async {
       final bytesByAsset = _realBytes();
       final fixture = _manifestFor(bytesByAsset);

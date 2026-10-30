@@ -1,4 +1,5 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
     <!-- Android TV app: leanback is the supported form factor. `required`
          stays false so the APK can still be side-loaded on a phone/emulator
          for UI checks; there is deliberately no touch-only UI. -->

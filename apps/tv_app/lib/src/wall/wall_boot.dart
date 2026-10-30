@@ -23,9 +23,9 @@ import 'package:core_foundation/core_foundation.dart';
 import 'package:core_playlist/core_playlist.dart';
 import 'package:flutter/services.dart';
 import 'package:kernel_app/kernel_app.dart';
-
-import '../media/feed_assets.dart';
-import 'manifest_store.dart';
+import 'package:tv_app/src/media/feed_assets.dart';
+import 'package:tv_app/src/wall/live_wall_session.dart';
+import 'package:tv_app/src/wall/manifest_store.dart';
 
 /// Bundled fixture manifest asset (emitted from real asset bytes).
 const String kBundledFixtureManifestKey = 'assets/fixture_manifest.json';
@@ -39,14 +39,24 @@ final class WallBootResult {
     required ChannelPlugin this.plugin,
     required PlaybackManifest this.manifest,
     required this.usedCachedManifest,
+    this.mediaByClipId = const <String, CachedMedia>{},
+    this.liveSession,
+    this.settings,
+    this.initialEffectsDisabled = false,
+    this.remoteUnavailableReason,
   }) : unavailableReason = null;
 
   /// No wall can be shown; [unavailableReason] is user-facing.
   const WallBootResult.unavailable(this.unavailableReason)
-      : registry = null,
-        plugin = null,
-        manifest = null,
-        usedCachedManifest = false;
+    : registry = null,
+      plugin = null,
+      manifest = null,
+      usedCachedManifest = false,
+      mediaByClipId = const <String, CachedMedia>{},
+      liveSession = null,
+      settings = null,
+      initialEffectsDisabled = false,
+      remoteUnavailableReason = null;
 
   /// Channel registry built during boot.
   final ChannelRegistry? registry;
@@ -60,6 +70,21 @@ final class WallBootResult {
   /// True when the wall came from the last cached manifest (not the bundle).
   final bool usedCachedManifest;
 
+  /// Verified durable media keyed by clip id; empty means bundled fallback.
+  final Map<String, CachedMedia> mediaByClipId;
+
+  /// Remote session started only after this wall has rendered.
+  final LiveWallSession? liveSession;
+
+  /// Party-scoped TV settings.
+  final SettingsPort? settings;
+
+  /// Restored effect setting for this party.
+  final bool initialEffectsDisabled;
+
+  /// Why configured live playback was disabled, if applicable.
+  final String? remoteUnavailableReason;
+
   /// Why the wall is unavailable, when it is.
   final String? unavailableReason;
 
@@ -72,10 +97,11 @@ final class WallBootResult {
 typedef WallRegistryFactory = ChannelRegistry Function();
 
 /// Builds the offline fallback manifest (legacy sync override, tests only).
-typedef WallManifestFixture = PlaybackManifest Function({
-  required String partyId,
-  required String channelId,
-});
+typedef WallManifestFixture =
+    PlaybackManifest Function({
+      required String partyId,
+      required String channelId,
+    });
 
 /// Loads the bundled fixture manifest JSON text (injected in tests so a
 /// missing bundle file does not need the real asset pipeline).
@@ -85,10 +111,11 @@ typedef WallBundleLoader = Future<String> Function(String assetKey);
 typedef WallAssetBytesLoader = Future<List<int>> Function(String assetPath);
 
 /// Async fallback-manifest loader (bundled `fixture_manifest.json`).
-typedef WallFixtureLoader = Future<PlaybackManifest> Function({
-  required String partyId,
-  required String channelId,
-});
+typedef WallFixtureLoader =
+    Future<PlaybackManifest> Function({
+      required String partyId,
+      required String channelId,
+    });
 
 /// Default registry: haunted surveillance (active) + retro horror (stub that
 /// is registered so the kernel can list it, but never resolved/activated).
@@ -218,6 +245,12 @@ final class WallBoot {
     this.fixtureLoader,
     this.assetBytesLoader,
     this.bundleLoader = defaultBundleLoader,
+    this.preparePlayback,
+    this.liveSession,
+    this.settings,
+    this.manifestIndexStore,
+    this.cacheStore,
+    this.remoteUnavailableReason,
   });
 
   /// Last-known-good manifest persistence.
@@ -240,6 +273,55 @@ final class WallBoot {
 
   /// Bundle text loader for the fixture manifest (injected in tests).
   final WallBundleLoader bundleLoader;
+
+  /// Offline-first remote playback coordinator (remote work is not started).
+  final PreparePlayback? preparePlayback;
+
+  /// Live subscription starts from WallScreen after a verified boot.
+  final LiveWallSession? liveSession;
+
+  /// Party-scoped effects persistence.
+  final SettingsPort? settings;
+
+  /// Durable remote index and cache used by recovery and offline boot.
+  final ManifestIndexStore? manifestIndexStore;
+  final CacheStore? cacheStore;
+
+  /// Diagnostic detail for a disabled/incomplete live configuration.
+  final String? remoteUnavailableReason;
+
+  Future<bool> _readEffectsDisabled() async {
+    final SettingsPort? port = settings;
+    if (port == null) return false;
+    try {
+      return await port.getBool(
+            partyId: PartyId(partyId),
+            key: CctvWallSettingsKeys.effectsDisabled,
+          ) ??
+          false;
+    } on Object {
+      return false;
+    }
+  }
+
+  WallBootResult _ready({
+    required ChannelRegistry registry,
+    required ChannelPlugin plugin,
+    required PlaybackManifest manifest,
+    required bool usedCachedManifest,
+    Map<String, CachedMedia> mediaByClipId = const <String, CachedMedia>{},
+    bool effectsDisabled = false,
+  }) => WallBootResult.ready(
+    registry: registry,
+    plugin: plugin,
+    manifest: manifest,
+    usedCachedManifest: usedCachedManifest,
+    mediaByClipId: mediaByClipId,
+    liveSession: liveSession,
+    settings: settings,
+    initialEffectsDisabled: effectsDisabled,
+    remoteUnavailableReason: remoteUnavailableReason,
+  );
 
   Future<PlaybackManifest> _loadFallback() {
     if (fixture != null) {
@@ -312,11 +394,36 @@ final class WallBoot {
       return WallBootResult.unavailable('CHANNEL REGISTRY FAILED · $error');
     }
 
-    final ChannelPlugin? plugin = registry.resolve(hauntedSurveillanceChannelId);
+    final ChannelPlugin? plugin = registry.resolve(
+      hauntedSurveillanceChannelId,
+    );
     if (plugin == null) {
       return const WallBootResult.unavailable(
         'NO WALL · channel "$hauntedSurveillanceChannelId" is not registered',
       );
+    }
+
+    // The durable remote index is distinct from PrefsManifestStore and the
+    // bundled fixture. In particular, a bundled v1 can never reserve backend
+    // v1 or cause a same-version remote conflict.
+    final PreparePlayback? preparation = preparePlayback;
+    if (preparation != null) {
+      final PlaybackSyncSnapshot offline = await preparation.bootOffline(
+        partyId: partyId,
+        channelId: hauntedSurveillanceChannelId,
+      );
+      if (offline.state == PlaybackSyncState.usingCache &&
+          offline.hasCompleteMedia &&
+          offline.manifest != null) {
+        return _ready(
+          registry: registry,
+          plugin: plugin,
+          manifest: offline.manifest!,
+          usedCachedManifest: true,
+          mediaByClipId: offline.mediaByClipId,
+          effectsDisabled: await _readEffectsDisabled(),
+        );
+      }
     }
 
     PlaybackManifest? cached;
@@ -335,11 +442,12 @@ final class WallBoot {
       final Result<PlaybackManifest> cachedCheck = validateCctvManifest(cached);
       if (cachedCheck is Ok<PlaybackManifest> &&
           await _verifyManifestBytes(cachedCheck.value)) {
-        return WallBootResult.ready(
+        return _ready(
           registry: registry,
           plugin: plugin,
           manifest: cachedCheck.value,
           usedCachedManifest: true,
+          effectsDisabled: await _readEffectsDisabled(),
         );
       }
       // A cached manifest for another party/channel, or one whose bytes no
@@ -354,8 +462,9 @@ final class WallBoot {
         'WALL UNAVAILABLE · bundled fixture failed: $error',
       );
     }
-    final Result<PlaybackManifest> fallbackCheck =
-        validateCctvManifest(fallback);
+    final Result<PlaybackManifest> fallbackCheck = validateCctvManifest(
+      fallback,
+    );
     if (fallbackCheck is Err<PlaybackManifest>) {
       return WallBootResult.unavailable(
         'WALL UNAVAILABLE · ${fallbackCheck.message}',
@@ -377,12 +486,42 @@ final class WallBoot {
       // Non-fatal: the wall still plays, it just will not be cached.
     }
 
-    return WallBootResult.ready(
+    return _ready(
       registry: registry,
       plugin: plugin,
       manifest: manifest,
       usedCachedManifest: false,
+      effectsDisabled: await _readEffectsDisabled(),
     );
+  }
+
+  /// Reads the durable committed version for the recovery action without
+  /// disturbing an in-flight live preparation.
+  Future<VerifiedWallPlayback?> readCommittedPlayback() async {
+    final ManifestIndexStore? indexStore = manifestIndexStore;
+    final CacheStore? cache = cacheStore;
+    if (indexStore == null || cache == null) return null;
+    try {
+      final CommittedManifestIndex? index = await indexStore.readCommitted(
+        partyId: partyId,
+        channelId: hauntedSurveillanceChannelId,
+      );
+      if (index == null) return null;
+      final Map<String, CachedMedia> media = <String, CachedMedia>{};
+      for (final ClipDescriptor clip in index.manifest.clips) {
+        final CachedMedia? cached = await cache.findVerified(clip);
+        if (cached == null ||
+            cached.localRef != index.localRefFor(clip) ||
+            cached.clipId != clip.id ||
+            cached.sha256.toLowerCase() != clip.sha256.toLowerCase()) {
+          return null;
+        }
+        media[clip.id] = cached;
+      }
+      return VerifiedWallPlayback(index.manifest, media);
+    } on Object {
+      return null;
+    }
   }
 
   /// Reads + validates the cached manifest (recovery "retry cached wall").
@@ -409,4 +548,13 @@ final class WallBoot {
       return null;
     }
   }
+}
+
+/// A complete, re-verified remote version available for manual recovery.
+final class VerifiedWallPlayback {
+  VerifiedWallPlayback(this.manifest, Map<String, CachedMedia> mediaByClipId)
+    : mediaByClipId = Map<String, CachedMedia>.unmodifiable(mediaByClipId);
+
+  final PlaybackManifest manifest;
+  final Map<String, CachedMedia> mediaByClipId;
 }

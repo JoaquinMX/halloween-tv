@@ -4,7 +4,8 @@ library;
 import 'package:flutter/widgets.dart';
 import 'package:video_player/video_player.dart';
 
-import 'tile_video_controller.dart';
+import 'package:tv_app/src/playback/file_tile_video_controller.dart';
+import 'package:tv_app/src/playback/tile_video_controller.dart';
 
 /// Real decoder-backed tile controller (one per wall tile).
 ///
@@ -17,13 +18,14 @@ final class AssetTileVideoController implements TileVideoController {
     required this.cameraId,
     required String assetPath,
     VideoPlayerController? controller,
-  }) : _controller = controller ??
-            VideoPlayerController.asset(
-              assetPath,
-              // Android TV: mix with others keeps volume handling boring;
-              // the wall is muted anyway (volume 0).
-              videoPlayerOptions: VideoPlayerOptions(mixWithOthers: true),
-            );
+  }) : _controller =
+           controller ??
+           VideoPlayerController.asset(
+             assetPath,
+             // Android TV: mix with others keeps volume handling boring;
+             // the wall is muted anyway (volume 0).
+             videoPlayerOptions: VideoPlayerOptions(mixWithOthers: true),
+           );
 
   /// Camera this tile belongs to (diagnostics only).
   final String cameraId;
@@ -88,9 +90,30 @@ final class AssetTileVideoController implements TileVideoController {
   }
 }
 
-/// Default factory: real `video_player` controllers for bundled clips.
+/// Factory for explicit bundled-asset and local-file inputs.
+TileVideoController createTileVideoController({
+  required String cameraId,
+  required TileMediaSource source,
+}) {
+  return switch (source) {
+    BundledAssetSource(:final assetPath) => AssetTileVideoController(
+      cameraId: cameraId,
+      assetPath: assetPath,
+    ),
+    LocalFileSource(:final path) => FileTileVideoController(
+      cameraId: cameraId,
+      path: path,
+    ),
+  };
+}
+
+/// Compatibility name retained for existing direct bundled-only callers.
 TileVideoController createAssetTileVideoController({
   required String cameraId,
-  required String assetPath,
-}) =>
-    AssetTileVideoController(cameraId: cameraId, assetPath: assetPath);
+  required TileMediaSource source,
+}) {
+  if (source case BundledAssetSource(:final assetPath)) {
+    return AssetTileVideoController(cameraId: cameraId, assetPath: assetPath);
+  }
+  throw ArgumentError.value(source, 'source', 'expected a bundled asset');
+}

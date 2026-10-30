@@ -8,6 +8,39 @@ library;
 
 import 'package:flutter/widgets.dart';
 
+/// Concrete, already-verified source for one tile. Signed network URLs never
+/// cross into video_player; live playback always resolves to a local file.
+sealed class TileMediaSource {
+  const TileMediaSource();
+
+  String get reference;
+
+  @override
+  bool operator ==(Object other) =>
+      other.runtimeType == runtimeType &&
+      other is TileMediaSource &&
+      other.reference == reference;
+
+  @override
+  int get hashCode => Object.hash(runtimeType, reference);
+}
+
+/// A bundled, byte-verified fixture asset.
+final class BundledAssetSource extends TileMediaSource {
+  const BundledAssetSource(this.assetPath);
+  final String assetPath;
+  @override
+  String get reference => assetPath;
+}
+
+/// A locally cached file whose hash was verified by the cache pipeline.
+final class LocalFileSource extends TileMediaSource {
+  const LocalFileSource(this.path);
+  final String path;
+  @override
+  String get reference => path;
+}
+
 /// Controller owned by a single [CameraTile].
 abstract class TileVideoController {
   /// Prepares the decoder. May throw when the clip is missing/corrupt.
@@ -50,4 +83,7 @@ abstract class TileVideoController {
 /// Injected so widget tests can substitute a fake decoder while the tile,
 /// wall chrome, focus handling and error fallback stay on their real paths.
 typedef TileVideoControllerFactory =
-    TileVideoController Function({required String cameraId, required String assetPath});
+    TileVideoController Function({
+      required String cameraId,
+      required TileMediaSource source,
+    });

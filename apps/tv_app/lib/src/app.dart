@@ -6,10 +6,10 @@ import 'package:core_ui/core_ui.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import 'playback/asset_tile_video_controller.dart';
-import 'playback/tile_video_controller.dart';
-import 'wall/wall_boot.dart';
-import 'wall/wall_screen.dart';
+import 'package:tv_app/src/playback/asset_tile_video_controller.dart';
+import 'package:tv_app/src/playback/tile_video_controller.dart';
+import 'package:tv_app/src/wall/wall_boot.dart';
+import 'package:tv_app/src/wall/wall_screen.dart';
 
 /// Root widget: dark TV theme, no debug banner, wall as home.
 class HalloweenTvApp extends StatelessWidget {
@@ -17,7 +17,7 @@ class HalloweenTvApp extends StatelessWidget {
   const HalloweenTvApp({
     super.key,
     required this.boot,
-    this.tileControllerFactory = createAssetTileVideoController,
+    this.tileControllerFactory = createTileVideoController,
     this.clock = const SystemClock(),
   });
 
@@ -93,7 +93,8 @@ class _WallGateState extends State<WallGate> {
         }
         final WallBootResult? result = snapshot.data;
         if (result == null || !result.isReady) {
-          final String reason = result?.unavailableReason ??
+          final String reason =
+              result?.unavailableReason ??
               snapshot.error?.toString() ??
               'unknown boot failure';
           return _WallUnavailable(reason: reason, onRetry: _retryBoot);
@@ -105,6 +106,11 @@ class _WallGateState extends State<WallGate> {
           clock: widget.clock,
           tileControllerFactory: widget.tileControllerFactory,
           onRetryCached: widget.boot.readCached,
+          onRetryCachedPlayback: widget.boot.readCommittedPlayback,
+          mediaByClipId: result.mediaByClipId,
+          liveSession: result.liveSession,
+          settings: result.settings,
+          initialEffectsDisabled: result.initialEffectsDisabled,
         );
       },
     );
@@ -156,7 +162,10 @@ class _WallUnavailable extends StatelessWidget {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: <Widget>[
-                const Text('NO WALL AVAILABLE', style: CctvTheme.signalLostStyle),
+                const Text(
+                  'NO WALL AVAILABLE',
+                  style: CctvTheme.signalLostStyle,
+                ),
                 const SizedBox(height: 12),
                 Text(
                   reason,
@@ -172,7 +181,10 @@ class _WallUnavailable extends StatelessWidget {
                     onPressed: onRetry,
                     style: OutlinedButton.styleFrom(
                       foregroundColor: Colors.white,
-                      side: const BorderSide(color: CctvTheme.frameEdge, width: 2),
+                      side: const BorderSide(
+                        color: CctvTheme.frameEdge,
+                        width: 2,
+                      ),
                       padding: const EdgeInsets.symmetric(
                         horizontal: 28,
                         vertical: 16,
@@ -191,9 +203,8 @@ class _WallUnavailable extends StatelessWidget {
 }
 
 /// Landscape-only TV orientation. Called once from `main`.
-Future<void> lockLandscape() => SystemChrome.setPreferredOrientations(
-      const <DeviceOrientation>[
-        DeviceOrientation.landscapeLeft,
-        DeviceOrientation.landscapeRight,
-      ],
-    );
+Future<void> lockLandscape() =>
+    SystemChrome.setPreferredOrientations(const <DeviceOrientation>[
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]);
