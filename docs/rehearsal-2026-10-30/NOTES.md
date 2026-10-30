@@ -152,3 +152,19 @@ with party/TV-device/channel IDs returned manifest v1, 4 clips
   playing with current timestamps (proves uninterrupted offline playback
   through the outage), guest panel refreshes (resync of working callables),
   and record the outage window. Cloud-cache variant stays blocked on §7.
+
+## 10. IAM grant applied by Joaquin — delivery chain FULLY VERIFIED (15:32 CST)
+
+- Joaquin ran the §7 one-liner; SA now holds
+  `roles/iam.serviceAccountTokenCreator` (confirmed in his terminal output).
+- `getDeliveryUrls` (TV identity) now returns manifestVersion 1,
+  manifestHash `42314580…`, and 4 clips with v4 signed URLs
+  (`X-Goog-Credential=897751802522-compute@…`, 900s expiry).
+- Downloaded CAM-01 through its signed URL: 84,275 bytes, sha256
+  `d378a607…` — EXACT manifest match. Cloud → signed URL → bytes → hash
+  chain proven end to end. No provider calls, no spend (tiny egress only).
+- REMAINING: TV Wi-Fi still OFF (`adb` → `192.168.1.19:5555 offline`,
+  connect times out). Once Joaquin re-enables it: expect the wall to
+  upgrade from bundled fixtures to the live session automatically
+  (it has been polling delivery every few seconds), then verify live wall
+  + guest resync + close out the Wi-Fi outage window.
