@@ -125,6 +125,7 @@ final class GuestSession {
           partyId: data.partyId.value,
           deviceId: data.deviceId.value,
           channelId: data.channelId,
+          joinPin: data.joinPin,
         );
       } on Object catch (error) {
         if (generation == _generation && !_disposed) {

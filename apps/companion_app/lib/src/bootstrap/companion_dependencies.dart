@@ -107,15 +107,14 @@ final class CompanionDependencies {
       // each join scopes its own source through [manifestSourceForJoin].
       try {
         await (firebaseBootstrap ?? _initializeFirebase)(resolved);
-        final FirebaseFunctions functions = _configuredFunctions(
-          resolved,
-          functionsOverride,
-        );
+        FirebaseFunctions? functions;
+        FirebaseFunctions resolveFunctions() =>
+            functions ??= _configuredFunctions(resolved, functionsOverride);
         final FirebaseManifestCallableInvoker invoker;
         if (invokerOverride != null) {
           invoker = invokerOverride;
         } else {
-          invoker = CallableManifestInvoker(functions: functions);
+          invoker = CallableManifestInvoker(functions: resolveFunctions());
         }
         return CompanionDependencies._(
           config: resolved,
@@ -126,7 +125,7 @@ final class CompanionDependencies {
           partyJoinClient: PartyJoinClient(
             invoker:
                 partyJoinInvokerOverride ??
-                CallablePartyJoinInvoker(functions: functions),
+                CallablePartyJoinInvoker(functions: resolveFunctions()),
           ),
         );
       } on Object catch (error) {
@@ -144,15 +143,14 @@ final class CompanionDependencies {
     }
     try {
       await (firebaseBootstrap ?? _initializeFirebase)(resolved);
-      final FirebaseFunctions functions = _configuredFunctions(
-        resolved,
-        functionsOverride,
-      );
+      FirebaseFunctions? functions;
+      FirebaseFunctions resolveFunctions() =>
+          functions ??= _configuredFunctions(resolved, functionsOverride);
       final FirebaseManifestCallableInvoker invoker;
       if (invokerOverride != null) {
         invoker = invokerOverride;
       } else {
-        invoker = CallableManifestInvoker(functions: functions);
+        invoker = CallableManifestInvoker(functions: resolveFunctions());
       }
       return CompanionDependencies._(
         config: resolved,
@@ -166,7 +164,7 @@ final class CompanionDependencies {
         partyJoinClient: PartyJoinClient(
           invoker:
               partyJoinInvokerOverride ??
-              CallablePartyJoinInvoker(functions: functions),
+              CallablePartyJoinInvoker(functions: resolveFunctions()),
         ),
       );
     } on Object catch (error) {

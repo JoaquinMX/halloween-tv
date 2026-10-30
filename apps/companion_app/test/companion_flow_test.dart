@@ -13,6 +13,7 @@ import 'dart:async';
 import 'package:channel_api/channel_api.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:companion_app/src/companion_app.dart';
+import 'package:companion_app/src/join/device_identity_store.dart';
 import 'package:companion_app/src/ui/connection_status.dart';
 import 'package:companion_app/src/ui/join_screen.dart';
 import 'package:companion_app/src/ui/now_playing_screen.dart';
@@ -21,6 +22,7 @@ import 'package:core_playlist/core_playlist.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// Port-level fake: substitutes only the callable-boundary source.
 final class FakeManifestSource implements ManifestSource<PlaybackManifest> {
@@ -83,11 +85,18 @@ Future<void> flush(WidgetTester tester) async {
   }
 }
 
+/// Fixed phone-shaped local identity used by the join form in every flow
+/// test (the form persists/generates this through [DeviceIdentityStore]).
+const String kFixedDeviceId = 'p-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+
 Future<void> pumpApp(
   WidgetTester tester,
   FakeManifestSource source,
   FakeClock clock,
 ) async {
+  SharedPreferences.setMockInitialValues(<String, Object>{
+    DeviceIdentityStore.storageKey: kFixedDeviceId,
+  });
   await tester.pumpWidget(CompanionApp(manifestSource: source, clock: clock));
   await flush(tester);
 }
@@ -160,12 +169,12 @@ Future<void> joinAs(
   WidgetTester tester,
   FakeManifestSource source, {
   String party = 'party-1',
-  String device = 'device-9',
   String channel = 'cctv',
+  String pin = '',
 }) async {
   await enterVisible(tester, find.byKey(JoinScreen.partyFieldKey), party);
-  await enterVisible(tester, find.byKey(JoinScreen.deviceFieldKey), device);
   await enterVisible(tester, find.byKey(JoinScreen.channelFieldKey), channel);
+  await enterVisible(tester, find.byKey(JoinScreen.pinFieldKey), pin);
   await tapVisible(tester, find.byKey(JoinScreen.submitKey));
   await flush(tester);
   expect(source.watchCalls, 1);
@@ -239,14 +248,10 @@ void main() {
       );
       await enterVisible(
         tester,
-        find.byKey(JoinScreen.deviceFieldKey),
-        'device-9',
-      );
-      await enterVisible(
-        tester,
         find.byKey(JoinScreen.channelFieldKey),
         'cctv',
       );
+      await enterVisible(tester, find.byKey(JoinScreen.pinFieldKey), '');
       await tapVisible(tester, find.byKey(JoinScreen.submitKey));
       await flush(tester);
 
@@ -264,8 +269,9 @@ void main() {
       await enterVisible(
         tester,
         find.byKey(JoinScreen.payloadFieldKey),
-        '{"partyId": "party-1", "deviceId": "device-9", "channelId": "cctv", '
-        '"backend": "https://evil.example", "autoSubmit": true}',
+        '{"partyId": "party-1", "channelId": "cctv", "joinPin": "004201", '
+        '"deviceId": "evil-device", "backend": "https://evil.example", '
+        '"autoSubmit": true}',
       );
       await tapVisible(tester, find.byKey(JoinScreen.submitKey));
       await flush(tester);
@@ -403,13 +409,16 @@ void main() {
       expect(focusIsOn(JoinScreen.partyFieldKey), isTrue);
       await tester.sendKeyEvent(LogicalKeyboardKey.tab);
       await flush(tester);
-      expect(focusIsOn(JoinScreen.deviceFieldKey), isTrue);
-      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
-      await flush(tester);
       expect(focusIsOn(JoinScreen.channelFieldKey), isTrue);
       await tester.sendKeyEvent(LogicalKeyboardKey.tab);
       await flush(tester);
+      expect(focusIsOn(JoinScreen.pinFieldKey), isTrue);
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      await flush(tester);
       expect(focusIsOn(JoinScreen.payloadFieldKey), isTrue);
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      await flush(tester);
+      expect(focusIsOn(JoinScreen.scanKey), isTrue);
       await tester.sendKeyEvent(LogicalKeyboardKey.tab);
       await flush(tester);
       expect(focusIsOn(JoinScreen.submitKey), isTrue);

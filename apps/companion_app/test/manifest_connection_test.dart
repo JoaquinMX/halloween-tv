@@ -17,6 +17,7 @@ import 'package:companion_app/src/config/backend_config.dart';
 import 'package:companion_app/src/data/callable_manifest_invoker.dart';
 import 'package:companion_app/src/data/manifest_connection.dart';
 import 'package:companion_app/src/data/manifest_failure.dart';
+import 'package:companion_app/src/data/party_join_client.dart';
 import 'package:companion_app/src/join/guest_join_data.dart';
 import 'package:core_foundation/core_foundation.dart' show DeviceId, PartyId;
 import 'package:core_playlist/core_playlist.dart' show PlaybackManifest;
@@ -81,6 +82,30 @@ ManifestConnection _connection(FakeInvoker invoker) => ManifestConnection(
   identity: FirebaseTvIdentity(partyId: 'pilot', deviceId: 'tv-pilot'),
   invoker: invoker,
 );
+
+/// Fake joinParty boundary: echoes the requested scope into a valid
+/// scoped guest registration so live-boot compositions stay live without
+/// Firebase initialization. Never touches manifest payloads.
+final class FakePartyJoinInvoker implements PartyJoinCallableInvoker {
+  FakePartyJoinInvoker();
+
+  String? lastName;
+  Map<String, Object?>? lastPayload;
+
+  @override
+  Future<Object?> call(String name, Map<String, Object?> payload) async {
+    lastName = name;
+    lastPayload = Map<String, Object?>.of(payload);
+    return <String, Object?>{
+      'partyId': payload['partyId'],
+      'deviceId': payload['deviceId'],
+      'channelId': payload['channelId'],
+      'role': 'guest',
+      'status': 'active',
+      'created': true,
+    };
+  }
+}
 
 void main() {
   group('callable payload', () {
@@ -474,6 +499,7 @@ void main() {
             ),
             firebaseBootstrap: (BackendConfig config) async {},
             invokerOverride: invoker,
+            partyJoinInvokerOverride: FakePartyJoinInvoker(),
           );
 
       expect(dependencies.isLive, isTrue);
@@ -501,6 +527,7 @@ void main() {
             }),
             firebaseBootstrap: (BackendConfig config) async {},
             invokerOverride: invoker,
+            partyJoinInvokerOverride: FakePartyJoinInvoker(),
           );
 
       // Pre-join: live, with no remote problem to banner.

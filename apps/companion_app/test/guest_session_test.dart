@@ -144,6 +144,7 @@ void main() {
           ),
         );
         final Future<void> joining = session.join(joinFor());
+        await pumpEvents();
         expect(session.state.status, GuestSessionStatus.loading);
         expect(source.watchCalls, 0);
         registration.complete(<String, Object?>{
@@ -176,6 +177,7 @@ void main() {
           ),
         );
         final Future<void> joining = session.join(joinFor());
+        await pumpEvents();
         await session.leave();
         registration.complete(<String, Object?>{
           'partyId': 'party-1',
