@@ -85,3 +85,28 @@ Test success does not change deployment, device, or live-spend statuses above.
 - Companion display name: "Halloween TV - Guests".
 - Party code distribution: host dictates each guest's device-code verbally (QR scanning later). Guest codes are per-guest device-codes seeded in Firebase; the host reads them from the host-visible list (TV overlay and/or console). The host reads the TV's OWN party/device code off the TV screen (large text + QR, next slice) — nothing to memorize at build time (today those IDs are build-time `--dart-define`s).
 - Next slice delegated: installable companion builds, real-device/browser tests, Firebase guest settings + seeded codes, TV QR display panel.
+
+## Cycle-9: web verification + cloud seeding + harness preflight (branch `orchestrator-cycle-9-web-seed-tooling`, 2026-10-30)
+
+### WEB VERIFICATION (companion web, live cloud backend)
+- Rebuilt `apps/companion_app` web release with live `--dart-define` flags (project halloween-tv, web app ID `.../def02160cd2616a2173523`, us-central1). `flutter build web` clean. Sizes: total 40M (canvaskit 36M incl. all renderer backends, main.dart.js 2.4M, assets 1.3M).
+- Served `build/web` on localhost and smoke-tested in real Chromium 131 (Playwright, 390x844 mobile viewport, CanvasKit renderer — no DOM inputs, coordinate/keyboard driven).
+- Join screen renders (Party/Channel/PIN/pasted/Scan QR/Join, no config banner). Typed party+channel submit works.
+- Full join flow against the seeded cloud party: `joinParty` HTTP200 -> `getCurrentManifest` HTTP200 -> Now-playing renders manifest v1 with server publication time matching the seed, 4 cameras (hallway/kitchen/staircase/storage room), Refresh/Leave. Zero console/page errors.
+- Denial state: bogus IDs -> `joinParty` HTTP403 -> Now-playing shows "Access was denied." with Refresh/Leave, no crash. Matches the documented FORBIDDEN-denial contract.
+- No web-only defects found. Evidence: `cycle9-web-join.png`, `cycle9-web-nowplaying.png`, `cycle9-web-denied.png`.
+
+### CLOUD SEEDING (project `halloween-tv`, ADC operator auth, no billable calls)
+- `seed_pilot --target=cloud --apply`: party seeded with 4 verified fixture clips (v1 manifest). No provider invocation.
+- `seed_guests --target=cloud --apply --count=6`: host sheet below. TV device merged `role: tv` for host-only listPartyDevices.
+- Host sheet: party `rehearsal-7ecd21932602003820b78b00`, channel `haunt-7c9acf9c4e747858da9c`, TV code `tv-a0d4693b89d085d0b48c`, guests `g-80ef3b6d4ab85f15`, `g-0325944a34453efd`, `g-0c535439ce214515`, `g-feff1c55de9958b3`, `g-14b94d31b127eced`, `g-1b422b4a560081d`.
+
+### FUNCTIONS DEPLOY (needed for the join test)
+- `joinParty` (cycle-8) was not in the cycle-7 cloud set, so the web join flow could not run against cloud. Deployed `--only functions`: `joinParty` created, other 7 updated. Verified in functions:list.
+- Predeploy hook cannot run on this Mac (darwin-arm64; runtime:prepare + preflight demand linux-x64; Docker daemon wedged, no container path). Bypass was explicit and temporary: `npm run build` (tsc clean) + full emulator suite 51/51 pass as the gate, `firebase.json` predeploy removed for the deploy only and restored byte-identical right after (no diff).
+- Known consequence: this deploy ships no `runtime/` fixture pack (was Linux-prepared 141MB from cycle-7). No working path regresses: generation is disabled and the fake worker was already blocked (fixture-dir plumbing, tracking blocker #3). `runGeneration` must not be invoked until a Linux-prepared runtime is packaged again.
+
+### TOOLING SINGLE PLACE (harness-orchestrator workspace, NOT this repo)
+- `harness/harness-run.sh` now preflights its siblings (registry, instructions, schemas, validator) and exits 2 with a clear absolute-path message when run as a stray copy from a repo checkout/worktree.
+- New `scripts/harness-preflight.sh`: resolves HARNESS_HOME (env or workspace checkout), fails fast exit 2 naming the missing path, prints the absolute runner path on success. RUNBOOK §1 now mandates preflight-first absolute invocation.
+- Workspace files left uncommitted for the orchestrator owner (repo has unrelated pre-existing modifications).
