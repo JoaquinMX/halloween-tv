@@ -51,7 +51,7 @@ void main() {
   test('shared fixture ACK hashes match the backend canonical hash vector', () {
     final Map<String, Object?> fixture = _fixture();
     final Map<String, Object?> ack = Map<String, Object?>.from(
-      fixture['ack']! as Map,
+      (fixture['acknowledgeDelivery']! as Map)['request']! as Map,
     );
     final Map<String, String> hashes = Map<String, String>.from(
       ack['clipHashes']! as Map,
@@ -85,19 +85,19 @@ void main() {
     () async {
       final Map<String, Object?> fixture = _fixture();
       final Map<String, Object?> hashByCamera = Map<String, Object?>.from(
-        (fixture['ack']! as Map)['clipHashes']! as Map,
+        ((fixture['acknowledgeDelivery']! as Map)['request']! as Map)['clipHashes']! as Map,
       );
       final Map<String, String> hashes = <String, String>{
         for (final MapEntry<String, Object?> entry in hashByCamera.entries)
           entry.key: entry.value! as String,
       };
       final Map<String, Object?> deliveryFixture =
-          Map<String, Object?>.from(fixture['deliveryUrlsResponse']! as Map)
+          Map<String, Object?>.from((fixture['deliveryUrls']! as Map)['response']! as Map)
             ..['manifestHash'] =
                 'c3114a6601be504d1be045749e00512bc249aa70ca365b804e26695d94265692'
             ..['clips'] = _deliveryResponse(hashes: hashes)['clips'];
       final Map<String, Object?> fixtureAck = Map<String, Object?>.from(
-        fixture['ack']! as Map,
+        (fixture['acknowledgeDelivery']! as Map)['request']! as Map,
       )..['clipHashes'] = hashes;
       final _FixtureCallable invoker = _FixtureCallable(<String, Object?>{
         'getDeliveryUrls': deliveryFixture,

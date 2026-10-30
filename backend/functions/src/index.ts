@@ -3,6 +3,7 @@ import { HttpsError, onCall } from "firebase-functions/v2/https";
 import { onTaskDispatched } from "firebase-functions/v2/tasks";
 import { onSchedule } from "firebase-functions/v2/scheduler";
 import { setGlobalOptions } from "firebase-functions/v2/options";
+import { resolve } from "node:path";
 import { BackendError } from "./contracts";
 import { ErrorCode, isGenerationEnabled, REGION } from "./config";
 import { getAdminApp, getAdminBucket, getAdminFirestore } from "./firebase";
@@ -20,6 +21,7 @@ const services = createRuntimeServices({
   bucket,
   generationEnabled: isGenerationEnabled(),
   enqueueGeneration: async (task) => taskQueue.enqueue(task),
+  fixtureDirectory: resolve(__dirname, "../../runtime/fixtures"),
 });
 
 const httpsCode: Record<ErrorCode, "unauthenticated" | "permission-denied" | "failed-precondition" | "unavailable" | "resource-exhausted" | "invalid-argument" | "not-found" | "internal"> = {
@@ -51,6 +53,9 @@ export const requestGeneration = onCall({ maxInstances: 2 }, (request) =>
 
 /** Internal task queue worker. One attempt only: no billable automatic retries. */
 export const runGeneration = onTaskDispatched({
+  // Fixed 900s deadline: must equal GENERATION_WORKER_TIMEOUT_SECONDS (default).
+  // Preflight compares this literal against the configured env and fails on drift.
+  timeoutSeconds: 900,
   retryConfig: { maxAttempts: 1, minBackoffSeconds: 60, maxBackoffSeconds: 60 },
   rateLimits: { maxConcurrentDispatches: 1, maxDispatchesPerSecond: 1 },
 }, async (request) => { await services.runGeneration(request.data as GenerationTask); });

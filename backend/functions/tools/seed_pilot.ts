@@ -197,7 +197,17 @@ async function validateExisting(
     }
     return "already-seeded";
   }
-  if (job.exists) fail("Pilot seed job exists without its current manifest; refusing to attach or overwrite it.");
+  if (job.exists) {
+    const orphan = job.data()!;
+    if (String(orphan.state ?? "") === "purged" && orphan.jobId === PILOT_JOB_ID &&
+        orphan.partyId === options.party && orphan.deviceId === options.device && orphan.channelId === options.channel) {
+      const paths = clips.map((clip) => objectPath(options.party, options.channel, 1, clip.cameraId));
+      const objects = await Promise.all(paths.map((path) => bucket.file(path).exists().then(([value]) => value)));
+      if (objects.some(Boolean)) fail("Purged pilot job has unexpected objects; refusing silent version resurrection.");
+      return "already-purged";
+    }
+    fail("Pilot seed job exists without its current manifest; refusing to attach or overwrite it.");
+  }
   const paths = clips.map((clip) => objectPath(options.party, options.channel, 1, clip.cameraId));
   const objects = await Promise.all(paths.map((path) => bucket.file(path).exists().then(([value]) => value)));
   if (objects.some(Boolean)) fail("Pilot delivery object path is already occupied without the seed manifest; refusing overwrite.");

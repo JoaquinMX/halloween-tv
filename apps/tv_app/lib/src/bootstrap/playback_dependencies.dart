@@ -223,7 +223,7 @@ final class _UnavailableAcknowledger implements DeliveryAcknowledger {
     required String partyId,
     required String channelId,
     required int manifestVersion,
-    required List<String> verifiedClipHashes,
+    required Map<String, String> verifiedClipHashes,
   }) => Future<void>.error(StateError('remote playback is disabled'));
 }
 

@@ -3,12 +3,17 @@ import type { Firestore } from "firebase-admin/firestore";
 import { createDeliveryServices, DeliveryServiceOptions, GenerationTask } from "./delivery";
 import { BackendError, DeliveryManifest } from "./contracts";
 import { createGenerationServices, GenerationServiceOptions } from "./generation";
+import { FakeVideoGenerationPort } from "./providers/fake";
 import { CameraId, ProviderResult, VideoGenerationPort } from "./video_generation_port";
 
 export interface RuntimeServiceOptions {
   db: Firestore;
   bucket: Bucket;
   generationEnabled?: boolean;
+  /** Packaged fixture directory for the offline fake provider (deploy artifact
+   *  `runtime/fixtures`). Omitted in tests/emulator, where the provider falls
+   *  back to its repository-relative default. */
+  fixtureDirectory?: string;
   enqueueGeneration?: (task: GenerationTask) => Promise<void>;
   provider?: VideoGenerationPort;
   now?: () => Date;
@@ -36,11 +41,15 @@ export interface RuntimeServices {
  * generation store and provider pipeline exclusively.
  */
 export function createRuntimeServices(options: RuntimeServiceOptions): RuntimeServices {
+  const provider = options.provider ??
+    (options.fixtureDirectory == null || options.fixtureDirectory.trim() === ""
+      ? undefined
+      : new FakeVideoGenerationPort(options.fixtureDirectory));
   const generation = options.generationEnabled === true
     ? createGenerationServices({
       db: options.db,
       bucket: options.bucket,
-      provider: options.provider,
+      provider,
       now: options.now,
       sleep: options.sleep,
       pollIntervalMs: options.pollIntervalMs,

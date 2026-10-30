@@ -64,7 +64,7 @@ final class _Acknowledger implements DeliveryAcknowledger {
     required String partyId,
     required String channelId,
     required int manifestVersion,
-    required List<String> verifiedClipHashes,
+    required Map<String, String> verifiedClipHashes,
   }) async {
     calls++;
     if (failuresRemaining > 0) {

@@ -34,7 +34,7 @@ final class _BackendCallable
     if (name == 'getDeliveryUrls') {
       deliveryRequestCount++;
       final Map<String, Object?> response = Map<String, Object?>.from(
-        fixture['deliveryUrlsResponse']! as Map,
+        (fixture['deliveryUrls']! as Map)['response']! as Map,
       );
       response['manifestVersion'] = currentDeliveryVersion;
       response['manifestHash'] = 'f' * 64;
@@ -267,7 +267,7 @@ void main() {
         expect(durableIndexes.whereType<File>(), hasLength(1));
         expect(committedV1.clipHashToLocalRef, hasLength(4));
         final Map<String, Object?> fixtureAck = Map<String, Object?>.from(
-          fixture['ack']! as Map,
+          (fixture['acknowledgeDelivery']! as Map)['request']! as Map,
         );
         final Map<String, String> expectedAckHashes = <String, String>{
           for (final ClipDescriptor clip in ready.manifest!.clips)
