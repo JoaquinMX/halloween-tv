@@ -168,3 +168,25 @@ with party/TV-device/channel IDs returned manifest v1, 4 clips
   upgrade from bundled fixtures to the live session automatically
   (it has been polling delivery every few seconds), then verify live wall
   + guest resync + close out the Wi-Fi outage window.
+
+## 11. Wi-Fi outage CLOSED — offline continuity + live resync PROVEN (15:27→15:34 CST)
+
+- Outage: `cmd wifi set-wifi-enabled disabled` at ~15:27:14 (device log);
+  Joaquin re-enabled via remote ~15:34 (Totalplay-546A-5G Conectado).
+  `svc wifi` does NOT work on this Hisense ROM (Failed transaction) —
+  recorded for the runbook.
+- Continuity: app process `com.joaquinmx.tv_app` alive 10+ min across the
+  outage (never restarted/crashed); wall kept playing on local media with
+  zero network (baseline `wifi-before.png` 15:26:59 → still playing after).
+- Resync: within ~90s of Wi-Fi return the wall showed "WALL UPDATED · v1"
+  (Evidence: `wall-live-v1.png`, 15:35:35) — the live session downloaded the
+  cloud clips over the fixed signed URLs, hash-verified, ACKed, and swapped
+  all 4 tiles to verified remote media (code: `_activateLiveVersion`
+  requires complete verified media; the recovery panel's "local fixtures"
+  line is static help text, not a status readout).
+- Guest panel resynced post-reconnect: TV code + party/channel + QR + guest
+  list (Evidence: `guest-panel-resync.png`). Outage window closed, no gaps.
+- REHEARSAL COMPLETE: cloud check ✓, both installs ✓, phone typed-join +
+  lineup ✓ (both parties), TV host panel + guest list incl. phone ✓,
+  offline continuity ✓, live resync ✓. Only emulator-side item carried
+  over unchanged; no code changed this pass.
