@@ -1,0 +1,2 @@
+model_id,preset_id,seconds_out,seconds_in,credits_charged,provider_task_id,created_at,success
+# EXAMPLE (shape only, not a real charge): wan3.0-video,cheap_demo,2,0,UNKNOWN,<provider_task_id>,<ISO8601_created_at>,<true|false> — set credits_charged ONLY to realized console Credits; never estimates, never synthetic zero, never multiplied across fixture slots
