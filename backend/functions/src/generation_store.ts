@@ -2,7 +2,7 @@ import { Bucket } from "@google-cloud/storage";
 import { FieldValue, Firestore, Timestamp } from "firebase-admin/firestore";
 import { assertRegisteredPartyDevice } from "./auth";
 import { BackendError, parseRequestGeneration, RequestGenerationInput, validateId } from "./contracts";
-import { MEDIA_RETENTION_MS, REQUIRED_CAMERA_IDS } from "./config";
+import { CHEAP_DEMO_PRESET, MEDIA_RETENTION_MS, REQUIRED_CAMERA_IDS } from "./config";
 import { usageIntentDocument, usageLedgerPath } from "./usage";
 import { CameraId, ProviderResult, ProviderTaskStatus, validateCheapDemoControls } from "./video_generation_port";
 
@@ -121,7 +121,7 @@ export class FirestoreGenerationStore {
         idempotencyKey: input.idempotencyKey,
         presetId: "cheap_demo",
         modelId: "wan3.0-video",
-        costEstimate: { modelId: "wan3.0-video", presetId: "cheap_demo", secondsOut: 8 },
+        costEstimate: { modelId: CHEAP_DEMO_PRESET.modelId, presetId: CHEAP_DEMO_PRESET.presetId, secondsOut: CHEAP_DEMO_PRESET.secondsOut },
         expiresAt: Timestamp.fromDate(new Date(this.now().getTime() + MEDIA_RETENTION_MS)),
         cameraAttempts,
         providerTasks: {},
@@ -242,7 +242,7 @@ export class FirestoreGenerationStore {
       if (job.idempotencyKey !== task.idempotencyKey || job.deviceId !== task.deviceId || job.channelId !== task.channelId) {
         throw new BackendError("FORBIDDEN", "Worker identity does not match the job.");
       }
-      if (["ready", "failed", "expired", "purged"].includes(String(job.state))) return { claimed: false, job };
+      if (["ready", "delivering", "failed", "expired", "purged"].includes(String(job.state))) return { claimed: false, job }; // delivering is terminal for the worker: the ACK path owns the job from here.
       const leaseUntil = Number(job.workerLeaseUntilMs ?? 0);
       if (job.state === "running" && leaseUntil > this.now().getTime()) return { claimed: false, job };
       const next = this.now().getTime() + leaseMs;

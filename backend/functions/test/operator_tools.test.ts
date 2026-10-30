@@ -185,6 +185,7 @@ const runtime_1 = require("./runtime");
 const tasks_1 = require("firebase-functions/v2/tasks");
 ${binding}
 exports.requestGeneration = services.requestGeneration;
+exports.getCurrentManifest = services.getCurrentManifest;
 exports.getDeliveryUrls = services.getDeliveryUrls;
 exports.acknowledgeDelivery = services.acknowledgeDelivery;
 exports.sweepExpiredMedia = () => undefined;

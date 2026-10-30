@@ -32,7 +32,11 @@ test("shared v1 fixture parses and hashes through backend contract functions", a
   assert.deepEqual(ack.clipHashes, Object.fromEntries(fixture.manifest.cameraClips.map((clip) => [clip.cameraId, clip.sha256])));
   assert.deepEqual(manifestInput, { partyId: "pilot", deviceId: "tv-pilot", channelId: "main" });
   assert.equal(canonicalManifestHash(fixture.manifest), fixture.canonicalManifestHash);
-  assert.equal(typeof fixture.acknowledgeDelivery.response.ackId, "string");
+  assert.equal(
+    fixture.acknowledgeDelivery.response.ackId,
+    "47aa92e83cf6a4e3cf5ad02a1421357fc29f4fb236f415553e3f6bc8594b1541",
+    "ackId is the deterministic device/channel/version idempotency key pinned by the fixture",
+  );
 });
 
 test("shared v1 fixture runs through callable service composition", { skip: !HAS_FIRESTORE_EMULATOR }, async () => {

@@ -404,7 +404,11 @@ void main() {
         _manifest(4, (int camera) => _liveBytes(camera, 4)),
       );
       await _waitFor(() => activationAttempts == 1);
-      await Future<void>.delayed(const Duration(milliseconds: 30));
+      // No extra sleep: the decoder-failure path records _lastFailedFingerprint
+      // and schedules no retry timer, so the same bytes can never activate
+      // again without a new observation (of which there are none). The
+      // pre-change fixed 30ms sleep guarded nothing; quiescence here is
+      // structural, verified by downloader.calls staying at 4 below.
 
       expect(activationAttempts, 1);
       expect(composition.downloader.calls, 4);

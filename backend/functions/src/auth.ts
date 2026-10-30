@@ -32,7 +32,7 @@ export async function assertRegisteredPartyDevice(
   }
   const channelRef = partyRef.collection("channels").doc(channelId);
   const channelSnap = await channelRef.get();
-  if (!channelSnap.exists || channelSnap.data()?.partyId !== identity.partyId || channelSnap.data()?.status === "disabled") {
+  if (!channelSnap.exists || channelSnap.data()?.partyId !== identity.partyId || channelSnap.data()?.status !== "active") {
     throw new BackendError("FORBIDDEN", "Channel is not registered for this party.");
   }
   return {

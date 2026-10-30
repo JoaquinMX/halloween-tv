@@ -107,8 +107,7 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
     return commitManifest(store, partyId, jobId, idempotencyKey);
   }
 
-  async function pollUntilComplete(taskId: string): Promise<ProviderTaskStatus> {
-    const deadline = now().getTime() + providerTimeoutMs;
+  async function pollUntilComplete(taskId: string, deadline = now().getTime() + providerTimeoutMs): Promise<ProviderTaskStatus> {
     while (true) {
       const status = await getProvider().getStatus(taskId);
       if (status.state === "SUCCEEDED" || status.state === "FAILED") return status;
@@ -128,6 +127,10 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
     await assertRegisteredPartyDevice(options.db, validTask);
     const claim = await store.claimWorker(validTask);
     if (!claim.claimed) return { jobId: validTask.jobId, state: String(claim.job.state), manifestVersion: Number(claim.job.manifestVersion) };
+    // One provider deadline shared by all four sequential camera polls: worst
+    // case stays near providerTimeoutMs (plus normalization headroom checked
+    // by preflight) instead of multiplying per camera against the task timeout.
+    const jobDeadline = now().getTime() + providerTimeoutMs;
     try {
       for (const cameraId of REQUIRED_CAMERA_IDS) {
         let job = await store.getJob(validTask.partyId, validTask.jobId);
@@ -193,7 +196,7 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
         await store.heartbeat(validTask.partyId, validTask.jobId);
         let status: ProviderTaskStatus;
         try {
-          status = await pollUntilComplete(providerTask.taskId);
+          status = await pollUntilComplete(providerTask.taskId, jobDeadline);
         } catch (error) {
           await store.releaseWorker(validTask.partyId, validTask.jobId);
           throw error;

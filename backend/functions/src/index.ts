@@ -16,12 +16,18 @@ setGlobalOptions({ region: REGION, maxInstances: 10 });
 const db = getAdminFirestore();
 const bucket = getAdminBucket();
 const taskQueue = getFunctions(getAdminApp()).taskQueue(`locations/${REGION}/functions/runGeneration`);
+const intEnv = (name: string, fallback: number): number => {
+  const parsed = Number(process.env[name] ?? String(fallback));
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+};
 const services = createRuntimeServices({
   db,
   bucket,
   generationEnabled: isGenerationEnabled(),
   enqueueGeneration: async (task) => taskQueue.enqueue(task),
   fixtureDirectory: resolve(__dirname, "../../runtime/fixtures"),
+  pollIntervalMs: intEnv("PROVIDER_POLL_INTERVAL_MS", 15_000),
+  providerTimeoutMs: intEnv("PROVIDER_TIMEOUT_MS", 12 * 60 * 1000),
 });
 
 const httpsCode: Record<ErrorCode, "unauthenticated" | "permission-denied" | "failed-precondition" | "unavailable" | "resource-exhausted" | "invalid-argument" | "not-found" | "internal"> = {

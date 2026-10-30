@@ -37,6 +37,18 @@ export async function sweepExpiredMedia(
     const paths = new Set<string>();
     addPaths(paths, job.deliveryPaths);
     addPaths(paths, job.generatedPaths);
+    // Staged camera outputs of a dead job are temporary: purge them here so
+    // they do not linger past expiry (live staged outputs are protected by
+    // the references set below, never by this block).
+    const staged = job.stagedOutputs;
+    if (staged && typeof staged === "object") {
+      for (const clip of Object.values(staged as Record<string, unknown>)) {
+        if (clip && typeof clip === "object" && typeof (clip as Record<string, unknown>).objectPath === "string" &&
+            ((clip as Record<string, unknown>).objectPath as string).startsWith("parties/")) {
+          paths.add((clip as Record<string, unknown>).objectPath as string);
+        }
+      }
+    }
     await db.runTransaction(async (transaction) => {
       const current = await transaction.get(snapshot.ref);
       if (!current.exists) return;
@@ -55,6 +67,7 @@ export async function sweepExpiredMedia(
   }
 
   const references = new Set<string>();
+  const liveJobPairs = new Set<string>();
   const [manifests, jobs] = await Promise.all([
     db.collectionGroup("manifests").get(),
     db.collectionGroup("jobs").get(),
@@ -70,8 +83,20 @@ export async function sweepExpiredMedia(
     const job = jobDoc.data();
     const expiry = expiryDate(job.expiresAt);
     if (expiry && expiry > now && !["expired", "purged", "failed"].includes(String(job.state))) {
+      const pairParty = jobDoc.ref.parent.parent?.id ?? "";
+      if (typeof jobDoc.id === "string" && jobDoc.id && pairParty) liveJobPairs.add(`${pairParty}/${jobDoc.id}`);
       addPaths(references, job.deliveryPaths);
       addPaths(references, job.generatedPaths);
+      // Staged camera outputs live only in job.stagedOutputs until publish;
+      // without this the orphan pass deletes a running job's clips.
+      const staged = job.stagedOutputs;
+      if (staged && typeof staged === "object") {
+        for (const clip of Object.values(staged as Record<string, unknown>)) {
+          if (clip && typeof clip === "object" && typeof (clip as Record<string, unknown>).objectPath === "string") {
+            references.add((clip as Record<string, unknown>).objectPath as string);
+          }
+        }
+      }
     }
   }
 
@@ -87,10 +112,19 @@ export async function sweepExpiredMedia(
     if (expires && expires <= now) {
       await file.delete({ ignoreNotFound: true });
       deletedExpiredObjects += 1;
-    } else if (!references.has(path)) {
-      await file.delete({ ignoreNotFound: true });
-      deletedOrphanObjects += 1;
+      continue;
     }
+    if (references.has(path)) continue;
+    // Backstop for in-flight uploads whose paths are not yet listed on any
+    // document (e.g. seed objects between upload and the seeding transaction):
+    // a live (partyId, jobId) pair recorded in the object's own metadata
+    // keeps it until the owning job leaves the live set.
+    const objectJobId = metadata?.metadata?.jobId;
+    const objectPartyId = metadata?.metadata?.partyId;
+    if (typeof objectJobId === "string" && objectJobId && typeof objectPartyId === "string" && objectPartyId &&
+        liveJobPairs.has(`${objectPartyId}/${objectJobId}`)) continue;
+    await file.delete({ ignoreNotFound: true });
+    deletedOrphanObjects += 1;
   }
   return { expiredJobs, deletedExpiredObjects, deletedOrphanObjects };
 }

@@ -15,12 +15,13 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
-const REQUIRED_EXPORTS = ["requestGeneration", "runGeneration", "getDeliveryUrls", "acknowledgeDelivery", "sweepExpiredMedia"];
+const REQUIRED_EXPORTS = ["requestGeneration", "runGeneration", "getCurrentManifest", "getDeliveryUrls", "acknowledgeDelivery", "sweepExpiredMedia"];
 const EXPECTED_NORMALIZATION = { codec: "h264", pixelFormat: "yuv420p", frameRate: "24/1", width: 854, height: 480, durationMs: 2000 };
 const CONFIG_KEYS = new Set([
   "FIREBASE_STORAGE_BUCKET", "FFMPEG_PATH", "FFPROBE_PATH", "GENERATION_WORKER_TIMEOUT_SECONDS",
   "PROVIDER_POLL_TIMEOUT_SECONDS", "NORMALIZATION_HEADROOM_SECONDS", "VIDEO_GENERATION_PROVIDER",
   "FIRESTORE_EMULATOR_HOST", "STORAGE_EMULATOR_HOST", "FAKE_FIXTURE_DIR",
+  "GENERATION_ENABLED", "PROVIDER_POLL_INTERVAL_MS", "PROVIDER_TIMEOUT_MS",
 ]);
 
 type RuntimeManifest = {
@@ -137,6 +138,10 @@ export async function runPreflight(): Promise<Record<string, unknown>> {
   const provider = (process.env.VIDEO_GENERATION_PROVIDER ?? config.VIDEO_GENERATION_PROVIDER ?? "").trim().toLowerCase();
   if (provider !== "fake") {
     throw new Error("Preflight requires an explicit VIDEO_GENERATION_PROVIDER=fake; live generation stays owner-gated.");
+  }
+  const generationEnabled = (process.env.GENERATION_ENABLED ?? config.GENERATION_ENABLED ?? "").trim().toLowerCase() === "true";
+  if (target === "cloud" && generationEnabled) {
+    throw new Error("Cloud preflight refuses GENERATION_ENABLED=true without an explicit owner-approved generation batch; unset it for deploy checks.");
   }
 
   const failures: string[] = [];

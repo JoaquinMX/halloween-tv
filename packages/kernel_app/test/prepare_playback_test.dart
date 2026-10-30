@@ -73,6 +73,13 @@ final class _Downloader implements MediaDownloader {
   }
 }
 
+/// In-memory test double for [CacheStore].
+///
+/// Verification semantics (id + lowercase-sha256 key, size check, digest
+/// re-hash on read, digest check on commit) intentionally mirror the real
+/// [FileCacheStore]; the same flows also run against the real store in
+/// backend_delivery_contract_test.dart and the tv_app live-wall-session
+/// suite, so a divergence here would surface there.
 final class _CacheStore implements CacheStore {
   final Map<String, CachedMedia> entries = <String, CachedMedia>{};
   final Map<String, List<int>> bytesByRef = <String, List<int>>{};

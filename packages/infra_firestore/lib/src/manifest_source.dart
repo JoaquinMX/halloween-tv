@@ -183,6 +183,12 @@ Map<String, Object?> _playbackPayloadFromBackend(
     });
   }
 
+  // TTL note: neither the document `expiresAt` nor per-clip expiry is mapped
+  // into the domain model on purpose. Playback is offline-first last-known-good:
+  // the server enforces expiry at getDeliveryUrls/acknowledgeDelivery time
+  // (CLIP_EXPIRED) and the sweeper purges cloud objects; the client never
+  // discards verified local media on TTL alone. A refresh attempt past expiry
+  // surfaces through the existing expired-URL refresh failure path.
   // Published and newly seeded backend manifests carry a stable `createdAt`.
   // For legacy documents without either timestamp, use an epoch sentinel so
   // repeated observations of identical content remain the same manifest.

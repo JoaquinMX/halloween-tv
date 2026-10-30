@@ -123,8 +123,15 @@ final class PlaybackDependencies {
         identity: identity,
         functions: functions,
       );
+      // Manifests flow through the registered getCurrentManifest callable.
+      // Direct Firestore manifest reads stay denied by backend/firestore.rules;
+      // passing no firestore instance here guarantees the source cannot fall
+      // back to snapshot listeners even if the seam default changes.
       final FirebaseManifestSource source = FirebaseManifestSource(
-        firestore: firestore,
+        watchDocumentData: FirebaseCallableManifestTransport(
+          identity: identity,
+          functions: functions,
+        ).watchDocumentData,
       );
       final FirebaseUrlSigner signer = FirebaseUrlSigner(
         deliveryClient: delivery,

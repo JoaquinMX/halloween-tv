@@ -358,6 +358,7 @@ export function createDeliveryServices(options: DeliveryServiceOptions): Deliver
 
   async function getDeliveryUrls(value: unknown) {
     const identity = requireIdentity(value);
+    if (!identity.channelId) throw new BackendError("INVALID_ARGUMENT", "channelId is required.");
     const registered = await assertRegisteredPartyDevice(db, identity);
     const snapshot = await manifestRef(db, registered.partyId, registered.channelId).get();
     const manifest = manifestFrom(snapshot.data());
@@ -389,6 +390,11 @@ export function createDeliveryServices(options: DeliveryServiceOptions): Deliver
     const manifest = manifestFrom(snapshot.data());
     if (manifest.partyId !== registered.partyId || manifest.channelId !== registered.channelId) {
       throw new BackendError("MANIFEST_MISMATCH", "Current manifest is outside the registered party and channel.");
+    }
+    const currentTimeMs = now().getTime();
+    if (Date.parse(manifest.expiresAt) <= currentTimeMs ||
+        manifest.cameraClips.some((clip) => Date.parse(clip.expiresAt) <= currentTimeMs)) {
+      throw new BackendError("CLIP_EXPIRED", "Current manifest has expired.");
     }
     return serializeManifest(manifest);
   }

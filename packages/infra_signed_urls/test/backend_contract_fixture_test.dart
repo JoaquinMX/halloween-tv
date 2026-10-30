@@ -67,6 +67,9 @@ void main() {
     ];
     // This vector follows backend/functions/src/contracts.ts canonical field
     // order and excludes URL, path, expiry, job, and timestamp fields.
+    // The digest below is a change-detector for the Dart-side reconstruction;
+    // the oracle is backend/functions/test/backend_contract_fixture.test.ts,
+    // which runs the real canonicalManifestHash over the same fixture.
     final String canonical = jsonEncode(<String, Object?>{
       'partyId': ack['partyId'],
       'channelId': ack['channelId'],

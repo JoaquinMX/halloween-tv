@@ -242,6 +242,11 @@ async function main(): Promise<void> {
       ffprobeSha256: createHash("sha256").update(ffprobeBytes).digest("hex"),
     },
     fixtureDirectory: "runtime/fixtures",
+    licenses: {
+      ffmpeg: { package: "@ffmpeg-installer/linux-x64", license: "GPL-3.0-or-later", notice: "https://ffmpeg.org/legal.html" },
+      ffprobe: { package: "@ffprobe-installer/linux-x64", license: "GPL-3.0-or-later", notice: "https://ffmpeg.org/legal.html" },
+      note: "Packaged FFmpeg builds are GPL-licensed. Keep this record with the deployment; redistribution requires the corresponding notices and source availability per the license.",
+    },
     fixtures: preparedFixtures,
     normalization: NORMALIZATION,
     smokeTested: true,

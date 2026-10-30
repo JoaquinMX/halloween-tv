@@ -6,6 +6,10 @@ import 'package:tv_app/src/playback/file_tile_video_controller.dart';
 import 'package:tv_app/src/playback/tile_video_controller.dart';
 
 void main() {
+  // Factory mapping is pinned here (verified-file path and bundled asset
+  // stay on their own controller types). Missing/corrupt-file behavior is
+  // covered at integration level: wall_test.dart's rollback cases drive a
+  // failing local decoder back to the bundled source through this factory.
   TestWidgetsFlutterBinding.ensureInitialized();
 
   test(

@@ -64,6 +64,7 @@ class WallScreen extends StatefulWidget {
       vertical: 18,
     ),
     this.longPressDuration = const Duration(milliseconds: 600),
+    this.sourceSettleTimeout = const Duration(seconds: 15),
   });
 
   /// Channel plugin resolved from the kernel registry.
@@ -120,6 +121,12 @@ class WallScreen extends StatefulWidget {
 
   /// How long OK must be held to reveal the recovery panel.
   final Duration longPressDuration;
+
+  /// Bound for one tile source replacement to settle.
+  ///
+  /// Defaults to 15s. Injectable so tests do not stall real seconds on
+  /// decoder failure and prod can tune it alongside other timeouts.
+  final Duration sourceSettleTimeout;
 
   @override
   State<WallScreen> createState() => _WallScreenState();
@@ -361,7 +368,7 @@ class _WallScreenState extends State<WallScreen> {
     setState(() => _tileSources[cameraId] = source);
     await WidgetsBinding.instance.endOfFrame;
     try {
-      return await settled.future.timeout(const Duration(seconds: 15));
+      return await settled.future.timeout(widget.sourceSettleTimeout);
     } finally {
       if (identical(_sourceSettles[cameraId], settled)) {
         _sourceSettles.remove(cameraId);

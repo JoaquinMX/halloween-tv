@@ -16,6 +16,12 @@ This replaces older status notes that described the Firebase backend or live ada
 
 These paths and tests are implementation evidence. They do not imply that the current TV entry point invokes the live adapters or that deployed Functions call the generation pipeline.
 
+## Cycle-5 review dispositions (3 reviewers, same diff base 80077c7..e5a71d3)
+
+- Review A (tests): approve, 4 Low + 1 Minimal, all applied (canonical-vector doc note, file-controller mapping comment, _CacheStore semantics pin, state-gated decoder-quiescence proof, ackId deep-equal).
+- Review B (code): request-changes. Applied: claimWorker refuses delivering jobs; costEstimate uses CHEAP_DEMO_PRESET; getDeliveryUrls validates channelId; poll/timeout env plumbed to the worker; ACK failure no longer demotes — REJECTED with rationale (demotion drives the proven bounded retry; errorRecoverable never tears down the playing wall; TTL sweeper bounds cloud retention); expiresAt documented server-enforced; strict active-channel check centralized; settle timeout injectable.
+- Review C (compliance/security): request-changes. Applied: stagedOutputs + live job-pair backstop in the sweeper (running-job data-loss fix); expired-job staged purge; seed pre-commit object verification; getCurrentManifest rejects expired manifests; channel status strictly active; callable manifest transport wired in the TV composition (no direct manifest reads); cloud seeder refuses guessable pilot IDs; preflight checks getCurrentManifest export + GENERATION_ENABLED guard; GPL notices recorded in the runtime manifest. Bearer-ID/App-Check hardening stays owner-gated (anonymous pilot model by owner decision; runbook requires unguessable provisioned IDs for cloud).
+
 ## Deployment readiness
 
 **Not ready for Functions deployment or live TV activation.** The predeploy hook now builds and checks the artifact, explicit project/bucket, fixture bytes, Linux x64 binaries, normalization profile, callable exports, and task deadline. Remaining blockers against the source in this checkout:
@@ -50,7 +56,7 @@ The runbook provides concrete future project, IAM/signing, APIs/task/scheduler, 
 
 Test success does not change deployment, device, or live-spend statuses above.
 
-- Backend Functions under Firebase emulators: 27/27 pass, 0 skipped (`npm run test:emulator`, serial). Covers cheap_demo lock, alibaba adapter mapping, contracts, registered callables, delivery/ACK/purge, expiry, TTL/orphan sweep, security rules, usage reconciliation, runtime composition, and operator tools (seed/dry-run/verify/reconcile, preflight refusals).
+- Backend Functions under Firebase emulators: 33/33 pass, 0 skipped (`npm run test:emulator`, serial). Covers cheap_demo lock, alibaba adapter mapping, contracts, registered callables, delivery/ACK/purge, expiry, TTL/orphan sweep, security rules, usage reconciliation, runtime composition, and operator tools (seed/dry-run/verify/reconcile, preflight refusals).
 - Dart packages: kernel_app 20, infra_firestore 35, infra_signed_urls 19, core_cache 17, core_playlist 28, infra_settings 11 — all pass; `dart analyze` clean on changed libs.
 - tv_app: `flutter analyze` clean, full `flutter test` 43/43 pass, `flutter build apk --debug` succeeds.
 - Orchestrator-fixed defects (with tests): boot prepare-before-activate order; `fileExists` seam + setUpAll file setup (real dart:io hangs in testWidgets FakeAsync zone); serial emulator suite + shared-emulator count assertion; operator seed ACK ordering per persisted-ACK contract.

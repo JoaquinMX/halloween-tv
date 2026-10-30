@@ -108,9 +108,12 @@ GENERATION_WORKER_TIMEOUT_SECONDS=900
 PROVIDER_POLL_TIMEOUT_SECONDS=720
 NORMALIZATION_HEADROOM_SECONDS=120
 DELIVERY_URL_TTL_SECONDS=900
+# Optional (defaults shown): PROVIDER_POLL_INTERVAL_MS=15000 PROVIDER_TIMEOUT_MS=720000
 ```
 
 Expected evidence: deployment config resolves to the same project/bucket as step 1, has no emulator host variables, and starts with `VIDEO_GENERATION_PROVIDER=fake`. The worker timeout must be no shorter than polling plus normalization headroom and must match the `timeoutSeconds` declared by the task handler. The preflight refuses missing or inconsistent values.
+
+Sizing note: the worker polls cameras sequentially, so the worst case is roughly four single-camera poll budgets plus normalization. The checked-in 900s task deadline fits fake-provider runs (seconds) and typical fast provider jobs, not four back-to-back 12-minute worst cases. Size `GENERATION_WORKER_TIMEOUT_SECONDS` (and the handler `timeoutSeconds`) for the provider you approve, keep `maxAttempts: 1`, and rely on crash reconciliation plus explicit re-request — never silent auto-retry — if a dispatch dies mid-pipeline.
 
 Do not set an Alibaba provider mode, live-spend switch, provider API key, or Secret Manager value in this phase. A later live batch requires a separate human approval, budget cap, and owner present in the Alibaba console.
 
@@ -178,7 +181,7 @@ npm run seed:pilot:apply -- --party=pilot --device=tv-pilot --channel=haunted_su
 
 The seeder defaults to preview. It uses the repository's real MP4 fixture bytes, computes SHA-256 and sizes, writes stable version-1 publication metadata and a `ready` fixture job with a 24-hour expiry, and does not replace an unrelated/newer current manifest. Repeating the exact seed is a no-op; after ACK changes the job to `purged`, the seed refuses to recreate deleted objects.
 
-For a future owner-approved cloud fixture seed, select the cloud target and provide all four explicit options; first omit `--apply` to preview:
+For a future owner-approved cloud fixture seed, select the cloud target and provide all four explicit options; first omit `--apply` to preview. Party/device IDs are the TV authorization credential (no login gate by owner decision), so a real deployment must use unguessable provisioned values — never the `pilot` / `tv-pilot` emulator defaults, which the cloud seeder refuses. Pairing additions and App Check enforcement remain future hardening; today, ID secrecy plus least-privilege rules is the boundary.
 
 ```sh
 npm run seed:pilot:cloud -- --project="$PROJECT_ID" --bucket="$BUCKET" --party='<PILOT_PARTY>' --device='<REGISTERED_TV_DEVICE>' --channel=haunted_surveillance

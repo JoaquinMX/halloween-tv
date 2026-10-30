@@ -76,6 +76,9 @@ function selectEnvironment(options: Options): { projectId: string; bucketName: s
   }
   if (firestoreEmulator || storageEmulator) fail("Cloud seeding refuses emulator environment variables; clear both before selecting a cloud target.");
   if (!options.project || !options.bucket) fail("Cloud seed preview/apply requires explicit --project=PROJECT and --bucket=BUCKET flags.");
+  if (options.party === DEFAULT_PARTY || options.device === DEFAULT_DEVICE) {
+    fail("Cloud seeding refuses the guessable pilot defaults: provisioned party/device IDs are the TV authorization credential, so a real deployment must use explicit unguessable --party/--device values (or PILOT_PARTY_ID/PILOT_DEVICE_ID).");
+  }
   const ambientProject = process.env.GCLOUD_PROJECT ?? process.env.GOOGLE_CLOUD_PROJECT;
   if (ambientProject && ambientProject !== options.project) fail("Explicit --project disagrees with GCLOUD_PROJECT/GOOGLE_CLOUD_PROJECT; clear the conflicting target.");
   if (process.env.FIREBASE_STORAGE_BUCKET && process.env.FIREBASE_STORAGE_BUCKET !== options.bucket) {
@@ -267,6 +270,9 @@ async function applySeed(
       createdAt: timestamp,
       expiresAt,
     };
+    const present = await Promise.all(clips.map((clip) =>
+      bucket.file(objectPath(options.party, options.channel, 1, clip.cameraId)).exists().then(([value]) => value)));
+    if (present.some((value) => !value)) fail("Seeded objects changed during upload (a concurrent sweep may have removed them); refusing partial commit.");
     commitAttempted = true;
     await db.runTransaction(async (transaction) => {
       const [partySnapshot, deviceSnapshot, channelSnapshot, manifestSnapshot, jobSnapshot] = await Promise.all([
