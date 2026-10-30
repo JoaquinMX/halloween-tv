@@ -1,0 +1,9 @@
+{
+  "_comment": "Companion app Firebase options (PLACEHOLDERS ONLY). Copy to firebase.json (git-ignored) and fill in real values from the Firebase console. Never commit real project ids, keys, or emulator addresses.",
+  "projectId": "YOUR-FIREBASE-PROJECT-ID",
+  "appId": "YOUR-FIREBASE-APP-ID",
+  "apiKey": "YOUR-FIREBASE-API-KEY",
+  "functionsRegion": "us-central1",
+  "functionsEmulatorHost": "",
+  "functionsEmulatorPort": null
+}
