@@ -4,19 +4,21 @@ import { onTaskDispatched } from "firebase-functions/v2/tasks";
 import { onSchedule } from "firebase-functions/v2/scheduler";
 import { setGlobalOptions } from "firebase-functions/v2/options";
 import { BackendError } from "./contracts";
-import { ErrorCode, REGION } from "./config";
+import { ErrorCode, isGenerationEnabled, REGION } from "./config";
 import { getAdminApp, getAdminBucket, getAdminFirestore } from "./firebase";
-import { createDeliveryServices, GenerationTask } from "./delivery";
+import { GenerationTask } from "./delivery";
 import { createRetentionService } from "./retention";
+import { createRuntimeServices } from "./runtime";
 
 setGlobalOptions({ region: REGION, maxInstances: 10 });
 
 const db = getAdminFirestore();
 const bucket = getAdminBucket();
 const taskQueue = getFunctions(getAdminApp()).taskQueue(`locations/${REGION}/functions/runGeneration`);
-const services = createDeliveryServices({
+const services = createRuntimeServices({
   db,
   bucket,
+  generationEnabled: isGenerationEnabled(),
   enqueueGeneration: async (task) => taskQueue.enqueue(task),
 });
 
@@ -60,6 +62,10 @@ export const publishManifest = services.publishManifest;
 /** Anonymous TV callable; URLs are scoped to the registered active party/device. */
 export const getDeliveryUrls = onCall({ maxInstances: 10 }, (request) =>
   callable(() => services.getDeliveryUrls(request.data)));
+
+/** Anonymous TV callable; returns the validated current manifest as plain JSON. */
+export const getCurrentManifest = onCall({ maxInstances: 10 }, (request) =>
+  callable(() => services.getCurrentManifest(request.data)));
 
 /** Anonymous TV callable; ACK and purge are idempotent by device/channel/version. */
 export const acknowledgeDelivery = onCall({ maxInstances: 10 }, (request) =>

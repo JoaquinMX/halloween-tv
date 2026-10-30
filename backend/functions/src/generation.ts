@@ -32,6 +32,7 @@ export interface GenerationServiceOptions {
 export interface GenerationServices {
   requestGeneration(value: unknown): ReturnType<FirestoreGenerationStore["requestGeneration"]>;
   getGenerationStatus(value: unknown): ReturnType<FirestoreGenerationStore["getGenerationStatus"]>;
+  failEnqueue(task: GenerationTask): Promise<void>;
   runGeneration(task: GenerationTask): Promise<{ jobId: string; state: string; manifestVersion?: number }>;
   normalizeAndStage(partyId: string, jobId: string, cameraId: CameraId, result: ProviderResult): Promise<Record<string, unknown>>;
   publishManifest(partyId: string, jobId: string, idempotencyKey: string): Promise<import("./contracts").DeliveryManifest>;
@@ -50,7 +51,8 @@ function ledgerInput(job: FirebaseFirestore.DocumentData, cameraId: CameraId): U
 }
 
 export function createGenerationServices(options: GenerationServiceOptions): GenerationServices {
-  const provider = options.provider ?? createVideoGenerationProviderFromEnvironment();
+  let provider = options.provider;
+  const getProvider = () => provider ??= createVideoGenerationProviderFromEnvironment();
   const store = new FirestoreGenerationStore({ db: options.db, bucket: options.bucket, now: options.now });
   const sleep = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
   const now = options.now ?? (() => new Date());
@@ -108,7 +110,7 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
   async function pollUntilComplete(taskId: string): Promise<ProviderTaskStatus> {
     const deadline = now().getTime() + providerTimeoutMs;
     while (true) {
-      const status = await provider.getStatus(taskId);
+      const status = await getProvider().getStatus(taskId);
       if (status.state === "SUCCEEDED" || status.state === "FAILED") return status;
       if (now().getTime() >= deadline) throw new BackendError("PROVIDER_UNAVAILABLE", "Provider task polling timed out; task ID is retained for reconciliation.");
       await sleep(pollIntervalMs);
@@ -139,7 +141,7 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
             secondsOut?: number; secondsIn?: number; creditsCharged?: number | null; providerState?: string;
           } | undefined;
           if (!cameraResult || cameraResult.providerState !== "SUCCEEDED") {
-            const result = await provider.getResult(providerTask.taskId);
+            const result = await getProvider().getResult(providerTask.taskId);
             await store.recordCameraResult(validTask.partyId, validTask.jobId, cameraId, result, { state: "SUCCEEDED" }, stagedOutput);
             await recordUsageOutcome(options.db, ledgerInput(job, cameraId), {
               success: true,
@@ -168,7 +170,7 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
               providerTask = (job.providerTasks ?? {})[cameraId] as { taskId?: unknown } | undefined;
             } else {
               const request = buildCheapDemoRequest(validTask.jobId, validTask.idempotencyKey, cameraId);
-              const submitted = await provider.submit(request);
+              const submitted = await getProvider().submit(request);
               await store.recordSubmission(validTask.partyId, validTask.jobId, cameraId, submitted.taskId);
               providerTask = { taskId: submitted.taskId };
             }
@@ -207,7 +209,7 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
           });
           throw new BackendError("PROVIDER_UNAVAILABLE", "Provider task failed.");
         }
-        const result = await provider.getResult(providerTask.taskId);
+        const result = await getProvider().getResult(providerTask.taskId);
         const staged = await normalizeAndStage(validTask.partyId, validTask.jobId, cameraId, result);
         await store.recordCameraResult(validTask.partyId, validTask.jobId, cameraId, result, status, staged);
         await recordUsageOutcome(options.db, ledgerInput(job, cameraId), {
@@ -233,6 +235,7 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
   return {
     requestGeneration: (value) => store.requestGeneration(value),
     getGenerationStatus: (value) => store.getGenerationStatus(value),
+    failEnqueue: (task) => store.failEnqueue(task),
     runGeneration,
     normalizeAndStage,
     publishManifest: publish,

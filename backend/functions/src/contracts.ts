@@ -38,9 +38,12 @@ export interface DeliveryManifest {
   schemaVersion: number;
   jobId: string;
   cameraClips: CanonicalClip[];
+  /** Firestore timestamp in storage; callable serialization converts it to ISO. */
   createdAt?: unknown;
   expiresAt: string;
 }
+
+export interface CurrentManifestInput extends Identity {}
 
 export interface AckInput extends Identity {
   manifestVersion: number;
@@ -103,6 +106,12 @@ export function parseAck(value: unknown): AckInput {
     clipHashes[cameraId] = hash;
   }
   return { ...identity, manifestVersion: Number(value.manifestVersion), clipHashes };
+}
+
+export function parseCurrentManifestInput(value: unknown): CurrentManifestInput {
+  const identity = requireIdentity(value);
+  if (!identity.channelId) throw new BackendError("INVALID_ARGUMENT", "channelId is required.");
+  return identity;
 }
 
 export function validateId(value: unknown, label: string): string {

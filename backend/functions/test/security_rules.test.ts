@@ -19,6 +19,7 @@ test("Firestore allows only registered device registration reads and denies clie
       await setDoc(doc(firestore, "parties/pilot"), { status: "active", activeChannelId: "main" });
       await setDoc(doc(firestore, "parties/pilot/devices/tv-1"), { partyId: "pilot", status: "active" });
       await setDoc(doc(firestore, "parties/pilot/channels/main"), { partyId: "pilot", status: "active" });
+      await setDoc(doc(firestore, "parties/pilot/manifests/current_main"), { partyId: "pilot", channelId: "main", version: 1 });
     });
     const client = env.unauthenticatedContext().firestore();
     await assertSucceeds(getDoc(doc(client, "parties/pilot/devices/tv-1")));
@@ -26,6 +27,7 @@ test("Firestore allows only registered device registration reads and denies clie
     await assertFails(getDoc(doc(client, "parties/other/devices/tv-1")));
     await assertFails(getDoc(doc(client, "parties/pilot")));
     await assertFails(getDoc(doc(client, "parties/pilot/channels/main")));
+    await assertFails(getDoc(doc(client, "parties/pilot/manifests/current_main")));
     await assertFails(setDoc(doc(client, "parties/pilot/devices/tv-1"), { status: "disabled" }));
     await assertFails(setDoc(doc(client, "parties/pilot/jobs/forged"), { state: "ready" }));
   } finally {
