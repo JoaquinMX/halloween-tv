@@ -123,3 +123,32 @@ with party/TV-device/channel IDs returned manifest v1, 4 clips
 - gcloud CLI user auth on the Mac mini is expired (`invalid_grant`); ADC file
   (refreshed 14:08 today) still works for tools + read-only REST. Joaquin
   may want to `gcloud auth login` at some point.
+
+## 8. Resume pass — reinstalls + fresh join re-walk (15:24–15:26 CST)
+
+- Reinstalled both release builds (`adb install -r`, Success on both);
+  `adb devices` confirms `9A291FFBA00654 device` + `192.168.1.19:5555 device`.
+- Cloud read-only re-check: `getCurrentManifest` returns v1 + 4 clips for
+  party `rehearsal-e845…` / `haunted_surveillance`; `getDeliveryUrls`
+  STILL returns 500 INTERNAL — signing blocker (§7) persists.
+- Phone (reinstall cleared session): retyped new party + `haunted_surveillance`,
+  Join accepted, Now playing v1 published 2026-10-30T21:14:04Z, last check
+  2026-10-30T21:25:11Z, 4 cameras. Evidence: `phone-rejoin-lineup.png`.
+  (Note: `install -r` kept app data, so the phone kept device ID
+  `p-2f47257f…`; server took the existing-registration path.)
+- TV guest panel re-verified live: QR + TV code + 6 seeded guests + phone
+  `p-2f47257f…`. Evidence: `tv-guest-panel-live.png`, `tv-guest-list-full.png`.
+
+## 9. Wi-Fi kill test — OUTAGE IN PROGRESS, TV offline since ~15:27 CST
+
+- Baseline wall screenshot `wifi-before.png` (all tiles playing, 15:26:59).
+- `svc wifi disable/enable` FAILS on this Hisense ROM
+  ("Failure calling service wifi: Failed transaction" — logged).
+- `cmd wifi set-wifi-enabled disabled` WORKED: adb-over-WiFi dropped
+  immediately ("error: closed"), TV now `offline` in `adb devices`, connect
+  attempts time out. No remote re-enable path exists (no USB adb).
+- WAITING ON JOAQUIN: turn TV Wi-Fi back on via remote
+  (Settings → Network → Wi-Fi). After reconnect I will verify: wall still
+  playing with current timestamps (proves uninterrupted offline playback
+  through the outage), guest panel refreshes (resync of working callables),
+  and record the outage window. Cloud-cache variant stays blocked on §7.
