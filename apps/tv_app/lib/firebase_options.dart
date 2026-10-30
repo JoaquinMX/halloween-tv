@@ -17,10 +17,7 @@ import 'package:flutter/foundation.dart'
 class DefaultFirebaseOptions {
   static FirebaseOptions get currentPlatform {
     if (kIsWeb) {
-      throw UnsupportedError(
-        'DefaultFirebaseOptions have not been configured for web - '
-        'you can reconfigure this by running the FlutterFire CLI again.',
-      );
+      return web;
     }
     switch (defaultTargetPlatform) {
       case TargetPlatform.android:
@@ -57,6 +54,15 @@ class DefaultFirebaseOptions {
     appId: '1:897751802522:android:2fa1aa7c3032610b173523',
     messagingSenderId: '897751802522',
     projectId: 'halloween-tv',
+    storageBucket: 'halloween-tv.firebasestorage.app',
+  );
+
+  static const FirebaseOptions web = FirebaseOptions(
+    apiKey: 'AIzaSyCQvtEESLUYl4zeQiJkpzEpP5JQeWlhjdc',
+    appId: '1:897751802522:web:def02160cd2616a2173523',
+    messagingSenderId: '897751802522',
+    projectId: 'halloween-tv',
+    authDomain: 'halloween-tv.firebaseapp.com',
     storageBucket: 'halloween-tv.firebasestorage.app',
   );
 }
