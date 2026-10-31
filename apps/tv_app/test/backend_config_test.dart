@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:channel_cctv/channel_cctv.dart';
 import 'package:core_cache/core_cache.dart';
 import 'package:core_playlist/core_playlist.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -123,4 +124,64 @@ void main() {
       );
     },
   );
+
+  group('TV_CHANNEL_ID', () {
+    Map<String, String> liveBase() => <String, String>{
+      'BACKEND_MODE': 'firebase',
+      'TV_PARTY_ID': 'haunt-party-1',
+      'TV_DEVICE_ID': 'tv-room-1',
+      'TV_CHANNEL_ID': 'haunt-live-9',
+      'FIREBASE_PROJECT_ID': 'demo-haunted-tv',
+      'FIREBASE_APP_ID': '1:123:web:abc',
+      'FIREBASE_API_KEY': 'client-placeholder',
+      'FIREBASE_MESSAGING_SENDER_ID': '123',
+    };
+
+    test('defaults to the CCTV channel offline', () {
+      final BackendConfig offline = BackendConfig.parse(const <String, String>{});
+      expect(offline.channelId, hauntedSurveillanceChannelId);
+    });
+
+    test('defaults to the CCTV channel for emulator builds', () {
+      final BackendConfig config = BackendConfig.parse(const <String, String>{
+        'BACKEND_MODE': 'emulator',
+        'TV_PARTY_ID': 'party-1',
+        'TV_DEVICE_ID': 'tv-room-1',
+        'FUNCTIONS_REGION': 'northamerica-northeast1',
+        'FIREBASE_PROJECT_ID': 'demo-haunted-tv',
+        'FIREBASE_APP_ID': '1:123:web:abc',
+        'FIREBASE_API_KEY': 'client-placeholder',
+        'FIREBASE_MESSAGING_SENDER_ID': '123',
+        'FIRESTORE_EMULATOR_HOST': '127.0.0.1',
+        'FIRESTORE_EMULATOR_PORT': '8080',
+        'FUNCTIONS_EMULATOR_HOST': '127.0.0.1',
+        'FUNCTIONS_EMULATOR_PORT': '5001',
+      });
+      expect(config.isLiveConfigured, isTrue, reason: config.error);
+      expect(config.channelId, hauntedSurveillanceChannelId);
+    });
+
+    test('firebase requires TV_CHANNEL_ID', () {
+      final Map<String, String> values = liveBase()..remove('TV_CHANNEL_ID');
+      final BackendConfig config = BackendConfig.parse(values);
+      expect(config.isLiveRequested, isTrue);
+      expect(config.isLiveConfigured, isFalse);
+      expect(config.error, contains('TV_CHANNEL_ID'));
+    });
+
+    test('firebase rejects an unprovisioned TV_CHANNEL_ID', () {
+      final BackendConfig config = BackendConfig.parse(
+        liveBase()..['TV_CHANNEL_ID'] = 'not a valid id!',
+      );
+      expect(config.isLiveConfigured, isFalse);
+      expect(config.error, contains('provisioned'));
+    });
+
+    test('firebase accepts a provisioned TV_CHANNEL_ID', () {
+      final BackendConfig config = BackendConfig.parse(liveBase());
+      expect(config.isLiveConfigured, isTrue, reason: config.error);
+      expect(config.channelId, 'haunt-live-9');
+      expect(config.channelId, isNot(hauntedSurveillanceChannelId));
+    });
+  });
 }

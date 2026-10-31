@@ -649,6 +649,108 @@ void main() {
       final String pubspec = await File('pubspec.yaml').readAsString();
       expect(pubspec, contains(kBundledFixtureManifestKey));
     });
+
+    group('live channel scoping', () {
+      const String liveChannel = 'haunt-live-9';
+
+      test('fixture and cached manifests follow the channel parameter', () async {
+        final bytesByAsset = _realBytes();
+        final cached = _manifestFor(
+          bytesByAsset,
+          channelId: liveChannel,
+          version: 7,
+        );
+        final fixture = _manifestFor(
+          bytesByAsset,
+          channelId: liveChannel,
+          version: 1,
+        );
+        final store = InMemoryManifestStore(cached);
+        String? seenFixtureChannel;
+        final boot = WallBoot(
+          store: store,
+          partyId: 'local-party',
+          channelId: liveChannel,
+          fixtureLoader:
+              ({required String partyId, required String channelId}) async {
+                seenFixtureChannel = channelId;
+                return fixture;
+              },
+          assetBytesLoader: _bytesLoader(bytesByAsset),
+        );
+
+        final result = await boot.boot();
+
+        expect(result.isReady, isTrue, reason: result.unavailableReason);
+        expect(result.usedCachedManifest, isTrue);
+        expect(result.manifest!.version, 7);
+        expect(result.manifest!.channelId, liveChannel);
+        expect(
+          result.manifest!.channelId,
+          isNot(hauntedSurveillanceChannelId),
+        );
+        // The cached hit means the fixture was never consulted.
+        expect(seenFixtureChannel, isNull);
+        expect(store.writes, 0);
+      });
+
+      test(
+        'a cached CCTV-channel manifest misses a live-channel boot',
+        () async {
+          // Regression: the comparison must follow the parameter, not the
+          // hardcoded CCTV constant, or a live wall would play a manifest
+          // scoped to the wrong Firestore channel.
+          final bytesByAsset = _realBytes();
+          final cached = _manifestFor(bytesByAsset, version: 7);
+          expect(cached.channelId, hauntedSurveillanceChannelId);
+          final fixture = _manifestFor(
+            bytesByAsset,
+            channelId: liveChannel,
+            version: 3,
+          );
+          final store = InMemoryManifestStore(cached);
+          String? seenFixtureChannel;
+          final boot = WallBoot(
+            store: store,
+            partyId: 'local-party',
+            channelId: liveChannel,
+            fixtureLoader:
+                ({required String partyId, required String channelId}) async {
+                  seenFixtureChannel = channelId;
+                  return fixture;
+                },
+            assetBytesLoader: _bytesLoader(bytesByAsset),
+          );
+
+          final result = await boot.boot();
+
+          expect(result.isReady, isTrue, reason: result.unavailableReason);
+          expect(result.usedCachedManifest, isFalse);
+          expect(result.manifest!.version, 3);
+          expect(result.manifest!.channelId, liveChannel);
+          expect(seenFixtureChannel, liveChannel);
+        },
+      );
+
+      test('readCached follows the channel parameter', () async {
+        final bytesByAsset = _realBytes();
+        final live = _manifestFor(bytesByAsset, channelId: liveChannel);
+        final store = InMemoryManifestStore(live);
+        final boot = WallBoot(
+          store: store,
+          channelId: liveChannel,
+          fixtureLoader:
+              ({required String partyId, required String channelId}) async =>
+                  _manifestFor(bytesByAsset, channelId: channelId),
+          assetBytesLoader: _bytesLoader(bytesByAsset),
+        );
+        expect((await boot.readCached())!.channelId, liveChannel);
+
+        // Same bytes under the CCTV channel do not satisfy a live boot.
+        store.stored = _manifestFor(bytesByAsset);
+        expect(await boot.readCached(), isNull);
+      });
+    });
   });
 }
 
