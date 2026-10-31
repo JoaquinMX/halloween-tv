@@ -8,8 +8,7 @@ import { createGuestUploadService } from "./guest_upload";
 import { createJoinPartyService } from "./join_party";
 import { createHostJoinService } from "./host_join";
 import { createHostMediaService } from "./host_media";
-import { FakeVideoGenerationPort, createVideoGenerationProviderFromEnvironment } from "./providers/fake";
-import { FakeImageGenerationPort } from "./providers/fake_image";
+import { createVideoGenerationProviderFromEnvironment } from "./providers/fake";
 import { ImageGenerationPort } from "./image_generation_port";
 import { CameraId, ProviderResult, VideoGenerationPort } from "./video_generation_port";
 
@@ -81,12 +80,36 @@ export function createRuntimeServices(options: RuntimeServiceOptions): RuntimeSe
             : options.fixtureDirectory,
         )
       : undefined);
+  // Still-stage wiring fails closed: the production composition never
+  // silently substitutes the offline fake. An explicitly injected
+  // imageProvider (tests, rehearsal, or the gated Alibaba construction
+  // below) is required; otherwise cartoon generation refuses with
+  // PROVIDER_UNAVAILABLE instead of billing a live video for a placeholder
+  // still. Fake-produced stills are marked fixture:true (see generation.ts)
+  // and publish refuses them for non-rehearsal jobs.
+  const configuredImageProvider = (process.env.IMAGE_GENERATION_PROVIDER ?? "").trim().toLowerCase();
+  let imageProvider = options.imageProvider;
+  if (!imageProvider && configuredImageProvider === "alibaba") {
+    try {
+      const { AlibabaImageGenerationPort } = require("./providers/alibaba_image") as typeof import("./providers/alibaba_image");
+      const apiKey = process.env.ALIBABA_API_KEY ?? "";
+      const workspaceId = process.env.ALIBABA_WORKSPACE_ID ?? "";
+      if (apiKey && workspaceId) {
+        imageProvider = new AlibabaImageGenerationPort({
+          apiKey, workspaceId,
+          resolveImageUrl: async () => { throw new Error("Image URL resolution is not configured."); },
+        });
+      }
+    } catch {
+      imageProvider = undefined;
+    }
+  }
   const generation = options.generationEnabled === true
     ? createGenerationServices({
       db: options.db,
       bucket: options.bucket,
       provider,
-      imageProvider: options.imageProvider ?? new FakeImageGenerationPort(),
+      imageProvider,
       now: options.now,
       sleep: options.sleep,
       pollIntervalMs: options.pollIntervalMs,

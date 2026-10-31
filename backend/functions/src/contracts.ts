@@ -594,9 +594,13 @@ function guestBindingOf(job: Record<string, unknown>): {
   consentRevision: string;
 } | undefined {
   const guest = job.guestMedia as Record<string, unknown> | undefined;
-  if (!guest || typeof guest.submissionId !== "string" ||
+  if (guest === undefined) return undefined;
+  // Partially written or migrated bindings fail closed (never downgrade to
+  // text-only): a present-but-incomplete guest binding is corruption, not
+  // absence.
+  if (typeof guest.submissionId !== "string" ||
       typeof guest.sourceHash !== "string" || typeof guest.consentRevision !== "string") {
-    return undefined;
+    throw deliveryFailure("authorization", "MANIFEST_MISMATCH", "Guest media binding is malformed; delivery is refused.");
   }
   return { submissionId: guest.submissionId, sourceHash: guest.sourceHash, consentRevision: guest.consentRevision };
 }
@@ -606,7 +610,11 @@ function seedBindingOf(job: Record<string, unknown>): {
   kind: string;
 } | undefined {
   const seed = job.seedProvenance as Record<string, unknown> | undefined;
-  if (!seed || typeof seed.seedId !== "string" || typeof seed.kind !== "string") return undefined;
+  if (seed === undefined) return undefined;
+  // Partially written seed bindings fail closed for the same reason.
+  if (typeof seed.seedId !== "string" || typeof seed.kind !== "string") {
+    throw deliveryFailure("authorization", "MANIFEST_MISMATCH", "Seed binding is malformed; delivery is refused.");
+  }
   return { seedId: seed.seedId, kind: seed.kind };
 }
 
@@ -623,17 +631,21 @@ export function isExplicitlySupportedLegacyArtifact(
   if (seed.partyId !== job.partyId || seed.channelId !== job.channelId) return false;
   if (seed.status === "deleted") return false;
   if (seed.status === "failed" || seed.status === "expired" || seed.status === "withdrawn") return false;
-  // Host-pipeline authorization (cycle-13 fix-p4): seeds minted server-side
+  // Host-pipeline authorization (cycle-13 fix-2): seeds minted server-side
   // through the registered-host gate (generateHostVideo) carry the
-  // server-minted `hv-{seedId}` job link on both the job and the
-  // callable-only seed doc, with matching party/channel. That pipeline
-  // binding IS the explicit host approval, so no separate operator flag is
-  // required; the host pipeline never writes operatorApproved/approved.
-  // Live pipeline states (queued/running/ready/approved) deliver; terminal
-  // states stay denied above with their explicit codes.
+  // server-minted seed binding persisted on the job (job.seenProvenance,
+  // written only by generateHostVideo/jobIdForHostSeed with the registered
+  // host device recorded on the seed doc) with matching party/channel. That
+  // persisted binding plus the seed's own host-device evidence IS the
+  // explicit host approval, so no separate operator flag is required; the
+  // host pipeline never writes operatorApproved/approved. Provenance is
+  // never derived from a jobId prefix at read time (see delivery/publish:
+  // no hv- inference). Live pipeline states (queued/running/ready/approved)
+  // deliver; terminal states stay denied above with their explicit codes.
   if (binding.kind === "host" &&
-      job.jobId === `hv-${binding.seedId}` &&
       seed.jobId === `hv-${binding.seedId}` &&
+      (job as Record<string, unknown>).jobId === `hv-${binding.seedId}` &&
+      typeof seed.deviceId === "string" && (seed.deviceId as string).length > 0 &&
       (seed.status === "queued" || seed.status === "running" ||
        seed.status === "ready" || seed.status === "approved")) {
     return true;
@@ -663,6 +675,12 @@ export function assertCartoonChainComplete(job: Record<string, unknown>): void {
   }
   if (chain.videoStillSha256 !== undefined && chain.videoStillSha256 !== chain.stillSha256) {
     throw deliveryFailure("manifest", "MANIFEST_MISMATCH", "Cartoon video stage does not match the generated still.");
+  }
+  // Offline-fake stills never publish as real artifacts: a still produced by
+  // the offline fixture port (stillFixture: true, see generation.ts) is
+  // rehearsal-only. Production jobs with a fixture still fail closed here.
+  if (chain.stillFixture === true && (job as Record<string, unknown>).rehearsalOnly !== true) {
+    throw deliveryFailure("manifest", "MANIFEST_MISMATCH", "Cartoon still came from the offline fixture; publication is refused.");
   }
   if (typeof chain.portraitSubmissionId === "string" && chain.portraitSubmissionId !== "" &&
       (typeof chain.portraitSourceHash !== "string" || typeof chain.portraitConsentRevision !== "string")) {
@@ -719,8 +737,13 @@ export function evaluateDeliveryProvenance(input: ProvenanceEvaluationInput): De
     assertSeedProvenance(job, seed, nowMs);
     return seedBinding.kind as DeliveryProvenanceKind;
   }
-  // Text-only jobs carry no consent binding and remain deliverable.
-  return "text-only";
+  // Text-only jobs carry no consent binding and remain deliverable ONLY
+  // with a positive server-written marker (job.kind === "text-only"):
+  // absence of a binding alone never authorizes delivery.
+  if ((job as Record<string, unknown>).kind === "text-only") {
+    return "text-only";
+  }
+  throw deliveryFailure("authorization", "MANIFEST_MISMATCH", "Job carries no verifiable provenance binding; delivery is refused.");
 }
 
 function assertGuestProvenance(

@@ -165,12 +165,12 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
     // visible expiry but must never extend retention past creation + 24h.
     const deleteAt = new Date(acceptedAt.getTime() + GUEST_INPUT_TTL_MS);
     const ref = guestMediaRef(db, identity.partyId, submissionId);
-    // Server-derived guest_mobile provenance, stamped at the authenticated
+    // Server-derived role-specific provenance, stamped at the authenticated
     // request path (no source hash yet — bytes are unverified until
     // completion, so this record alone never grants generation).
     const requestProvenance = {
       version: PROVENANCE_VERSION,
-      origin: "guest_mobile",
+      origin: hostCaller ? "host_source" : "guest_mobile",
       actorRole: hostCaller ? "host" : "guest",
       actorDeviceId: identity.deviceId,
       evidenceSource: "server:guest_upload",
@@ -472,8 +472,19 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
     // issued post-withdrawal.
     const attributable = new Set<string>([objectPath]);
     const jobs = await db.collection(`parties/${identity.partyId}/jobs`).where("guestMedia.submissionId", "==", submissionId).get();
+    // Cartoon jobs bind their portrait chain-only (cartoonChain.
+    // portraitSubmissionId set at request time); match them too so the
+    // withdrawal fails the job, revokes its manifest, and collects its
+    // generated still. Merged with the guestMedia-bound set (dedup by id).
+    const chainJobs = await db.collection(`parties/${identity.partyId}/jobs`).where("cartoonChain.portraitSubmissionId", "==", submissionId).get().catch(() => ({ docs: [] as typeof jobs.docs }));
+    const seenJobIds = new Set<string>();
+    const boundJobs = [...jobs.docs, ...chainJobs.docs].filter((jobDoc) => {
+      if (seenJobIds.has(jobDoc.id)) return false;
+      seenJobIds.add(jobDoc.id);
+      return true;
+    });
     const boundJobIds: string[] = [];
-    for (const jobDoc of jobs.docs) {
+    for (const jobDoc of boundJobs) {
       boundJobIds.push(jobDoc.id);
       const job = jobDoc.data() as Record<string, unknown>;
       // Shared collector covers staged outputs, delivery + generated paths,
@@ -563,7 +574,7 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
     // Fail bound jobs closed with budget-pointer release (same semantics as
     // the worker-side failForWithdrawnConsent path).
     const budgetRef = db.doc(`parties/${identity.partyId}/generationBudget/active`);
-    for (const jobDoc of jobs.docs) {
+    for (const jobDoc of boundJobs) {
       const job = jobDoc.data() as Record<string, unknown>;
       if (["failed", "purged", "expired"].includes(String(job.state))) {
         await db.runTransaction(async (transaction) => {

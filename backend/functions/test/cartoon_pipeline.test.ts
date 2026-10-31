@@ -152,6 +152,16 @@ test("cartoon video serializes STANDARD cheap_demo from the exact still as first
 test("fake two-stage rehearsal animates the generated still with zero Alibaba calls", async () => {
   // Zero network: both stages resolve through the offline fakes. The video
   // stage animates the exact still bytes produced by the image stage.
+  // Explicit fetch-count guard: any live-call regression inside the
+  // rehearsal path fails here (fakes perform zero fetch calls; both ports
+  // below are asserted to be the offline fakes and no fetch stub is used).
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  (globalThis as Record<string, unknown>).fetch = (async (...args: unknown[]) => {
+    fetchCalls += 1;
+    return (originalFetch as (...a: unknown[]) => Promise<unknown>)(...args);
+  }) as typeof fetch;
+  try {
   const { catalog, situations } = loadValidatedCatalogs(FUNCTIONS_ROOT);
   const request = buildCartoonStillRequest({
     jobId: "job-cartoon-rehearsal",
@@ -184,10 +194,16 @@ test("fake two-stage rehearsal animates the generated still with zero Alibaba ca
     scenarioId: "attic-computer-corner", situationId: "cramped-stumble-chase",
     stillPlanId: "cartoon-still-plan-01", videoPlanId: "cartoon-video-plan-01", version: 1, seed: 130100,
   });
+  assert.equal(fetchCalls, 0, "rehearsal must perform zero fetch calls");
+  assert.ok(imageFake instanceof FakeImageGenerationPort);
+  assert.ok(videoFake instanceof FakeVideoGenerationPort);
   // Pinned results fixture keeps unknown live credits truthful (null).
   const results = JSON.parse(readFileSync(resolve(__dirname, "fixtures/alibaba_cartoon_results.json"), "utf8")) as {
     still: { creditsCharged: null }; video: { creditsCharged: null };
   };
   assert.equal(results.still.creditsCharged, null);
   assert.equal(results.video.creditsCharged, null);
+  } finally {
+    (globalThis as Record<string, unknown>).fetch = originalFetch;
+  }
 });

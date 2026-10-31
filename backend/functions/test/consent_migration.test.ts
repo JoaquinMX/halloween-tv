@@ -49,7 +49,8 @@ test("migration preview is read-only and explicitly scoped", () => {
 });
 
 test("eligible history stamps guest_mobile provenance preserving original evidence", () => {
-  const [entry] = planProvenanceMigration([eligibleDoc()], NOW_ISO);
+  const fixture = eligibleDoc();
+  const [entry] = planProvenanceMigration([fixture], NOW_ISO);
   assert.equal(entry.action, "stamp_provenance");
   const provenance = entry.provenance!;
   assert.equal(provenance.origin, "guest_mobile");
@@ -58,10 +59,10 @@ test("eligible history stamps guest_mobile provenance preserving original eviden
   assert.deepEqual(provenance.purposes, ["v1:guest_cameo"]);
   assert.equal(provenance.sourceHash, HASH);
   assert.equal(provenance.revision, "v1:accepted");
-  const applied = applyProvenanceRecord(eligibleDoc(), entry);
+  const applied = applyProvenanceRecord(fixture, entry);
   assert.equal(applied.changed, true);
   // Original evidence is preserved verbatim; retention deadlines untouched.
-  assert.deepEqual(applied.doc.consent, eligibleDoc().consent);
+  assert.deepEqual(applied.doc.consent, fixture.consent);
   assert.equal(applied.doc.consentRevision, "v1:accepted");
   assert.equal(applied.doc.sourceHash, HASH);
   assert.equal(applied.doc.expiresAt, FUTURE);

@@ -76,6 +76,52 @@ test("usage reconciliation reports missing rows, task ID mismatches, and uncerta
   }
 });
 
+test("cartoon still-stage ledger reconciles alongside per-camera rows", {
+  skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
+}, async () => {
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  const jobId = "job-cartoon-still-ledger";
+  const { cartoonStillLedgerPath, cartoonStillIntentDocument, recordCartoonStillOutcome } = await import("../src/usage");
+  try {
+    await db.doc(`parties/${partyId}/jobs/${jobId}`).set({
+      partyId,
+      jobId,
+      deviceId: "tv-usage",
+      channelId: "main",
+      manifestVersion: 3,
+      idempotencyKey: "idem-cartoon-still",
+      presetId: "cheap_demo",
+      state: "running",
+      cartoonPlan: {
+        scenarioId: "attic-computer-corner", situationId: "cramped-stumble-chase",
+        stillPlanId: "cartoon-still-plan-01", videoPlanId: "cartoon-video-plan-01", version: 1, seed: 130100,
+      },
+      cartoonChain: { stillStatus: "completed", stillTaskId: "still_abc123", stillSha256: "c".repeat(64) },
+      providerTasks: {},
+      cameraAttempts: {},
+    });
+    // Missing still ledger row is reported (outcome-less intent).
+    const missing = await reconcileUsage(db);
+    assert.ok(missing.some((issue) => issue.jobId === jobId && issue.code === "MISSING_LEDGER"));
+    // Record the still outcome on the resume path; the intent row exists now.
+    await db.doc(cartoonStillLedgerPath(partyId, jobId)).set(cartoonStillIntentDocument({
+      partyId, deviceId: "tv-usage", channelId: "main", manifestVersion: 3,
+      idempotencyKey: "idem-cartoon-still", jobId, cameraId: "CAM-01",
+    }));
+    await recordCartoonStillOutcome(db, {
+      partyId, deviceId: "tv-usage", channelId: "main", manifestVersion: 3,
+      idempotencyKey: "idem-cartoon-still", jobId, cameraId: "CAM-01",
+    }, { success: true, secondsOut: 0, secondsIn: 0, creditsCharged: null, providerTaskId: "still_abc123" });
+    const stillLedger = await db.doc(cartoonStillLedgerPath(partyId, jobId)).get();
+    assert.equal(stillLedger.data()?.success, true);
+    assert.equal(stillLedger.data()?.credits_charged, null);
+  } finally {
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+  }
+});
+
 test("fixture slots in a guest-bound job reconcile without provider task IDs", {
   skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
 }, async () => {

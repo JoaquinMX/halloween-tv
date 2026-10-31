@@ -8,8 +8,13 @@ import { FieldValue } from "firebase-admin/firestore";
 import { BackendError, canonicalManifestHash } from "../src/contracts";
 import { SCHEMA_VERSION, REQUIRED_CAMERA_IDS } from "../src/config";
 import { createDeliveryServices } from "../src/delivery";
+import { createGenerationServices } from "../src/generation";
+import { createGuestUploadService } from "../src/guest_upload";
 import { createRuntimeServices } from "../src/runtime";
 import { FakeVideoGenerationPort } from "../src/providers/fake";
+import { FakeImageGenerationPort } from "../src/providers/fake_image";
+import { buildCartoonStillRequest, cartoonStillObjectPath, generateCartoonStill } from "../src/cartoon_pipeline";
+import { loadValidatedCatalogs, resolveFunctionsRoot } from "../src/scenario_catalog";
 import { normalizeProviderVideo, removeNormalizedVideo } from "../src/normalize";
 import { buildCheapDemoRequest } from "../src/video_generation_port";
 import {
@@ -167,10 +172,26 @@ test("cartoon delivery e2e: normalized profile, preview retention, withdrawal de
         await removeNormalizedVideo(normalized);
       }
     }
-    const stillSha = "a".repeat(64);
+    // Real still bytes + hash from the prod still path (offline fake port):
+    // the chain cites measured bytes, not a placeholder digest.
+    const functionsRoot = resolveFunctionsRoot(resolve(__dirname, "../src"));
+    const { catalog, situations } = loadValidatedCatalogs(functionsRoot);
+    const portraitBytes = await readFile(resolve(__dirname, "fixtures/guest_photo.jpg"));
+    const portraitSha = createHash("sha256").update(portraitBytes).digest("hex");
+    const stillRequest = buildCartoonStillRequest({
+      jobId, scenarioId: "attic-computer-corner", situationId: "cramped-stumble-chase",
+      catalog, situations, portraitBytes: new Uint8Array(portraitBytes),
+      portraitContentType: "image/jpeg", portraitSha256: portraitSha, functionsRoot,
+    });
+    const generatedStill = await generateCartoonStill(new FakeImageGenerationPort(), stillRequest);
+    const stillSha = generatedStill.sha256;
+    const stillPath = cartoonStillObjectPath(partyId, jobId);
+    await bucket.file(stillPath).save(Buffer.from(generatedStill.image), {
+      metadata: { contentType: "image/png", metadata: { purpose: "cartoon-still", jobId, partyId, sha256: stillSha } },
+    });
     await db.doc(`parties/${partyId}/jobs/${jobId}`).set({
       jobId, partyId, deviceId, channelId, manifestVersion: version, idempotencyKey: jobId, state: "ready",
-      cartoonChain: { stillSha256: stillSha, videoStillSha256: stillSha, stillStatus: "completed", videoStatus: "completed" },
+      cartoonChain: { stillSha256: stillSha, videoStillSha256: stillSha, stillStatus: "completed", videoStatus: "completed", stillPath },
     });
     await db.doc(`parties/${partyId}/manifests/current_${channelId}`).set({
       partyId, channelId, version, schemaVersion: SCHEMA_VERSION, jobId, expiresAt: expiry,
@@ -187,6 +208,9 @@ test("cartoon delivery e2e: normalized profile, preview retention, withdrawal de
     const services = createDeliveryServices({ db, bucket, signReadUrl: async (file) => `https://signed.invalid/${encodeURIComponent(file.name)}` });
     const delivery = await services.getDeliveryUrls({ partyId, deviceId, channelId });
     assert.equal(delivery.clips.length, 4);
+    // Still-to-video hash binding is verified against real stored bytes.
+    const [storedStill] = await bucket.file(stillPath).download();
+    assert.equal(createHash("sha256").update(storedStill).digest("hex"), stillSha);
     const hashes: Record<string, string> = {};
     for (const clip of clips) {
       const [bytes] = await bucket.file(clip.objectPath).download();
@@ -234,6 +258,88 @@ test("cartoon delivery e2e: normalized profile, preview retention, withdrawal de
     await assert.rejects(guestServices.getDeliveryUrls({ partyId: portraitParty, deviceId, channelId }),
       (error: unknown) => error instanceof BackendError && error.errorCode === "FORBIDDEN");
     await clearParty(db, bucket, portraitParty);
+  } finally {
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+  }
+});
+
+test("cartoon e2e via prod generation path: real still bytes, publishManifest, then withdrawal revokes the still", {
+  skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
+}, async () => {
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  const deviceId = "tv-cartoon-prod";
+  const channelId = "main";
+  const jobId = "job-cartoon-prod";
+  const idempotencyKey = "idem-cartoon-prod";
+  const expiry = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+  try {
+    await seedParty(db, partyId, deviceId, channelId);
+    const guestUpload = createGuestUploadService({
+      db, bucket,
+      signUploadUrl: async (file) => `https://upload.invalid/${encodeURIComponent(file.name)}`,
+    });
+    const requested = await guestUpload.requestGuestUpload({
+      partyId, deviceId, channelId,
+      consent: { accepted: true, textVersion: "v1", purpose: "guest_cameo" }, contentType: "image/jpeg",
+    });
+    const photoBytes: Buffer = await readFile(resolve(__dirname, "fixtures/guest_photo.jpg"));
+    await bucket.file(requested.objectPath).save(photoBytes, { contentType: "image/jpeg" });
+    await guestUpload.completeGuestUpload({ partyId, deviceId, channelId, submissionId: requested.submissionId });
+    // Prod path with the offline fake ports (rehearsal-marked so the fixture
+    // still is publishable as an offline rehearsal artifact): the chain and
+    // the still object come from the pipeline, never hand-written.
+    const generation = createGenerationServices({
+      db, bucket,
+      provider: new FakeVideoGenerationPort(ASSETS),
+      imageProvider: new FakeImageGenerationPort(),
+      pollIntervalMs: 1,
+      sleep: async () => undefined,
+      fixtureDirectory: ASSETS,
+      signReferenceUrl: async () => "https://signed.invalid/cartoon-portrait.jpg",
+      signStillUrl: async () => "https://signed.invalid/cartoon-still.png",
+    });
+    const request = await generation.requestGeneration({
+      partyId, deviceId, channelId, jobId, idempotencyKey, presetId: "cheap_demo",
+      rehearsalOnly: true,
+      cartoonPlan: {
+        scenarioId: "attic-computer-corner", situationId: "cramped-stumble-chase",
+        portraitSubmissionId: requested.submissionId,
+        stillPlanId: "cartoon-still-plan-01", videoPlanId: "cartoon-video-plan-01", version: 1, seed: 130100,
+      },
+    });
+    assert.equal(request.created, true);
+    const run = await generation.runGeneration({ partyId, deviceId, channelId, jobId, idempotencyKey });
+    assert.equal(run.state, "ready");
+    // Real still bytes from the pipeline: hash matches the chain binding and
+    // the stored object verifies byte-for-byte.
+    const jobSnap = await db.doc(`parties/${partyId}/jobs/${jobId}`).get();
+    const chain = jobSnap.data()?.cartoonChain as Record<string, unknown>;
+    assert.equal(chain.stillStatus, "completed");
+    assert.match(String(chain.stillSha256), /^[a-f0-9]{64}$/);
+    assert.ok(String(chain.stillPath).startsWith("parties/"));
+    const [stillBytes] = await bucket.file(String(chain.stillPath)).download();
+    assert.ok(stillBytes.byteLength > 0);
+    assert.equal(createHash("sha256").update(stillBytes).digest("hex"), chain.stillSha256);
+    // Published manifest delivers through the prod delivery gate before withdrawal.
+    const delivery = createDeliveryServices({
+      db, bucket, signReadUrl: async (file) => `https://signed.invalid/${encodeURIComponent(file.name)}`,
+    });
+    const urls = await delivery.getDeliveryUrls({ partyId, deviceId, channelId });
+    assert.equal(urls.clips.length, 4);
+    void expiry;
+    // Withdrawal after the staged still: the generated still is deleted with
+    // the rest of the derivatives and verifiedAbsent reflects it.
+    const withdrawn = await guestUpload.withdrawGuestMedia({ partyId, deviceId, channelId, submissionId: requested.submissionId });
+    assert.equal(withdrawn.status, "withdrawn");
+    assert.ok(withdrawn.deletedObjects.includes(String(chain.stillPath)), "staged cartoon still must be deleted on withdrawal");
+    assert.equal((await bucket.file(String(chain.stillPath)).exists())[0], false);
+    assert.equal(withdrawn.verifiedAbsent, true);
+    const failedJob = await db.doc(`parties/${partyId}/jobs/${jobId}`).get();
+    assert.equal(failedJob.data()?.state, "failed");
+    await assert.rejects(delivery.getDeliveryUrls({ partyId, deviceId, channelId }),
+      (error: unknown) => error instanceof BackendError && (error.errorCode === "FORBIDDEN" || error.errorCode === "NOT_FOUND" || error.errorCode === "MANIFEST_MISMATCH"));
   } finally {
     await clearParty(db, bucket, partyId);
     await disposeEmulatorContext(app);

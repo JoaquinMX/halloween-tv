@@ -14,8 +14,11 @@ import {
  *   operator_approval— explicit owner/operator approval recorded server-side.
  *   host_approval    — explicit host approval recorded server-side via the
  *                      registered-host path (never a client role string).
- *   guest_mobile     — explicit guest-mobile consent from the authenticated
- *                      server upload path (v1/guest_cameo or host_source pair).
+ *   guest_mobile     — bucket origin for authenticated server upload-path
+ *                      evidence for guest-submitted cameo media
+ *                      (v1/guest_cameo, actorRole guest).
+ *   host_source     — authenticated host-contributed subject media
+ *                      (host_source_v1/host_source, actorRole host).
  *   unknown          — historical provenance with no supporting evidence.
  *                      Stays unknown until recorded evidence exists.
  *
@@ -24,6 +27,13 @@ import {
  * Only guest_mobile provenance can ever grant generation, and only when the
  * full eligibility binding holds. Budget flags, existing jobs, host role
  * alone, and legacy markers never grant generation.
+ *
+ * provenance/v1 delivery records are generation-only building blocks plus a
+ * standalone delivery-approval check: the production seed-delivery gate is
+ * contracts.evaluateDeliveryProvenance, which requires the same explicit
+ * approval evidence (operatorApproved/approved or the persisted host
+ * seed binding with host-device evidence). A stamped legacy_seed record
+ * with deliveryApproved=false is refused by both gates.
  */
 
 export const PROVENANCE_VERSION = "provenance/v1" as const;
@@ -33,6 +43,7 @@ export type ProvenanceOrigin =
   | "operator_approval"
   | "host_approval"
   | "guest_mobile"
+  | "host_source"
   | "unknown";
 
 export type ProvenanceActorRole = "tv" | "host" | "guest" | "operator" | "system";
@@ -98,6 +109,7 @@ const ORIGINS: readonly ProvenanceOrigin[] = [
   "operator_approval",
   "host_approval",
   "guest_mobile",
+  "host_source",
   "unknown",
 ];
 
@@ -114,6 +126,7 @@ function originRank(origin: ProvenanceOrigin): number {
     case "host_approval": return 2;
     case "operator_approval": return 3;
     case "guest_mobile": return 4;
+    case "host_source": return 1;
   }
 }
 
@@ -168,7 +181,11 @@ export function validateProvenanceRecord(record: unknown): asserts record is Pro
 
 function scopeMatches(record: ProvenanceRecord, scope: ProvenanceScope): boolean {
   if (record.partyId !== scope.partyId) return false;
-  if (record.channelId !== undefined && scope.channelId !== undefined && record.channelId !== scope.channelId) return false;
+  // A channel-scoped grant never matches a channel-less (or different)
+  // scope: when the record binds a channel, the scope must carry the same
+  // channel, otherwise a channel-scoped grant would match a channel-less
+  // request.
+  if (record.channelId !== undefined && record.channelId !== scope.channelId) return false;
   return true;
 }
 
@@ -286,7 +303,7 @@ export function provenanceFromGuestMediaDoc(
   const sourceHash = typeof doc.sourceHash === "string" ? doc.sourceHash : undefined;
   return {
     version: PROVENANCE_VERSION,
-    origin: "guest_mobile",
+    origin: key === HOST_SOURCE_PURPOSE ? "host_source" : "guest_mobile",
     actorRole,
     actorDeviceId: typeof doc.deviceId === "string" ? doc.deviceId : undefined,
     evidenceSource,

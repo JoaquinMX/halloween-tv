@@ -20,6 +20,29 @@ Publication requires completed still and video stages and matching still-stage h
 
 The canonical manifest hash, 1/2/4-camera contracts, MIME/profile validation, idempotent ACK, and purge semantics remain required. Signed URLs are in-flight only and must never be persisted. Diagnose failures separately as manifest, authorization, signing, download, hash, or ACK. Reproduce the legacy-seed case through `createRuntimeServices`, `getCurrentManifest`, `getDeliveryUrls`, downloaded object bytes, independent SHA-256, then ACK and purge. A successful URL response alone is not a successful delivery.
 
+## Reference-still licensing and IP hygiene (16 owner-approved frames)
+
+The 16 reference stills shipped under `assets/scenario_refs/` (one per catalog
+record, sha256/sizeBytes pinned in `scenario_catalog.v1.json`) are frames
+from existing broadcast cartoons used as style references for the
+`qwen-image-3.0-pro` still stage. Owner approval on file covers operational
+consent to run the preview batch; it is not, by itself, a copyright license
+for the underlying frames.
+
+- Licensing basis: before any public or deployed batch, record the license
+  basis for each of the 16 frames (licensed stock, public-domain source, or
+  owner-created replacement) alongside the existing byte-hash provenance.
+  Frames without a clear commercial-derivative basis must be replaced with
+  owner-created references and re-pinned (new sha256/sizeBytes) before use.
+- Scope of the current owner approval: offline preview and emulator rehearsal
+  only (no live provider calls, no public display, no redistribution of the
+  frames beyond the deployed artifact). Any live batch, public screening, or
+  redistribution requires a fresh, explicitly scoped owner sign-off naming
+  the licensing basis above.
+- Catalog provenance (`scenario_catalog.v1.json` record hashes) is owned
+  elsewhere and is not edited here; this runbook only records the IP-hygiene
+  obligation and the approval-scope boundary.
+
 ## Rollback, retention, and physical TV check
 
 Rollback by stopping new submissions, disabling publication for affected jobs, withdrawing impacted consent or deleting the affected seed through its supported authorization path, and purging only after the owner confirms retention obligations. Retain task/charge reconciliation, manifest hashes, ACK results, and sanitized diagnostic codes according to the applicable party retention policy; do not retain signed URLs or portrait bytes in logs.

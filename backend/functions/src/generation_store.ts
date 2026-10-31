@@ -126,8 +126,20 @@ function stripCartoonPlan(value: unknown): unknown {
   return value;
 }
 
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value !== null && typeof value === "object") {
+    const sorted: Record<string, unknown> = {};
+    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+      sorted[key] = canonicalize((value as Record<string, unknown>)[key]);
+    }
+    return sorted;
+  }
+  return value;
+}
+
 function cartoonPlansEqual(a: unknown, b: unknown): boolean {
-  return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+  return JSON.stringify(canonicalize(a ?? null)) === JSON.stringify(canonicalize(b ?? null));
 }
 
 export class FirestoreGenerationStore {
@@ -163,13 +175,23 @@ export class FirestoreGenerationStore {
     if (input.guestMediaId) {
       guest = await assertGuestEligible(this.db, input, input.guestMediaId, this.now().getTime());
     }
+    // Cartoon portrait binding: persist the chain-only portrait as the job's
+    // guestMedia binding at request time so withdrawal (which matches both
+    // guestMedia.submissionId and cartoonChain.portraitSubmissionId) always
+    // finds the job — even when the request carried no guestMediaId.
+    let cartoonPortrait: GuestMediaDoc | undefined;
+    const cartoonPortraitId = (cartoonPlan as Record<string, unknown> | undefined)?.portraitSubmissionId;
+    if (typeof cartoonPortraitId === "string" && cartoonPortraitId !== "" && !input.guestMediaId) {
+      cartoonPortrait = await assertGuestEligible(this.db, input, cartoonPortraitId, this.now().getTime());
+    }
     const ref = jobRef(this.db, input.partyId, input.jobId);
     const result = await this.db.runTransaction(async (transaction) => {
       const existing = await transaction.get(ref);
       if (existing.exists) {
         const old = existing.data()!;
+        const newEffectiveGuestId = input.guestMediaId ?? (typeof cartoonPortraitId === "string" && cartoonPortraitId !== "" ? cartoonPortraitId : undefined);
         if (old.idempotencyKey !== input.idempotencyKey || old.deviceId !== input.deviceId || old.channelId !== input.channelId ||
-            (old.guestMediaId ?? undefined) !== (input.guestMediaId ?? undefined) ||
+            (old.guestMediaId ?? undefined) !== (newEffectiveGuestId ?? undefined) ||
             (old.rehearsalOnly === true) !== rehearsalOnly ||
             !cartoonPlansEqual(old.cartoonPlan ?? undefined, cartoonPlan)) {
           throw new BackendError("FORBIDDEN", "jobId is already bound to a different request.");
@@ -201,27 +223,29 @@ export class FirestoreGenerationStore {
       // Re-verify consent inside the creation transaction so a withdrawal that
       // lands between the pre-check and the job write fails the request.
       let guestBinding: Record<string, unknown> | undefined;
-      if (input.guestMediaId && guest) {
+      const effectiveGuest = guest ?? cartoonPortrait;
+      const effectiveGuestId = input.guestMediaId ?? (typeof cartoonPortraitId === "string" ? cartoonPortraitId : undefined);
+      if (effectiveGuestId && effectiveGuest) {
         const guestSnap = await transaction.get(
-          this.db.doc(`parties/${input.partyId}/guestMedia/${input.guestMediaId}`),
+          this.db.doc(`parties/${input.partyId}/guestMedia/${effectiveGuestId}`),
         );
         const current = guestSnap.exists ? (guestSnap.data() as GuestMediaDoc) : undefined;
         if (!current || current.status !== "eligible" ||
             !current.consent || current.consent.accepted !== true ||
             !isSupportedConsent(current.consent.textVersion, current.consent.purpose) ||
-            current.sourceHash !== guest.sourceHash ||
-            current.consentRevision !== guest.consentRevision ||
+            current.sourceHash !== effectiveGuest.sourceHash ||
+            current.consentRevision !== effectiveGuest.consentRevision ||
             current.deviceId !== input.deviceId || current.channelId !== input.channelId) {
           throw new BackendError("FORBIDDEN", "Guest consent is no longer eligible for generation.");
         }
         guestBinding = {
-          submissionId: input.guestMediaId,
-          objectPath: guest.objectPath,
-          sourceHash: guest.sourceHash,
-          sourceGeneration: guest.sourceGeneration ?? null,
-          consentRevision: guest.consentRevision,
-          deviceId: guest.deviceId,
-          channelId: guest.channelId,
+          submissionId: effectiveGuestId,
+          objectPath: effectiveGuest.objectPath,
+          sourceHash: effectiveGuest.sourceHash,
+          sourceGeneration: effectiveGuest.sourceGeneration ?? null,
+          consentRevision: effectiveGuest.consentRevision,
+          deviceId: effectiveGuest.deviceId,
+          channelId: effectiveGuest.channelId,
         };
         // Fail closed if a fetchable URL ever reaches the persistence path.
         assertNoSignedReferenceUrl(guestBinding);
@@ -240,12 +264,16 @@ export class FirestoreGenerationStore {
         idempotencyKey: input.idempotencyKey,
         presetId: input.presetId,
         modelId: input.presetId === CAMEO_DEMO_PRESET.presetId ? CAMEO_DEMO_PRESET.modelId : CHEAP_DEMO_PRESET.modelId,
+        // Positive server-written marker for unbound (text-only) jobs: the
+        // delivery gate requires this marker when no consent/seed binding
+        // exists. Bound jobs carry guestMedia instead and never get it.
+        ...(guestBinding ? {} : { kind: "text-only" as const }),
         ...(rehearsalOnly ? { rehearsalOnly: true as const } : {}),
         ...(cartoonPlan ? { cartoonPlan } : {}),
         // Cartoon jobs begin with an empty chain; stages fill it in without
         // ever rewriting the immutable plan above.
         ...(cartoonPlan ? { cartoonChain: { stillStatus: "pending", videoStatus: "pending" } } : {}),
-        ...(guestBinding ? { guestMedia: guestBinding, guestMediaId: input.guestMediaId } : {}),
+        ...(guestBinding ? { guestMedia: guestBinding, guestMediaId: effectiveGuestId } : {}),
         costEstimate: input.presetId === CAMEO_DEMO_PRESET.presetId
           ? { modelId: CAMEO_DEMO_PRESET.modelId, presetId: CAMEO_DEMO_PRESET.presetId, secondsOut: CAMEO_DEMO_PRESET.secondsOut }
           : { modelId: CHEAP_DEMO_PRESET.modelId, presetId: CHEAP_DEMO_PRESET.presetId, secondsOut: CHEAP_DEMO_PRESET.secondsOut },
@@ -659,6 +687,7 @@ export class FirestoreGenerationStore {
     portraitSubmissionId?: string,
     portraitSourceHash?: string,
     portraitConsentRevision?: string,
+    opts?: { stillFixture?: boolean },
   ): Promise<void> {
     const ref = jobRef(this.db, partyId, jobId);
     await this.db.runTransaction(async (transaction) => {
@@ -668,7 +697,10 @@ export class FirestoreGenerationStore {
         "cartoonChain.stillSha256": stillSha256,
         "cartoonChain.stillPath": stillPath,
         "cartoonChain.stillStatus": "completed",
-        "cartoonChain.videoStillSha256": stillSha256,
+        // videoStillSha256 is bound at video-submit time from the in-flight
+        // firstFrame sha (see recordCartoonVideoStaged), never here: the
+        // still-stage write must not pre-bind the video-stage proof.
+        ...(opts?.stillFixture === true ? { "cartoonChain.stillFixture": true } : {}),
         ...(portraitSubmissionId !== undefined ? { "cartoonChain.portraitSubmissionId": portraitSubmissionId } : {}),
         ...(portraitSourceHash !== undefined ? { "cartoonChain.portraitSourceHash": portraitSourceHash } : {}),
         ...(portraitConsentRevision !== undefined ? { "cartoonChain.portraitConsentRevision": portraitConsentRevision } : {}),
@@ -677,13 +709,16 @@ export class FirestoreGenerationStore {
     });
   }
 
-  async recordCartoonVideoStaged(partyId: string, jobId: string): Promise<void> {
+  async recordCartoonVideoStaged(partyId: string, jobId: string, videoStillSha256?: string): Promise<void> {
     const ref = jobRef(this.db, partyId, jobId);
     await this.db.runTransaction(async (transaction) => {
       const snapshot = await transaction.get(ref);
       if (!snapshot.exists) throw new BackendError("NOT_FOUND", "Generation job does not exist.");
       transaction.update(ref, {
         "cartoonChain.videoStatus": "staged",
+        ...(typeof videoStillSha256 === "string" && /^[a-f0-9]{64}$/.test(videoStillSha256)
+          ? { "cartoonChain.videoStillSha256": videoStillSha256 }
+          : {}),
         timestamp: FieldValue.serverTimestamp(),
       });
     });

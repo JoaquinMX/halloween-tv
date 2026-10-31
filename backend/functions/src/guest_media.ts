@@ -183,6 +183,21 @@ export function collectJobDerivativePaths(job: Record<string, unknown>): string[
       }
     }
   }
+  // Cartoon still generated from the consent-bound portrait. Persisted nested
+  // at job.cartoonChain.stillPath (parties/*/cartoonStills/*/still.png); the
+  // top-level keys above never reach it, so it is traversed explicitly here.
+  const chain = job.cartoonChain;
+  if (chain && typeof chain === "object") {
+    const record = chain as Record<string, unknown>;
+    const still = record.stillPath;
+    if (typeof still === "string" && still.startsWith("parties/")) paths.add(still);
+    const stillList = record.stillPaths;
+    if (Array.isArray(stillList)) {
+      for (const item of stillList) {
+        if (typeof item === "string" && item.startsWith("parties/")) paths.add(item);
+      }
+    }
+  }
   return [...paths];
 }
 
