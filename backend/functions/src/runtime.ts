@@ -192,14 +192,14 @@ export function createRuntimeServices(options: RuntimeServiceOptions): RuntimeSe
   });
 
   /**
-   * Bounded pending-intent dispatch (fix-5a, fix-5d): after capacity releases,
-   * queue each pending portrait EXACTLY ONCE with its SAME immutable plan (no
-   * reroll), before any provider submit. Single-flight stays: the first
-   * dispatch occupies the budget and the rest stay pending. Withdrawal/expiry
-   * gates are rechecked at dispatch (withdrawn/expired pending never
-   * dispatches and is cleaned up). Queue-admission failures mark the intent
-   * TERMINAL unavailable. One pass per trigger, no timers, no blind resubmit
-   * of unknown outcomes (existing failed jobs are never resubmitted).
+   * Bounded pending-intent dispatch (fix-5a, fix-5d, fix-5e): after capacity
+   * releases, queue each pending portrait EXACTLY ONCE with its SAME immutable
+   * plan (no reroll), before any provider submit. Single-flight stays: the
+   * first dispatch occupies the budget and the rest stay pending.
+   * Withdrawal/expiry gates are rechecked at dispatch (withdrawn/expired
+   * pending never dispatches and is cleaned up). Queue-admission failures mark
+   * the intent TERMINAL unavailable. One pass per trigger, no timers, no blind
+   * resubmit of unknown outcomes (existing failed jobs are never resubmitted).
    * Fix-5d: plan-identity mismatch never deletes the job doc (no raw delete of
    * a possibly-raced job) — the intent is marked unavailable with
    * MANIFEST_MISMATCH and the job is left for reconciliation. Typed consent
@@ -208,6 +208,17 @@ export function createRuntimeServices(options: RuntimeServiceOptions): RuntimeSe
    * unavailable is reserved for genuine admission/terminal errors (queue
    * rejection, consent/permission denial); transient INTERNAL /
    * PROVIDER_UNAVAILABLE stay pending with attempt accounting.
+   * Fix-5e: created-gated dispatch — the queue task is enqueued ONLY when the
+   * store reports request.created true. A reused/raced job (created:false)
+   * never enqueues here and is never marked failed/queued blindly: the actual
+   * existing job state is read and reflected on the intent (queued/running ->
+   * intent queued; failed -> intent unavailable with the job's code;
+   * ready/delivering/expired/purged -> intent done; missing -> pending for the
+   * next pass, never deleted). Created-only mismatch release: on cartoonPlan
+   * drift the just-created job (created:true) is failed transactionally via
+   * failEnqueue (budget released, job+ledger evidence preserved) and only
+   * then is the intent marked unavailable/MANIFEST_MISMATCH; a reused job
+   * (created:false) is never touched — intent-only marking.
    */
   async function flushPendingIntents(partyId: string): Promise<void> {
     if (!generation) return;
@@ -305,18 +316,63 @@ export function createRuntimeServices(options: RuntimeServiceOptions): RuntimeSe
           idempotencyKey: request.idempotencyKey,
         };
         // The dispatched retry reuses the SAME immutable plan: verify the
-        // persisted plan was not rerolled. On mismatch the job is NEVER
-        // deleted (it may be raced); the intent is marked unavailable with
-        // MANIFEST_MISMATCH and the job is left for reconciliation.
+        // persisted plan was not rerolled. Fix-5e created-only release: on
+        // drift the JUST-CREATED job (created:true) is failed transactionally
+        // via failEnqueue (budget released, job+ledger evidence preserved)
+        // and only then is the intent marked unavailable/MANIFEST_MISMATCH. A
+        // reused job (created:false) may be raced and is NEVER touched —
+        // intent-only marking. No raw job delete on any path; the stored plan
+        // is never silently rerolled.
         const job = await options.db.doc(`parties/${partyId}/jobs/${request.jobId}`).get().catch(() => undefined);
-        const persistedPlan = job?.exists ? (job.data() as Record<string, unknown>).cartoonPlan : undefined;
+        const jobData = job?.exists ? (job.data() as Record<string, unknown>) : undefined;
+        const persistedPlan = jobData?.cartoonPlan;
         if (persistedPlan !== undefined && intent.plan !== undefined &&
             JSON.stringify(persistedPlan) !== JSON.stringify(intent.plan)) {
+          if (request.created) {
+            await generation.failEnqueue(task).catch(() => undefined);
+          }
           await intentDoc.ref.update({
             status: "unavailable",
             errorCode: "MANIFEST_MISMATCH",
             updatedAt: FieldValue.serverTimestamp(),
           }).catch(() => undefined);
+          continue;
+        }
+        // Fix-5e created-gated dispatch: enqueue ONLY the just-created job. A
+        // reused/raced job (created:false) never enqueues here and is never
+        // marked failed/queued blindly: the actual existing job state is read
+        // and reflected on the intent instead.
+        if (!request.created) {
+          if (!job?.exists || !jobData) {
+            // Unknown outcome: the reuse signal fired but no job is visible.
+            // Leave pending for the next pass with attempt accounting; never
+            // delete here.
+            await intentDoc.ref.update({
+              attempts: Number(intent.attempts ?? 0) + 1,
+              updatedAt: FieldValue.serverTimestamp(),
+            }).catch(() => undefined);
+            continue;
+          }
+          const reusedState = String(jobData.state ?? "");
+          if (reusedState === "queued" || reusedState === "running") {
+            await intentDoc.ref.update({
+              status: "queued",
+              attempts: Number(intent.attempts ?? 0) + 1,
+              updatedAt: FieldValue.serverTimestamp(),
+            }).catch(() => undefined);
+            continue;
+          }
+          // Terminal jobs are never resubmitted; a failed queue admission is
+          // surfaced TERMINAL, otherwise the intent is done.
+          if (reusedState === "failed") {
+            await intentDoc.ref.update({
+              status: "unavailable",
+              errorCode: typeof jobData.errorCode === "string" ? jobData.errorCode : "PROVIDER_UNAVAILABLE",
+              updatedAt: FieldValue.serverTimestamp(),
+            }).catch(() => undefined);
+          } else {
+            await intentDoc.ref.delete().catch(() => undefined);
+          }
           continue;
         }
         try {
