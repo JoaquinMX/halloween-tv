@@ -290,3 +290,54 @@ test("host deletion removes seeds and objects, revokes manifests, preserves acco
     await disposeEmulatorContext(app);
   }
 });
+
+test("host deletion removes stills, intermediates, delivery, and previews while preserving accounting", { skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST }, async () => {
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  try {
+    const { host } = await seedHostParty(db, partyId);
+    const services = servicesFor(db, bucket);
+    const created = await services.generateHostVideo({ partyId, deviceId: host, channelId: "main", seedId: "seed-stills", idempotencyKey: "idem-stills" });
+    await services.runGeneration({ partyId, deviceId: host, channelId: "main", jobId: created.jobId, idempotencyKey: "idem-stills" });
+    await services.getHostVideoPreview({ partyId, deviceId: host, channelId: "main", seedId: "seed-stills" });
+    const stillPath = `parties/${partyId}/stills/cartoon-final.png`;
+    const intermediatePath = `parties/${partyId}/intermediates/diffuse-1.bin`;
+    await bucket.file(stillPath).save(Buffer.from("cartoon-still"));
+    await bucket.file(intermediatePath).save(Buffer.from("intermediate"));
+    await db.doc(`parties/${partyId}/jobs/${created.jobId}`).update({
+      stillPaths: [stillPath],
+      intermediatePaths: [intermediatePath],
+      cartoonStillPath: stillPath,
+    });
+    await db.doc(`parties/${partyId}/seedVideos/seed-stills`).update({
+      stillPaths: [stillPath],
+      intermediatePaths: [intermediatePath],
+    });
+    const seedBefore = (await db.doc(`parties/${partyId}/seedVideos/seed-stills`).get()).data()!;
+    const previewPaths = [...(seedBefore.previewPaths as string[])];
+    const manifestBefore = (await db.doc(`parties/${partyId}/manifests/current_main`).get()).data()!;
+    const deliveryPaths = (manifestBefore.cameraClips as Array<{ objectPath: string }>).map((clip) => clip.objectPath);
+    const costLogsBefore = (await db.collection(`parties/${partyId}/costLogs`).get()).docs.length;
+    assert.ok(costLogsBefore >= 1, "generation must have recorded accounting before deletion");
+
+    const deleted = await services.deleteHostVideo({ partyId, deviceId: host, channelId: "main", seedIds: ["seed-stills"] });
+    assert.deepEqual(deleted.deletedSeedIds, ["seed-stills"]);
+    for (const path of [...previewPaths, ...deliveryPaths, stillPath, intermediatePath]) {
+      assert.ok(deleted.deletedObjects.includes(path), `${path} must be reported deleted`);
+      assert.equal((await bucket.file(path).exists())[0], false, `${path} must be absent after host deletion`);
+    }
+    // Accounting and audit rows survive host deletion.
+    assert.equal((await db.collection(`parties/${partyId}/costLogs`).get()).docs.length, costLogsBefore);
+    // Repeated deletion is idempotent and never resurrects bytes or previews.
+    const repeated = await services.deleteHostVideo({ partyId, deviceId: host, channelId: "main", seedIds: ["seed-stills"] });
+    assert.deepEqual(repeated.deletedSeedIds, ["seed-stills"]);
+    for (const path of [stillPath, intermediatePath]) {
+      assert.equal((await bucket.file(path).exists())[0], false, "deleted stills must not resurrect");
+    }
+    await assert.rejects(services.getHostVideoPreview({ partyId, deviceId: host, channelId: "main", seedId: "seed-stills" }),
+      (e: unknown) => e instanceof BackendError && e.errorCode === "NOT_FOUND");
+  } finally {
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+  }
+});
