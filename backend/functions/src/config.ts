@@ -1,4 +1,8 @@
 export const REGION = "us-central1";
+// v2 storage triggers must live in the bucket's region, not the functions
+// default. The ingest bucket is US-EAST1, so only the object-finalized
+// trigger is pinned here; every other function stays on REGION.
+export const STORAGE_TRIGGER_REGION = "us-east1";
 export const SCHEMA_VERSION = 1;
 export const DELIVERY_URL_TTL_SECONDS = 15 * 60;
 export const MEDIA_RETENTION_MS = 24 * 60 * 60 * 1000;

@@ -6,7 +6,7 @@ import { onSchedule } from "firebase-functions/v2/scheduler";
 import { setGlobalOptions } from "firebase-functions/v2/options";
 import { resolve } from "node:path";
 import { BackendError } from "./contracts";
-import { ErrorCode, isGenerationEnabled, REGION } from "./config";
+import { ErrorCode, isGenerationEnabled, REGION, STORAGE_TRIGGER_REGION } from "./config";
 import { getAdminApp, getAdminBucket, getAdminFirestore } from "./firebase";
 import { GenerationTask } from "./delivery";
 import { createRetentionService } from "./retention";
@@ -128,7 +128,7 @@ function ingestBucket(): string {
   // emulator run sets STORAGE_BUCKET explicitly, so this never targets cloud.
   return "demo-halloween-tv.appspot.com";
 }
-export const onGuestIngestFinalized = onObjectFinalized({ bucket: ingestBucket() }, async (event) => {
+export const onGuestIngestFinalized = onObjectFinalized({ bucket: ingestBucket(), region: STORAGE_TRIGGER_REGION }, async (event) => {
   await getServices().handleGuestIngestFinalized(event.data.name);
 });
 
