@@ -1,0 +1,37 @@
+{
+  "request": {
+    "jobId": "job-cartoon-1",
+    "idempotencyKey": "job-cartoon-1:still:attic-computer-corner:cramped-stumble-chase",
+    "prompt": "Subject and identity: Use the person in the subject_identity reference as the character identity. the person Completely redraw the person as a coherent, fully illustrated cartoon character; preserve recognizable identity without photographic skin or pasted photographic details.\nAction event: 0-1s: guest sprints left-to-right through a tight room with exaggerated cartoon strides while a goofy monster reaches from behind. 1-2s: guest trips over a rug/cable/plush (prop from the scenario, never a new object), arms windmill, monster overshoots and face-plants. 2s: both scramble and burst through the room doorway offscreen. One continuous side-tracking shot; both characters visible throughout.\nScene and style: Empty crooked attic computer corner at night; CRT glow, single chair, no people Early-2000s Cartoon Network spooky farmhouse attic, warped wood planks, thick irregular black ink, flat warm browns against purple night window Constraints: Small indoor room; chase must be cramped stumble, no vehicles, no crowds Tight interiors only; trip prop must come from the scenario; no vehicles, no crowds, no gore",
+    "negativePrompt": "photographic skin, pasted photographic face, identity substitution, photorealism, extra people, deformed hands, text, watermark, camera movement, gore, 3D rendering",
+    "modelId": "qwen-image-3.0-pro",
+    "region": "singapore",
+    "references": [
+      {
+        "role": "subject_identity",
+        "sha256": "cd52c0f6ad13d70322ebd9e814754b7151259046a5bf17299c739df1e61e9d2f",
+        "contentType": "image/jpeg"
+      },
+      {
+        "role": "style_scene",
+        "sha256": "8d9a6a667f5c1a354b1b121edf0198c29aeb676f4d9d43e5866f2c31a12880f9",
+        "contentType": "image/jpeg"
+      }
+    ]
+  },
+  "body": {
+    "model": "qwen-image-3.0-pro",
+    "input": {
+      "prompt": "Subject and identity: Use the person in the subject_identity reference as the character identity. the person Completely redraw the person as a coherent, fully illustrated cartoon character; preserve recognizable identity without photographic skin or pasted photographic details.\nAction event: 0-1s: guest sprints left-to-right through a tight room with exaggerated cartoon strides while a goofy monster reaches from behind. 1-2s: guest trips over a rug/cable/plush (prop from the scenario, never a new object), arms windmill, monster overshoots and face-plants. 2s: both scramble and burst through the room doorway offscreen. One continuous side-tracking shot; both characters visible throughout.\nScene and style: Empty crooked attic computer corner at night; CRT glow, single chair, no people Early-2000s Cartoon Network spooky farmhouse attic, warped wood planks, thick irregular black ink, flat warm browns against purple night window Constraints: Small indoor room; chase must be cramped stumble, no vehicles, no crowds Tight interiors only; trip prop must come from the scenario; no vehicles, no crowds, no gore\nReference order: first subject_identity, second style_scene.",
+      "images": [
+        "https://signed.invalid/cartoon-portrait.jpg",
+        "https://signed.invalid/cartoon-style.jpg"
+      ]
+    },
+    "parameters": {
+      "negative_prompt": "photographic skin, pasted photographic face, identity substitution, photorealism, extra people, deformed hands, text, watermark, camera movement, gore, 3D rendering"
+    }
+  },
+  "scenarioId": "attic-computer-corner",
+  "situationId": "cramped-stumble-chase"
+}

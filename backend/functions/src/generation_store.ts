@@ -4,8 +4,8 @@ import { assertRegisteredPartyDevice } from "./auth";
 import { BackendError, isSupportedConsent, parseRequestGeneration, RequestGenerationInput, validateId } from "./contracts";
 import { CAMEO_DEMO_PRESET, CHEAP_DEMO_PRESET, MEDIA_RETENTION_MS, REQUIRED_CAMERA_IDS } from "./config";
 import { assertGuestEligible, GuestMediaDoc } from "./guest_media";
-import { usageIntentDocument, usageLedgerPath } from "./usage";
-import { CameraId, ProviderResult, ProviderTaskStatus, validatePresetControls } from "./video_generation_port";
+import { cartoonStillIntentDocument, cartoonStillLedgerPath, usageIntentDocument, usageLedgerPath } from "./usage";
+import { CameraId, ProviderResult, ProviderTaskStatus, validateCartoonPlan, validatePresetControls } from "./video_generation_port";
 
 export interface GenerationTask {
   partyId: string;
@@ -100,6 +100,36 @@ function stripRehearsalOnly(value: unknown): unknown {
   return value;
 }
 
+/**
+ * Immutable cartoon plan extraction. The plan rides alongside the fixed
+ * preset controls (never altering cheap_demo/cameo_demo locks) and is
+ * stripped before shared control validation + request parsing, then
+ * validated, bound, and persisted by the store itself. Unknown fields are
+ * never silently accepted: only the documented cartoon keys survive.
+ */
+function extractCartoonPlan(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  if (record.cartoonPlan === undefined) return undefined;
+  const plan = record.cartoonPlan as Record<string, unknown>;
+  if (!plan || typeof plan !== "object" || Array.isArray(plan)) {
+    throw new BackendError("INVALID_ARGUMENT", "Cartoon plan must be an object.");
+  }
+  return plan;
+}
+
+function stripCartoonPlan(value: unknown): unknown {
+  if (value && typeof value === "object" && !Array.isArray(value) && "cartoonPlan" in value) {
+    const { cartoonPlan: _ignored, ...rest } = value as Record<string, unknown>;
+    return rest;
+  }
+  return value;
+}
+
+function cartoonPlansEqual(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+}
+
 export class FirestoreGenerationStore {
   readonly db: Firestore;
   readonly bucket: Bucket;
@@ -113,11 +143,15 @@ export class FirestoreGenerationStore {
 
   async requestGeneration(value: unknown): Promise<RequestGenerationResult> {
     const rehearsalOnly = extractRehearsalOnly(value);
-    const sanitized = stripRehearsalOnly(value);
+    const cartoonPlan = extractCartoonPlan(value);
+    const sanitized = stripCartoonPlan(stripRehearsalOnly(value));
     validatePresetControls(sanitized);
     if (sanitized && typeof sanitized === "object" && !Array.isArray(sanitized) && "prompt" in sanitized) {
       const presetId = (sanitized as Record<string, unknown>).presetId === CAMEO_DEMO_PRESET.presetId ? "cameo_demo" : "cheap_demo";
       throw new BackendError("INVALID_ARGUMENT", `Generation prompts are fixed server-side for ${presetId}.`);
+    }
+    if (cartoonPlan !== undefined) {
+      validateCartoonPlan(cartoonPlan);
     }
     const input = parseRequestGeneration(sanitized);
     const registered = await assertRegisteredPartyDevice(this.db, input);
@@ -136,7 +170,8 @@ export class FirestoreGenerationStore {
         const old = existing.data()!;
         if (old.idempotencyKey !== input.idempotencyKey || old.deviceId !== input.deviceId || old.channelId !== input.channelId ||
             (old.guestMediaId ?? undefined) !== (input.guestMediaId ?? undefined) ||
-            (old.rehearsalOnly === true) !== rehearsalOnly) {
+            (old.rehearsalOnly === true) !== rehearsalOnly ||
+            !cartoonPlansEqual(old.cartoonPlan ?? undefined, cartoonPlan)) {
           throw new BackendError("FORBIDDEN", "jobId is already bound to a different request.");
         }
         return {
@@ -206,6 +241,10 @@ export class FirestoreGenerationStore {
         presetId: input.presetId,
         modelId: input.presetId === CAMEO_DEMO_PRESET.presetId ? CAMEO_DEMO_PRESET.modelId : CHEAP_DEMO_PRESET.modelId,
         ...(rehearsalOnly ? { rehearsalOnly: true as const } : {}),
+        ...(cartoonPlan ? { cartoonPlan } : {}),
+        // Cartoon jobs begin with an empty chain; stages fill it in without
+        // ever rewriting the immutable plan above.
+        ...(cartoonPlan ? { cartoonChain: { stillStatus: "pending", videoStatus: "pending" } } : {}),
         ...(guestBinding ? { guestMedia: guestBinding, guestMediaId: input.guestMediaId } : {}),
         costEstimate: input.presetId === CAMEO_DEMO_PRESET.presetId
           ? { modelId: CAMEO_DEMO_PRESET.modelId, presetId: CAMEO_DEMO_PRESET.presetId, secondsOut: CAMEO_DEMO_PRESET.secondsOut }
@@ -239,6 +278,19 @@ export class FirestoreGenerationStore {
           cameraId,
         }, timestamp, input.presetId === CAMEO_DEMO_PRESET.presetId ? CAMEO_DEMO_PRESET : CHEAP_DEMO_PRESET));
       }
+      // Cartoon still-stage intent row: per-stage usage from job creation,
+      // unknown credits truthful (null), never estimated.
+      if (cartoonPlan) {
+        transaction.create(this.db.doc(cartoonStillLedgerPath(input.partyId, input.jobId)), cartoonStillIntentDocument({
+          partyId: input.partyId,
+          deviceId: input.deviceId,
+          channelId: input.channelId,
+          manifestVersion,
+          idempotencyKey: input.idempotencyKey,
+          jobId: input.jobId,
+          cameraId: "CAM-01",
+        }, timestamp));
+      }
       return { state: "queued", created: true, manifestVersion, timestamp };
     });
     const persisted = (await ref.get()).data();
@@ -265,7 +317,7 @@ export class FirestoreGenerationStore {
   async getGenerationStatus(value: unknown): Promise<Record<string, unknown>> {
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new BackendError("INVALID_ARGUMENT", "Status query must be an object.");
     extractRehearsalOnly(value);
-    const query = stripRehearsalOnly(value) as Record<string, unknown>;
+    const query = stripCartoonPlan(stripRehearsalOnly(value)) as Record<string, unknown>;
     validatePresetControls(query);
     if ("prompt" in query) {
       const presetId = query.presetId === CAMEO_DEMO_PRESET.presetId ? "cameo_demo" : "cheap_demo";
@@ -550,6 +602,91 @@ export class FirestoreGenerationStore {
 
   async releaseWorker(partyId: string, jobId: string): Promise<void> {
     await jobRef(this.db, partyId, jobId).update({ workerLeaseUntilMs: 0, timestamp: FieldValue.serverTimestamp() });
+  }
+
+  /**
+   * Cartoon still-stage guards: idempotent submit-once + resume without a
+   * duplicate billable still submission. Mirrors beginSubmission/recordSubmission
+   * for the CAM-01 video stage but keys on the still idempotency key.
+   */
+  async beginStillSubmission(partyId: string, jobId: string): Promise<boolean> {
+    const ref = jobRef(this.db, partyId, jobId);
+    return this.db.runTransaction(async (transaction) => {
+      const snapshot = await transaction.get(ref);
+      if (!snapshot.exists) throw new BackendError("NOT_FOUND", "Generation job does not exist.");
+      const job = snapshot.data()!;
+      const chain = (job.cartoonChain ?? {}) as Record<string, unknown>;
+      if (typeof chain.stillTaskId === "string" || chain.stillStatus === "completed") return false;
+      if (chain.stillSubmissionState === "submitting") {
+        throw new BackendError("PROVIDER_UNAVAILABLE", "Cartoon still submission outcome is unknown; automatic resubmission is disabled.");
+      }
+      if (chain.stillSubmissionConsumed === true) {
+        throw new BackendError("PROVIDER_UNAVAILABLE", "Cartoon still submission attempt has already been consumed.");
+      }
+      transaction.update(ref, {
+        "cartoonChain.stillSubmissionConsumed": true,
+        "cartoonChain.stillSubmissionState": "submitting",
+        timestamp: FieldValue.serverTimestamp(),
+      });
+      return true;
+    });
+  }
+
+  async recordStillSubmission(partyId: string, jobId: string, taskId: string): Promise<void> {
+    const ref = jobRef(this.db, partyId, jobId);
+    await this.db.runTransaction(async (transaction) => {
+      const snapshot = await transaction.get(ref);
+      if (!snapshot.exists) throw new BackendError("NOT_FOUND", "Generation job does not exist.");
+      const job = snapshot.data()!;
+      const chain = (job.cartoonChain ?? {}) as Record<string, unknown>;
+      const old = chain.stillTaskId as unknown;
+      if (typeof old === "string" && old !== taskId) {
+        throw new BackendError("FORBIDDEN", "A different cartoon still task is already persisted for this job.");
+      }
+      transaction.update(ref, {
+        "cartoonChain.stillTaskId": taskId,
+        "cartoonChain.stillSubmissionState": "submitted",
+        timestamp: FieldValue.serverTimestamp(),
+      });
+    });
+  }
+
+  async recordStillResult(
+    partyId: string,
+    jobId: string,
+    stillSha256: string,
+    stillPath: string,
+    portraitSubmissionId?: string,
+    portraitSourceHash?: string,
+    portraitConsentRevision?: string,
+  ): Promise<void> {
+    const ref = jobRef(this.db, partyId, jobId);
+    await this.db.runTransaction(async (transaction) => {
+      const snapshot = await transaction.get(ref);
+      if (!snapshot.exists) throw new BackendError("NOT_FOUND", "Generation job does not exist.");
+      transaction.update(ref, {
+        "cartoonChain.stillSha256": stillSha256,
+        "cartoonChain.stillPath": stillPath,
+        "cartoonChain.stillStatus": "completed",
+        "cartoonChain.videoStillSha256": stillSha256,
+        ...(portraitSubmissionId !== undefined ? { "cartoonChain.portraitSubmissionId": portraitSubmissionId } : {}),
+        ...(portraitSourceHash !== undefined ? { "cartoonChain.portraitSourceHash": portraitSourceHash } : {}),
+        ...(portraitConsentRevision !== undefined ? { "cartoonChain.portraitConsentRevision": portraitConsentRevision } : {}),
+        timestamp: FieldValue.serverTimestamp(),
+      });
+    });
+  }
+
+  async recordCartoonVideoStaged(partyId: string, jobId: string): Promise<void> {
+    const ref = jobRef(this.db, partyId, jobId);
+    await this.db.runTransaction(async (transaction) => {
+      const snapshot = await transaction.get(ref);
+      if (!snapshot.exists) throw new BackendError("NOT_FOUND", "Generation job does not exist.");
+      transaction.update(ref, {
+        "cartoonChain.videoStatus": "staged",
+        timestamp: FieldValue.serverTimestamp(),
+      });
+    });
   }
 
   currentManifestRef(partyId: string, channelId: string) {

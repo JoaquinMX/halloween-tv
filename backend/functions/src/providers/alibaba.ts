@@ -4,9 +4,12 @@ import {
   ProviderTaskStatus,
   VideoGenerationPort,
   VideoGenerationRequest,
+  validateCartoonFirstFrame,
+  validateFetchableCartoonFirstFrame,
   validateFetchableReferenceImage,
   validateVideoGenerationRequest,
 } from "../video_generation_port";
+import { CARTOON_VIDEO_PRESET } from "../contracts";
 
 const SUBMIT_PATH = "/api/v1/services/aigc/video-generation/video-synthesis";
 const DEFAULT_REGION_HOST = "ap-southeast-1.maas.aliyuncs.com";
@@ -116,6 +119,52 @@ export function buildAlibabaSubmitBody(request: VideoGenerationRequest): {
     },
   };
 }
+
+/**
+ * Pure cartoon video serialization (offline, zero network): wan3.0-video
+ * STANDARD cheap_demo envelope (2s/480P/silent/no-watermark/prompt_extend
+ * false, locked camera) animating the exact generated still as first_frame.
+ * The still sha256 stays on the request/ledger path for chain provenance and
+ * never enters the submitted JSON; only the provider-fetchable signed https
+ * URL is sent as `input.first_frame`.
+ */
+export function buildAlibabaCartoonVideoBody(request: VideoGenerationRequest): {
+  model: string;
+  input: Record<string, unknown>;
+  parameters: Record<string, unknown>;
+} {
+  validateVideoGenerationRequest(request);
+  if (request.firstFrame === undefined) {
+    throw new Error("Cartoon video requires the generated still as first_frame.");
+  }
+  validateCartoonFirstFrame(request.firstFrame);
+  validateFetchableCartoonFirstFrame(request.firstFrame);
+  if (request.modelId !== CARTOON_VIDEO_PRESET.modelId ||
+      request.resolution !== CARTOON_VIDEO_PRESET.resolution ||
+      request.secondsOut !== CARTOON_VIDEO_PRESET.secondsOut ||
+      request.aspectRatio !== CARTOON_VIDEO_PRESET.aspectRatio ||
+      request.audio !== CARTOON_VIDEO_PRESET.audio ||
+      request.outputs !== CARTOON_VIDEO_PRESET.outputs ||
+      request.autoUpscale !== CARTOON_VIDEO_PRESET.autoUpscale) {
+    throw new Error("Cartoon video controls must match the fixed STANDARD cheap_demo envelope.");
+  }
+  return {
+    model: request.modelId,
+    input: {
+      prompt: `${request.prompt} Locked camera, no cuts.`,
+      first_frame: request.firstFrame.url,
+    },
+    parameters: {
+      resolution: request.resolution,
+      ratio: request.aspectRatio,
+      duration: request.secondsOut,
+      audio: request.audio,
+      watermark: false,
+      prompt_extend: false,
+      video_control: CARTOON_VIDEO_PRESET.videoControl,
+    },
+  };
+}
 /** Alibaba Model Studio's asynchronous Wan video API, pinned to Singapore. */
 export class AlibabaVideoGenerationPort implements VideoGenerationPort {
   private readonly fetchImpl: typeof fetch;
@@ -136,6 +185,11 @@ export class AlibabaVideoGenerationPort implements VideoGenerationPort {
 
   async submit(request: VideoGenerationRequest): Promise<ProviderSubmission> {
     validateVideoGenerationRequest(request);
+    // Cartoon CAM-01 animates the exact generated still: the STANDARD envelope
+    // serializes with first_frame; every other request keeps the locked body.
+    const submitBody = request.firstFrame !== undefined
+      ? buildAlibabaCartoonVideoBody(request)
+      : buildAlibabaSubmitBody(request);
     let response: Response;
     try {
       response = await this.fetchImpl(`${this.baseUrl}${SUBMIT_PATH}`, {
@@ -146,7 +200,7 @@ export class AlibabaVideoGenerationPort implements VideoGenerationPort {
           "X-DashScope-Async": "enable",
           "X-DashScope-Idempotency-Key": request.idempotencyKey,
         },
-        body: JSON.stringify(buildAlibabaSubmitBody(request)),
+        body: JSON.stringify(submitBody),
       });
     } catch {
       // A network failure has an unknown outcome: the server may have accepted it.

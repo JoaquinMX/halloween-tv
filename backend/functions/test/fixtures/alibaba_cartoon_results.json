@@ -1,0 +1,23 @@
+{
+  "still": {
+    "taskId": "still-fixture-001",
+    "sha256": "b9c73ef7ecc72fbf0e5d049c3e76e2f5060328dad09f49714e5c534c42600505",
+    "model": "qwen-image-3.0-pro",
+    "region": "singapore",
+    "creditsCharged": null
+  },
+  "video": {
+    "taskId": "CAM-01__cartoonfixture00000001",
+    "model": "wan3.0-video",
+    "secondsOut": 2,
+    "resolution": "480P",
+    "videoControl": "STANDARD",
+    "firstFrameSha256": "b9c73ef7ecc72fbf0e5d049c3e76e2f5060328dad09f49714e5c534c42600505",
+    "creditsCharged": null
+  },
+  "chain": {
+    "videoStillSha256EqualsStillSha256": true,
+    "videoStatus": "completed",
+    "stillStatus": "completed"
+  }
+}
