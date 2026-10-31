@@ -1,6 +1,7 @@
 /// External, non-secret build configuration for the TV backend.
 library;
 
+import 'package:channel_cctv/channel_cctv.dart';
 import 'package:firebase_core/firebase_core.dart';
 
 enum BackendMode { offline, firebase, emulator }
@@ -12,6 +13,7 @@ final class BackendConfig {
     required this.mode,
     required this.partyId,
     required this.deviceId,
+    required this.channelId,
     required this.functionsRegion,
     required this.projectId,
     required this.appId,
@@ -34,6 +36,7 @@ final class BackendConfig {
         ),
         'TV_PARTY_ID': const String.fromEnvironment('TV_PARTY_ID'),
         'TV_DEVICE_ID': const String.fromEnvironment('TV_DEVICE_ID'),
+        'TV_CHANNEL_ID': const String.fromEnvironment('TV_CHANNEL_ID'),
         'FUNCTIONS_REGION': const String.fromEnvironment(
           'FUNCTIONS_REGION',
           defaultValue: 'us-central1',
@@ -82,12 +85,22 @@ final class BackendConfig {
     final int? firestorePort = int.tryParse(value('FIRESTORE_EMULATOR_PORT'));
     final int? functionsPort = int.tryParse(value('FUNCTIONS_EMULATOR_PORT'));
     String? error;
+    final String rawChannel = value('TV_CHANNEL_ID');
+    // Offline/emulator builds keep the bundled CCTV fixture behavior
+    // byte-for-byte: an unset TV_CHANNEL_ID falls back to the
+    // haunted-surveillance channel. Firebase (live) requires a provisioned
+    // registered id, validated exactly like TV_PARTY_ID/TV_DEVICE_ID.
+    final String channelId = rawChannel.isEmpty
+        ? hauntedSurveillanceChannelId
+        : rawChannel;
     if (!<String>{'offline', 'firebase', 'emulator'}.contains(modeText)) {
       error = 'unknown BACKEND_MODE';
     } else if (mode != BackendMode.offline) {
       final List<String> missing = <String>[
         if (value('TV_PARTY_ID').isEmpty) 'TV_PARTY_ID',
         if (value('TV_DEVICE_ID').isEmpty) 'TV_DEVICE_ID',
+        if (mode == BackendMode.firebase && rawChannel.isEmpty)
+          'TV_CHANNEL_ID',
         if (value('FIREBASE_PROJECT_ID').isEmpty) 'FIREBASE_PROJECT_ID',
         if (value('FIREBASE_APP_ID').isEmpty) 'FIREBASE_APP_ID',
         if (value('FIREBASE_API_KEY').isEmpty) 'FIREBASE_API_KEY',
@@ -97,9 +110,11 @@ final class BackendConfig {
       if (missing.isNotEmpty) {
         error = 'live configuration is incomplete: ${missing.join(', ')}';
       } else if (!_registeredId.hasMatch(value('TV_PARTY_ID')) ||
-          !_registeredId.hasMatch(value('TV_DEVICE_ID'))) {
+          !_registeredId.hasMatch(value('TV_DEVICE_ID')) ||
+          (mode == BackendMode.firebase &&
+              !_registeredId.hasMatch(rawChannel))) {
         error =
-            'TV_PARTY_ID and TV_DEVICE_ID must be provisioned identifier values';
+            'TV_PARTY_ID, TV_DEVICE_ID and TV_CHANNEL_ID must be provisioned identifier values';
       } else if (mode == BackendMode.emulator &&
           (value('FIRESTORE_EMULATOR_HOST').isEmpty ||
               firestorePort == null ||
@@ -119,6 +134,7 @@ final class BackendConfig {
       mode: mode,
       partyId: value('TV_PARTY_ID'),
       deviceId: value('TV_DEVICE_ID'),
+      channelId: channelId,
       functionsRegion: region,
       projectId: value('FIREBASE_PROJECT_ID'),
       appId: value('FIREBASE_APP_ID'),
@@ -137,6 +153,7 @@ final class BackendConfig {
   final BackendMode mode;
   final String partyId;
   final String deviceId;
+  final String channelId;
   final String functionsRegion;
   final String projectId;
   final String appId;

@@ -258,6 +258,7 @@ final class WallBoot {
   const WallBoot({
     this.store = const PrefsManifestStore(),
     this.partyId = 'local-party',
+    this.channelId = hauntedSurveillanceChannelId,
     this.tvDeviceId = '',
     this.guestCodeClient,
     this.hostInviteClient,
@@ -279,6 +280,14 @@ final class WallBoot {
 
   /// Party the wall belongs to.
   final String partyId;
+
+  /// Resolved Firestore party channel (provisioned `TV_CHANNEL_ID` in live
+  /// builds; the CCTV channel by default so bundled-fixture behavior is
+  /// unchanged). Scopes the fixture manifest, the durable offline boot, and
+  /// every cached-vs-live channel comparison. Channel-plugin resolution
+  /// below stays on the CCTV descriptor id, which is camera-tile labeling,
+  /// not Firestore scope.
+  final String channelId;
 
   /// TV's own device code, shown on the host guest-code page.
   final String tvDeviceId;
@@ -383,18 +392,15 @@ final class WallBoot {
   Future<PlaybackManifest> _loadFallback() {
     if (fixture != null) {
       return Future<PlaybackManifest>.value(
-        fixture!(partyId: partyId, channelId: hauntedSurveillanceChannelId),
+        fixture!(partyId: partyId, channelId: channelId),
       );
     }
     if (fixtureLoader != null) {
-      return fixtureLoader!(
-        partyId: partyId,
-        channelId: hauntedSurveillanceChannelId,
-      );
+      return fixtureLoader!(partyId: partyId, channelId: channelId);
     }
     return loadBundledFixtureManifest(
       partyId: partyId,
-      channelId: hauntedSurveillanceChannelId,
+      channelId: channelId,
       loader: bundleLoader,
     );
   }
@@ -467,7 +473,7 @@ final class WallBoot {
     if (preparation != null) {
       final PlaybackSyncSnapshot offline = await preparation.bootOffline(
         partyId: partyId,
-        channelId: hauntedSurveillanceChannelId,
+        channelId: channelId,
       );
       if (offline.state == PlaybackSyncState.usingCache &&
           offline.hasCompleteMedia &&
@@ -495,7 +501,7 @@ final class WallBoot {
     // to the bundled fixture instead of blacking out the TV.
     if (cached != null &&
         cached.partyId == partyId &&
-        cached.channelId == hauntedSurveillanceChannelId) {
+        cached.channelId == channelId) {
       final Result<PlaybackManifest> cachedCheck = validateCctvManifest(cached);
       if (cachedCheck is Ok<PlaybackManifest> &&
           await _verifyManifestBytes(cachedCheck.value)) {
@@ -561,7 +567,7 @@ final class WallBoot {
     try {
       final CommittedManifestIndex? index = await indexStore.readCommitted(
         partyId: partyId,
-        channelId: hauntedSurveillanceChannelId,
+        channelId: channelId,
       );
       if (index == null) return null;
       final Map<String, CachedMedia> media = <String, CachedMedia>{};
@@ -589,8 +595,7 @@ final class WallBoot {
       if (cached == null) {
         return null;
       }
-      if (cached.partyId != partyId ||
-          cached.channelId != hauntedSurveillanceChannelId) {
+      if (cached.partyId != partyId || cached.channelId != channelId) {
         return null;
       }
       final Result<PlaybackManifest> checked = validateCctvManifest(cached);
