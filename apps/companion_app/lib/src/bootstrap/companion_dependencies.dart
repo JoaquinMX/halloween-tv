@@ -15,6 +15,12 @@
 /// a [FirebaseTvIdentity] from the guest-typed IDs so they scope the actual
 /// callable payload. A fixed [FirebaseTvIdentity] may still be supplied to
 /// [create] for single-identity compositions.
+///
+/// Host administration rides the same live composition: [hostJoinClient]
+/// (`joinHost`) and [hostMediaClient] (`listHostVideos` / `generateHostVideo`
+/// / `getHostVideoPreview` / `deleteHostVideo`) are built from the same
+/// resolved functions and stay `null` while offline, so offline boot
+/// performs no host network calls either.
 library;
 
 import 'package:channel_api/channel_api.dart' show ManifestSource;
@@ -29,6 +35,8 @@ import 'package:infra_firestore/infra_firestore.dart'
 
 import 'package:companion_app/src/config/backend_config.dart';
 import 'package:companion_app/src/data/callable_manifest_invoker.dart';
+import 'package:companion_app/src/data/host_join_client.dart';
+import 'package:companion_app/src/data/host_media_client.dart';
 import 'package:companion_app/src/data/manifest_connection.dart';
 import 'package:companion_app/src/data/manifest_failure.dart';
 import 'package:companion_app/src/data/party_join_client.dart';
@@ -48,6 +56,8 @@ final class CompanionDependencies {
     required FirebaseManifestCallableInvoker? invoker,
     required this.partyJoinClient,
     required this.guestMediaClient,
+    required this.hostJoinClient,
+    required this.hostMediaClient,
   }) : _invoker = invoker;
 
   final BackendConfig config;
@@ -57,6 +67,12 @@ final class CompanionDependencies {
   final FirebaseManifestCallableInvoker? _invoker;
   final PartyJoinClient? partyJoinClient;
   final GuestMediaClient? guestMediaClient;
+
+  /// Host invite redemption client (`joinHost`); null while offline.
+  final HostJoinClient? hostJoinClient;
+
+  /// Host administration client (seed catalog + previews); null offline.
+  final HostMediaClient? hostMediaClient;
 
   /// True when the manifest source is backed by the live callable.
   bool get isLive => remoteUnavailableReason == null;
@@ -87,6 +103,8 @@ final class CompanionDependencies {
     FirebaseFunctions? functionsOverride,
     FirebaseManifestCallableInvoker? invokerOverride,
     PartyJoinCallableInvoker? partyJoinInvokerOverride,
+    HostJoinCallableInvoker? hostJoinInvokerOverride,
+    HostMediaCallableInvoker? hostMediaInvokerOverride,
   }) async {
     final BackendConfig resolved = config ?? BackendConfig.unconfigured();
     if (!resolved.isLiveConfigured) {
@@ -102,6 +120,8 @@ final class CompanionDependencies {
         invoker: null,
         partyJoinClient: null,
         guestMediaClient: null,
+        hostJoinClient: null,
+        hostMediaClient: null,
       );
     }
     if (identity == null) {
@@ -135,6 +155,20 @@ final class CompanionDependencies {
                 partyJoinInvokerOverride ??
                 CallablePartyJoinInvoker(functions: resolveFunctions()),
           ),
+          hostJoinClient: HostJoinClient(
+            invoker:
+                hostJoinInvokerOverride ??
+                _DeferredHostJoinInvoker(
+                  () => CallableHostJoinInvoker(functions: resolveFunctions()),
+                ),
+          ),
+          hostMediaClient: HostMediaClient(
+            invoker:
+                hostMediaInvokerOverride ??
+                _DeferredHostMediaInvoker(
+                  () => CallableHostMediaInvoker(functions: resolveFunctions()),
+                ),
+          ),
         );
       } on Object catch (error) {
         final ManifestFailure failure = ManifestFailure.classify(error);
@@ -147,6 +181,8 @@ final class CompanionDependencies {
           invoker: null,
           partyJoinClient: null,
           guestMediaClient: null,
+          hostJoinClient: null,
+          hostMediaClient: null,
         );
       }
     }
@@ -179,6 +215,20 @@ final class CompanionDependencies {
               partyJoinInvokerOverride ??
               CallablePartyJoinInvoker(functions: resolveFunctions()),
         ),
+        hostJoinClient: HostJoinClient(
+          invoker:
+              hostJoinInvokerOverride ??
+              _DeferredHostJoinInvoker(
+                () => CallableHostJoinInvoker(functions: resolveFunctions()),
+              ),
+        ),
+        hostMediaClient: HostMediaClient(
+          invoker:
+              hostMediaInvokerOverride ??
+              _DeferredHostMediaInvoker(
+                () => CallableHostMediaInvoker(functions: resolveFunctions()),
+              ),
+        ),
       );
     } on Object catch (error) {
       final ManifestFailure failure = ManifestFailure.classify(error);
@@ -191,6 +241,8 @@ final class CompanionDependencies {
         invoker: null,
         partyJoinClient: null,
         guestMediaClient: null,
+        hostJoinClient: null,
+        hostMediaClient: null,
       );
     }
   }
@@ -216,6 +268,29 @@ final class CompanionDependencies {
     }
     return functions;
   }
+}
+
+/// Host transports resolve Firebase Functions only when a host action is
+/// actually used. This preserves callable-boundary substitution and avoids
+/// touching the host transport during guest-only or offline boot.
+final class _DeferredHostJoinInvoker implements HostJoinCallableInvoker {
+  _DeferredHostJoinInvoker(this._create);
+  final CallableHostJoinInvoker Function() _create;
+  CallableHostJoinInvoker? _resolved;
+
+  @override
+  Future<Object?> call(String name, Map<String, Object?> payload) =>
+      (_resolved ??= _create()).call(name, payload);
+}
+
+final class _DeferredHostMediaInvoker implements HostMediaCallableInvoker {
+  _DeferredHostMediaInvoker(this._create);
+  final CallableHostMediaInvoker Function() _create;
+  CallableHostMediaInvoker? _resolved;
+
+  @override
+  Future<Object?> call(String name, Map<String, Object?> payload) =>
+      (_resolved ??= _create()).call(name, payload);
 }
 
 final class _UnavailableManifestSource

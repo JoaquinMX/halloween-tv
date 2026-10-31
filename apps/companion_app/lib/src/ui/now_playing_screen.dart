@@ -1,9 +1,10 @@
 /// Read-only now-playing lineup for the companion guest flow.
 ///
 /// Renders the party's latest published lineup from a [GuestSessionState]
-/// snapshot: the four cameras in [cctvSlots] wall order (labels via
-/// [resolveCctvLabel]), the manifest version, the server publication
-/// timestamp ([PlaybackManifest.publishedAt]), and the separately labeled
+/// snapshot: only the cameras present in the valid 1/2/4-camera manifest, in
+/// canonical [cctvSlots] wall order (labels via [resolveCctvLabel]), the
+/// manifest version, the server publication timestamp
+/// ([PlaybackManifest.publishedAt]), and the separately labeled
 /// last-successful-check time with an explicit timezone.
 ///
 /// This is a read-only companion view of published data. It makes NO claim
@@ -99,7 +100,10 @@ final class NowPlayingScreen extends StatelessWidget {
                     style: CctvTheme.timestampStyle.copyWith(fontSize: 18),
                   ),
                   const SizedBox(height: 16),
-                  ...cctvSlots.map(
+                  // Reduced layouts (1/2 cameras) render only the cameras
+                  // present in the valid manifest, in canonical wall order —
+                  // never placeholder tiles for absent cameras.
+                  ..._presentSlots(manifest).map(
                     (CctvSlot slot) =>
                         _cameraTile(manifest: manifest, slot: slot),
                   ),
@@ -156,6 +160,21 @@ final class NowPlayingScreen extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  /// Cameras present in [manifest], in canonical wall order.
+  ///
+  /// Validated 1/2/4-camera manifests carry the first-N canonical slots, so
+  /// filtering [cctvSlots] by presence renders each layout without
+  /// placeholder tiles for absent cameras.
+  List<CctvSlot> _presentSlots(PlaybackManifest manifest) {
+    final Set<String> present = <String>{
+      for (final ClipDescriptor clip in manifest.clips) clip.cameraId,
+    };
+    return <CctvSlot>[
+      for (final CctvSlot slot in cctvSlots)
+        if (present.contains(slot.id)) slot,
+    ];
   }
 
   Widget _cameraTile({

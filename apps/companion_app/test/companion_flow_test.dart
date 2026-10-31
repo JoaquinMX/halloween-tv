@@ -17,6 +17,7 @@ import 'package:companion_app/src/config/backend_config.dart';
 import 'package:companion_app/src/data/party_join_client.dart';
 import 'package:companion_app/src/join/device_identity_store.dart';
 import 'package:companion_app/src/ui/connection_status.dart';
+import 'package:companion_app/src/ui/host_entry_screen.dart';
 import 'package:companion_app/src/ui/join_screen.dart';
 import 'package:companion_app/src/ui/now_playing_screen.dart';
 import 'package:core_foundation/core_foundation.dart';
@@ -160,6 +161,9 @@ Future<void> pumpApp(
     DeviceIdentityStore.storageKey: kFixedDeviceId,
   });
   await tester.pumpWidget(CompanionApp(manifestSource: source, clock: clock));
+  await flush(tester);
+  // Host-first boot: take the explicit guest route before joining.
+  await tapVisible(tester, find.byKey(HostEntryScreen.joinAsGuestKey));
   await flush(tester);
 }
 
@@ -569,6 +573,9 @@ void main() {
           clock: liveClock,
         ),
       );
+      await flush(tester);
+      // Host-first boot: take the explicit guest route before joining.
+      await tapVisible(tester, find.byKey(HostEntryScreen.joinAsGuestKey));
       await flush(tester);
     }
 

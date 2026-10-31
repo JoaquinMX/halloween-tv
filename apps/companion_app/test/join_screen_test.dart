@@ -124,8 +124,7 @@ void main() {
       );
     },
   );
-  testWidgets('overlapping scans never run concurrently', (tester) async {
-    SharedPreferences.setMockInitialValues({});
+  testWidgets('overlapping scans never run concurrently', (tester) async {    SharedPreferences.setMockInitialValues({});
     final Completer<JoinPayloadScanResult> gate =
         Completer<JoinPayloadScanResult>();
     final _CountingScanner scanner = _CountingScanner(pending: gate.future);
@@ -153,5 +152,48 @@ void main() {
       tester.widget<TextButton>(find.byKey(JoinScreen.scanKey)).onPressed,
       isNotNull,
     );
+  });
+  testWidgets('a host invitation on the guest form fails visibly without joining', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    var called = false;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: JoinScreen(
+          onJoin: (_) async {
+            called = true;
+          },
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(JoinScreen.payloadFieldKey),
+      '{"partyId":"party","channelId":"cctv","role":"host",'
+      '"inviteToken":"hi-abcdef0123456789abcdef0123456789abcdef01"}',
+    );
+    await tester.tap(find.byKey(JoinScreen.submitKey));
+    await tester.pumpAndSettle();
+    // Guest entry never registers a host payload through joinParty.
+    expect(called, isFalse);
+    expect(find.byKey(JoinScreen.errorKey), findsOneWidget);
+    expect(find.textContaining('host entry'), findsOneWidget);
+  });
+  testWidgets('back returns to the host entry when provided', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    var backed = false;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: JoinScreen(
+          onJoin: (_) async {},
+          onBack: () => backed = true,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(BackButton));
+    await tester.pumpAndSettle();
+    expect(backed, isTrue);
   });
 }

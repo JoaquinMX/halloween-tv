@@ -14,11 +14,16 @@ final class JoinScreen extends StatefulWidget {
     this.configurationIssue,
     this.identityStore,
     this.scanner = const UnavailableJoinPayloadScanner(),
+    this.onBack,
   });
   final Future<void> Function(GuestJoinData data) onJoin;
   final String? configurationIssue;
   final DeviceIdentityStore? identityStore;
   final JoinPayloadScanner scanner;
+
+  /// Returns to the dedicated host entry screen, when this form was
+  /// reached through it. Null for standalone (legacy boot) use.
+  final VoidCallback? onBack;
   static const Key partyFieldKey = Key('join-party-id');
   static const Key channelFieldKey = Key('join-channel-id');
   static const Key pinFieldKey = Key('join-pin');
@@ -81,6 +86,16 @@ final class _JoinScreenState extends State<JoinScreen> {
         : parseGuestJoinPayload(pasted, localDeviceId: _deviceId!);
     switch (result) {
       case Ok(:final GuestJoinData value):
+        // Guest entry must never register a host payload through joinParty:
+        // host invitations redeem only through the dedicated host entry.
+        if (value.role != JoinRole.guest) {
+          setState(
+            () => _error =
+                'This is a host invitation. Use the host entry instead — '
+                'guest join cannot redeem it.',
+          );
+          return;
+        }
         setState(() {
           _error = null;
           _submitting = true;
@@ -123,7 +138,12 @@ final class _JoinScreenState extends State<JoinScreen> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('Join party')),
+    appBar: AppBar(
+      title: const Text('Join party'),
+      leading: widget.onBack == null
+          ? null
+          : BackButton(onPressed: widget.onBack),
+    ),
     body: Center(
       child: SingleChildScrollView(
         padding: const EdgeInsets.all(24),

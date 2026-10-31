@@ -212,4 +212,52 @@ void main() {
     expect(session.statuses[second], 'eligible');
     await dir.delete(recursive: true);
   });
+
+  test(
+    'host source-photo uploads reuse the workflow under separate receipts',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final dir = await Directory.systemTemp.createTemp();
+      final photo = File('${dir.path}/source.jpg')..writeAsBytesSync([1, 2, 3]);
+      final calls = Calls();
+      final guest = GuestMediaSession(
+        client: GuestMediaClient(invoker: calls, transport: Put()),
+        partyId: 'party',
+        deviceId: 'guest-device',
+        channelId: 'cctv',
+        tempDirectory: () async => dir,
+      );
+      final host = GuestMediaSession(
+        client: GuestMediaClient(invoker: calls, transport: Put()),
+        partyId: 'party',
+        deviceId: 'host-device',
+        channelId: 'cctv',
+        tempDirectory: () async => dir,
+        receiptsKey: GuestMediaSession.hostReceiptsKey,
+        receiptKey: GuestMediaSession.hostReceiptKey,
+      );
+      await guest.submit(photo, consent: true, confirmed: true);
+      await host.submit(photo, consent: true, confirmed: true);
+      expect(guest.submissionId, isNot(host.submissionId));
+      // Namespaced receipts never share storage: withdrawing the host photo
+      // leaves the guest receipt (and its withdrawal path) untouched.
+      expect(
+        prefs.getStringList(GuestMediaSession.receiptsKey),
+        <String>[guest.submissionId!],
+      );
+      expect(
+        prefs.getStringList(GuestMediaSession.hostReceiptsKey),
+        <String>[host.submissionId!],
+      );
+      await host.withdraw();
+      expect(host.submissionId, isNull);
+      expect(prefs.getStringList(GuestMediaSession.hostReceiptsKey), isEmpty);
+      expect(
+        prefs.getStringList(GuestMediaSession.receiptsKey),
+        <String>[guest.submissionId!],
+      );
+      await dir.delete(recursive: true);
+    },
+  );
 }

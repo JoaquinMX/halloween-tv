@@ -9,13 +9,13 @@ this companion app was recorded for cycle-6, scoped to a controlled pilot
 
 ## What it does
 
-Anonymous join + read-only now-playing, nothing else:
+Guest now-playing and a separate host administration route:
 
-- **Join:** the guest enters the organizer-provisioned `partyId`,
+- **Guest join:** the guest enters the organizer-provisioned `partyId`,
   `deviceId`, and `channelId` (typed fields or a pasted JSON object).
   Identifiers are validated locally for shape only — well-formed never
-  means registered. There is no login, no Firebase Auth, no registration,
-  and no server round-trip at join time.
+  means registered. Guest registration uses `joinParty`; a legacy payload
+  without a role remains a guest payload.
 - **Now playing:** the app invokes exactly one callable,
   `getCurrentManifest`, with exactly `{partyId, deviceId, channelId}`,
   and renders the latest published lineup (four cameras in `cctvSlots`
@@ -24,8 +24,19 @@ Anonymous join + read-only now-playing, nothing else:
   (`FORBIDDEN`/`UNAUTHENTICATED` render as denial states).
 
 Default boot is unconfigured/offline: with no backend selected the app
-shows the join screen with a configuration banner and performs no Firebase
-initialization and no network traffic. A cloud target is selected only
+shows the dedicated Host Entry screen with a configuration banner and
+performs no Firebase initialization and no network traffic. Host Entry
+offers Scan Host QR, paste/retry fallback, and an explicit Join as guest
+route. The dedicated entry keeps privilege boundaries visible: guest PIN
+admission is intentionally broad, so host administration must never be
+reachable through the guest PIN or a client-supplied role string. Host QR
+payloads redeem only through `joinHost`, which validates a server-minted
+invite and assigns host scope; guests register only through `joinParty`.
+Unknown roles and malformed host capabilities are rejected before a
+callable, and a host payload pasted into guest entry is rejected visibly.
+Host and guest phone identities are persisted under separate keys, so
+switching roles cannot overwrite or promote a guest registration. A cloud
+target is selected only
 through an explicit, validated `BackendConfig` (build-time
 `--dart-define` values via `BackendConfig.fromEnvironment()` in
 `lib/main.dart`, or the documented `config/firebase.json` copy workflow
@@ -53,12 +64,25 @@ holding a provisioned ID pair could call them from elsewhere. Therefore:
   only with the intended guest, and rotate/revoke on the backend if one
   leaks.
 
+## Host video administration
+
+The host panel reads its seed catalog and camera videos from the server.
+It shows queued, generating, ready, failed, expired, and deleted states;
+Generate uses one of the supported server presets and a stable idempotency
+key per seed across retries. Optional source photos reuse the guest photo
+upload flow, including affirmative consent, with host-specific receipt keys.
+View requests a fresh, short-lived scoped preview capability each time.
+Delete is **per selected seed id**: the seed entry and associated preview
+and delivery objects are removed, a matching current manifest is revoked,
+and accounting records are preserved. The list changes only after the
+backend confirms deletion. Catalog polling and preview playback suspend
+when the app backgrounds or the host leaves.
+
 ## Spend and hardening
 
-- **No live spend from this app:** the only callable it invokes is the
-  read-only `getCurrentManifest`. Video-generation testing stays on the
-  cheapest preset with explicit owner approval per the standing gates; this
-  app cannot trigger generation.
+- **Host generation is an explicit admin action:** guest routes cannot call
+  host administration. Video-generation testing stays on the cheapest
+  supported preset with explicit owner approval per the standing gates.
 - **Pending owner-gated hardening:** App Check enforcement and an explicit
   organizer pairing/approval step are not implemented in this pass and
   remain owner-gated follow-ups before any wider rollout.
