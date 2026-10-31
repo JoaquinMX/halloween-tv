@@ -9,7 +9,7 @@ Owner UX: the guest does consent + upload only — no prompt, scene, or situatio
 ## Gates and execution order
 
 1. Review the 3-case preview with the owner. Each case needs an authorized portrait submission and the separately identified scene/style reference. Confirm fixed plan IDs, versions, seeds, model pins, and 9 fixture slots.
-2. Obtain an owner-supplied maximum Token Plan Credit allowance. Record still-stage and video-stage budget inputs separately; do not estimate prices. Credits stay UNKNOWN (null) until the provider reports realized charges; only realized console Credits are billable truth. Stop if projected allowance cannot be reconciled or the owner has not approved the ceiling.
+2. Verify a demonstrably unused, still-applicable owner-approved Token Plan Credit allowance, or obtain a concrete final ceiling if no such allowance can be established. This workstream does not reset earlier 3-video/5-attempt allowances. Record still-stage and video-stage budget inputs separately; do not estimate realized prices. Credits stay UNKNOWN (null) until the provider reports actual charges. Do not submit if the applicable remaining allowance cannot be established.
 3. Run `npm run build`, `npm test`, and the emulator suite including `cartoon_delivery_e2e.test.ts`. The emulator test must exercise actual stored media bytes, normalized H.264/yuv420p/24fps/854x480 two-second media, four downloads, independent hashes, ACK/purge, preview retention, and withdrawal denial. Any emulator signing substitution must be named explicitly and is not production-equivalent.
 4. Run `npm run runtime:prepare`, then the offline packaging preflight. Inspect generated artifacts and confirm no credentials, private photos, or signed URLs are included.
 5. Before any separately authorized live batch, capture the approved exact scope (3 stills + 3 videos, 6 generated seconds, fixture slots, budget ceiling, consented portrait IDs), operator, date, and rollback owner. Reconcile provider task IDs and actual console Credit usage per stage after each submission; stop on a ceiling breach or any unrecognized charge.
@@ -24,11 +24,11 @@ The canonical manifest hash, 1/2/4-camera contracts, MIME/profile validation, id
 
 ## Reference provenance (factual note)
 
-The 16 reference stills shipped under `assets/scenario_refs/` (one per catalog record, sha256/sizeBytes pinned in `scenario_catalog.v1.json`) are the style references for the `qwen-image-3.0-pro` still stage; the batch preview re-verifies each referenced file against its pinned hash before emitting a row. The supplied refs are expressly task-authorized for offline preview and emulator rehearsal (no live provider calls). Real boundaries that apply: the owner-supplied maximum Credit ceiling (preview refuses to run without it), no live submits from any preview tooling, no cloud writes from preparation, and server-owned prompt composition (the client never supplies prompts, scenes, or plans).
+The 16 reference stills shipped under `assets/scenario_refs/` (one per catalog record, sha256/sizeBytes pinned in `scenario_catalog.v1.json`) are the style references for the `qwen-image-3.0-pro` still stage; the batch preview re-verifies each referenced file against its pinned hash before emitting a row. The supplied refs are task-authorized inputs. Preparation in this workstream remains offline only (no live provider calls). The preview requires a numeric ceiling argument, but that argument is not spend authorization: an applicable owner-approved remaining allowance must still be established before live submission. Preparation never submits live work or writes cloud data; prompt composition stays server-owned (the client never supplies prompts, scenes, or plans).
 
 ## Few-case preview (verbatim, 3 cases)
 
-The following 3 cases are the exact output of `npm run cartoon:prepare -- --party=pilot --device=tv-pilot --channel=main --max-credits=10` (prompts byte-identical to the server composer; still-to-video role ordering preserved: the generated still becomes the video `first_frame`; the still stage takes subject_identity + style_scene).
+The following 3 cases are the exact output of `npm run cartoon:prepare -- --party=pilot --device=tv-pilot --channel=main --max-credits=10` (prompts byte-identical to the server composer; still-to-video role ordering preserved: the generated still becomes the video `first_frame`; the still stage takes subject_identity + style_scene). The value `10` is an offline example, not an approved Credit budget or measured spend.
 
 ### Case 1 — storybook-kitchen / kitchen-slapstick-chase (selection seed `cartoon-batch-case-1`)
 - Scenario: `storybook-kitchen` version 1. Situation: `kitchen-slapstick-chase` version 1.
@@ -101,7 +101,7 @@ Physical-TV observation checklist (pending until performed):
 - Withdraw the portrait consent and verify that a subsequent URL request is denied.
 - Record device, build, emulator-signing differences, and operator observations. Emulator validation is not physical-TV validation.
 
-Physical-TV and live-provider validation remain pending until separately authorized and performed.
+Physical-device smoke is already authorized by the workstream brief, but was not performed in cycle 13. Inspect the existing device session before use; physical proof of the changed backend also depends on deployment. Deployment and live-provider submissions were not performed; use established deployment authority and an applicable remaining paid allowance before those external steps.
 
 ## Fix-5d behavior notes (review-E + review-F)
 
@@ -118,12 +118,12 @@ Physical-TV and live-provider validation remain pending until separately authori
 
 Task restatement: 16-scenario image-backed catalog, two-stage cartoon pipeline (qwen-image-3.0-pro still -> wan3.0-video STANDARD first_frame), scoped consent provenance, delivery-gap repair, host callable enqueue, pending-intent queue, explicit role mapping + situation tableaus.
 
-Plan pointer: the harness plan produced 4 partitions (p1 catalog/packaging, p2 pipeline/wiring, p3 provenance/migration, p4 contracts/delivery/runbook) plus sequential fixes fix-p2 through fix-5b closing delivery gaps, host dispatch, and pending-intent dispatch.
+Plan pointer: the harness plan produced 4 partitions (p1 catalog/packaging, p2 pipeline/wiring, p3 provenance/migration, p4 contracts/delivery/runbook) plus sequential fixes through fix-5e closing delivery gaps, host dispatch, durable pending intents, server-only rehearsal provenance, concurrent dispatch, and created-only plan-mismatch release.
 
-Machine evidence (sanitized, no private inputs/URLs/credentials/secrets): tsc build pass; unit suite 102 pass / 0 fail / 108 emulator-gated skips (of 210); FULL Firestore+Storage+Functions emulator suite 210 pass / 0 fail / 0 skipped on the final merged checkout; runtime:prepare structural-only pass with 16 scenarios packaged; cartoon:prepare 3-case offline preview (0 live submits, 0 billable, credits UNKNOWN).
+Independent parent verification on merged source `8fa76936cc8b736c3f09ee2fbfe241c3fa31efc9`: `npm run test:emulator` exited 0, including the TypeScript build and all 215 Firestore + Storage + Functions emulator tests (215 passed, 0 failed, 0 skipped). Both deterministic fix-5e regressions executed. The child also reported 105 unit passes / 110 emulator-gated skips; the independent full-emulator result is the acceptance evidence. Earlier runtime:prepare structural-only and cartoon:prepare 3-case offline preview checks remain applicable because packaging inputs did not change (16 packaged scenarios, 0 live submissions, Credits UNKNOWN). Machine-checkable parent acceptance, closed finding IDs, plan receipt hash, review scope and remaining boundaries: [verification-8fa7693.json](cycle13/verification-8fa7693.json). The subsequent closure edits are documentation/evidence only; the tested backend source is unchanged.
 
 Coverage distinctions (be precise): (i) real serializer tests against the verified Token Plan shapes (input.messages image+text content, parameters incl. negative_prompt; video input.media first_frame) — no network; (ii) network-mocked adapter tests with fetch stubs asserting zero live calls and request body shapes; (iii) fake-rehearsal two-stage tests using FakeImageGenerationPort/FakeVideoGenerationPort proving pipeline orchestration by construction (cannot prove wire bytes — fake ports substitute for provider wire bytes, so byte-level provider equivalence is not established by these tests); (iv) emulator E2Es on real storage bytes (delivery bytes/hashes/ACK/purge/preview retention/withdrawal denial; host portrait real-path; two-guest busy exactly-once; cartoon chain still-bytes vs hash at publish).
 
-Honest review statement: plan + review-A/B/C receipts cover the cycle-13 base diff only; fix-2 through fix-5b diffs are NOT covered by those approvals; the parent runs the independent final audit.
+Honest review statement: A/B/C cover the earlier base diff, not the final tree. D approved with no findings; E approved with 2 Low + 1 Minimal findings; F requested changes with 1 High + 5 Low + 1 Minimal findings. All 10 E/F findings were addressed in fix-5d. No fresh three-role review covers fix-5e; the parent independently audits that narrow diff and reruns the full merged-tree emulator suite. Do not describe earlier reviews as approval of the final diff.
 
 Boundaries: 0 provider calls, credits UNKNOWN, no cloud deploy/migration, no device proof in this turn, no main merge.

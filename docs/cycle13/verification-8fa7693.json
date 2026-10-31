@@ -1,0 +1,119 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-10-31T21:07:35.013977+00:00",
+  "acceptance": "accepted for repository code scope; not deployed or live-device/provider proven",
+  "branch": "orchestrator/cycle-13-catalog-pipeline",
+  "base": "d4f13dadffc79a993aee826c5c002d5f9c9d036e",
+  "testedHead": "8fa76936cc8b736c3f09ee2fbfe241c3fa31efc9",
+  "plan": {
+    "originalReceiptSha256": "2c3a3a2eafffe22ac710bcdacb12f3c71304fee2ce168653c52dd0bb3de643d8",
+    "partitions": [
+      "p1 catalog/assets/packaging",
+      "p2 two-stage pipeline/prompts/wiring",
+      "p3 provenance/lifecycle",
+      "p4 contracts/delivery/operator documentation"
+    ],
+    "historicalPlanIsNotNewAuthority": true
+  },
+  "independentVerification": {
+    "command": "npm run test:emulator",
+    "exitCode": 0,
+    "counts": {
+      "tests": 215,
+      "pass": 215,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0,
+      "todo": 0
+    },
+    "headUnchangedDuringRun": true,
+    "build": "passed",
+    "providerNetwork": "fakes and fetch stubs; not live proof",
+    "emulatorLogSha256": "b3494c9cb47a6c91fbcf878d8741f6fc5cb98d86fc0aae373313d6e16d734e22"
+  },
+  "finalNarrowDiff": {
+    "from": "9919a06c3a77f77448bc8d0840f8ea4a03867eff",
+    "to": "8fa76936cc8b736c3f09ee2fbfe241c3fa31efc9",
+    "files": [
+      "backend/functions/src/runtime.ts",
+      "backend/functions/test/guest_upload_e2e.test.ts",
+      "docs/CYCLE-13-CATALOG-PIPELINE-RUNBOOK.md"
+    ]
+  },
+  "closedFindings": [
+    {
+      "id": "CONCURRENT-REDISPATCH",
+      "resolution": "flushPendingIntents enqueues only request.created=true; reused jobs update intent from actual job state without writes to that job",
+      "regression": "fix-5e racing flushes enqueue the reused job exactly once"
+    },
+    {
+      "id": "PLAN-MISMATCH-CAPACITY",
+      "resolution": "plan mismatch fails only the just-created owned job through transactional failEnqueue, preserving job/ledger and releasing capacity; reused jobs untouched",
+      "regression": "fix-5e plan drift fails only the just-created job and frees the next guest"
+    }
+  ],
+  "openCodeFindings": [],
+  "priorAcceptedPaths": [
+    "actual host callable plan selection and enqueue",
+    "durable busy-party guest pending intents",
+    "withdrawal/expiry checks and terminal/transient errors",
+    "image 1 scene/style vs image 2 actual person; static situation tableaus"
+  ],
+  "reviews": [
+    {
+      "lane": "review-d",
+      "verdict": "approve",
+      "findings": 0,
+      "scope": "historical frozen diff; not final fix-5e approval",
+      "receiptSha256": "a18d7869a5753bf2807cba13b6d685dbd2479355f6994e2ac1c18d3d35b2513d"
+    },
+    {
+      "lane": "review-e",
+      "verdict": "approve",
+      "findings": 3,
+      "scope": "historical frozen diff; not final fix-5e approval",
+      "receiptSha256": "a162a383e1adcabbadc3e41404c85d4dd571fec799861b1bbfac5f1aec015fd5"
+    },
+    {
+      "lane": "review-f",
+      "verdict": "request-changes",
+      "findings": 7,
+      "scope": "historical frozen diff; not final fix-5e approval",
+      "receiptSha256": "0728aef1bf4e2870e3eb5e91b2a846e87645d5d8826e15d2155c550c3592bfcd"
+    }
+  ],
+  "freshThreeRoleReviewOfFinalDiff": false,
+  "finalApprovalBasis": "independent parent source review plus full final-tree emulator suite",
+  "assets": {
+    "references": 16,
+    "hashAuditHead": "9919a06",
+    "unchangedSinceHashAudit": true,
+    "originalsPreserved": true,
+    "privatePortraitCommitted": false
+  },
+  "preservation": {
+    "main": "d4f13dadffc79a993aee826c5c002d5f9c9d036e",
+    "originMain": "d4f13dadffc79a993aee826c5c002d5f9c9d036e",
+    "remoteHeadsPreviouslyAudited": 26,
+    "remoteWritesInFinalAudit": false,
+    "ownerUntrackedFilesUnchanged": true,
+    "noBranchDeletion": true
+  },
+  "childEvidenceCaveat": {
+    "reportedFinalResultPath": "/tmp/orchestrator/cycle-13/fix-5e/result.json",
+    "availableAtParentAudit": false,
+    "doesNotBlockIndependentSourceAndSuiteEvidence": true,
+    "negativeControls": "reported by child; not independently rerun"
+  },
+  "boundaries": {
+    "providerCalls": 0,
+    "actualTokenPlanCredits": "UNKNOWN",
+    "liveSampleBatch": "3 cases prepared offline; not live submissions or spend authority",
+    "cloudDeployment": false,
+    "mainMerge": false,
+    "physicalDeviceProof": false,
+    "deviceSmokeAlreadyAuthorized": true,
+    "productionHostInviteTtlVerified": false,
+    "physicalWallSwapVerified": false
+  }
+}
