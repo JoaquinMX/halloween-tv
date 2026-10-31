@@ -25,6 +25,7 @@ import {
   SUPPORTED_CAMERA_COUNTS,
   SCHEMA_VERSION,
   expectedCameraIds,
+  hostPreviewObjectPath,
 } from "./config";
 import { assertRegisteredPartyDevice } from "./auth";
 
@@ -484,6 +485,68 @@ export function createDeliveryServices(options: DeliveryServiceOptions): Deliver
       return validateAcceptedAck(acceptedAck, ack, ackId, idem);
     });
     const relatedJobRef = jobRef(db, ack.partyId, accepted.jobId);
+    // Eager preview materialization (before purge): for every live seed
+    // bound to this job, copy delivery bytes to the separately referenced
+    // hostPreviews prefix so the ACK purge below never removes preview
+    // bytes. The lazy transactionally-gated path in getHostVideoPreview
+    // stays as the retry; failures here are best-effort (the lazy path
+    // maps a purged source to a typed NOT_FOUND/CLIP_EXPIRED).
+    try {
+      const seeds = await db
+        .collection(`parties/${ack.partyId}/seedVideos`)
+        .where("jobId", "==", accepted.jobId)
+        .get();
+      const liveSeeds = seeds.docs.filter((seedDoc) => {
+        const seed = seedDoc.data() as Record<string, unknown>;
+        if (seed.partyId !== ack.partyId || seed.channelId !== ack.channelId) return false;
+        if (seed.status === "deleted" || seed.status === "failed" || seed.status === "expired") return false;
+        const expiry = seed.expiresAt instanceof Timestamp
+          ? seed.expiresAt.toDate().getTime()
+          : Date.parse(String(seed.expiresAt));
+        return !Number.isFinite(expiry) || expiry > now().getTime();
+      });
+      await Promise.all(
+        liveSeeds.flatMap((seedDoc) => {
+          const seed = seedDoc.data() as Record<string, unknown>;
+          const seedId = String(seed.seedId ?? seedDoc.id);
+          const previewExpiryRaw = seed.expiresAt instanceof Timestamp
+            ? seed.expiresAt.toDate()
+            : new Date(Date.parse(String(seed.expiresAt)));
+          const previewExpiry = Number.isFinite(previewExpiryRaw.getTime())
+            ? previewExpiryRaw
+            : new Date(now().getTime() + MEDIA_RETENTION_MS);
+          return accepted.clips.map(async (clip) => {
+            const previewPath = hostPreviewObjectPath(ack.partyId, seedId, clip.cameraId);
+            try {
+              const preview = bucket.file(previewPath);
+              const [exists] = await preview.exists().catch(() => [false] as unknown as [boolean]);
+              if (!exists) {
+                await bucket.file(clip.objectPath).copy(preview);
+                await preview
+                  .setMetadata({
+                    contentType: "video/mp4",
+                    customTime: previewExpiry.toISOString(),
+                    metadata: {
+                      expiresAt: previewExpiry.toISOString(),
+                      partyId: ack.partyId,
+                      seedId,
+                      jobId: accepted.jobId,
+                      cameraId: clip.cameraId,
+                      purpose: "host-preview",
+                      sha256: clip.sha256,
+                    },
+                  })
+                  .catch(() => undefined);
+              }
+            } catch {
+              // Best-effort: the lazy preview path reports typed outcomes.
+            }
+          });
+        }),
+      );
+    } catch {
+      // Eager materialization never blocks the ACK itself.
+    }
     // ACK is idempotent. Repeating it safely retries object deletion after partial failures.
     await Promise.all(accepted.clips.map((clip) => deleteDeliveryObject(bucket.file(clip.objectPath))));
     await db.runTransaction(async (transaction) => {

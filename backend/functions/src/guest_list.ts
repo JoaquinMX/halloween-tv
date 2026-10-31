@@ -33,6 +33,10 @@ export interface GuestListServiceOptions {
  * any other registered device (guests) gets FORBIDDEN, so guest codes are
  * only readable by the host TV plus the Firebase console. Callable only;
  * direct Firestore list reads stay denied by firestore.rules.
+ *
+ * The listing contains ONLY active guest devices (`role === "guest"` AND
+ * `status === "active"`): tv/host deviceIds are never returned, so the
+ * panel cannot leak host device identities.
  */
 export function createGuestListService(options: GuestListServiceOptions): {
   listPartyDevices(value: unknown): Promise<GuestCodeListing>;
@@ -66,6 +70,7 @@ export function createGuestListService(options: GuestListServiceOptions): {
           }
           return entry;
         })
+        .filter((entry) => entry.role === "guest" && entry.status === "active")
         .filter((entry) => entry.deviceId !== registered.deviceId)
         .sort((a, b) => (a.label ?? a.deviceId).localeCompare(b.label ?? b.deviceId) || a.deviceId.localeCompare(b.deviceId));
       const listing: GuestCodeListing = {

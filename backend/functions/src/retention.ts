@@ -82,6 +82,32 @@ export async function sweepExpiredMedia(
     await Promise.all([...paths].map((path) => bucket.file(path).delete({ ignoreNotFound: true })));
   }
 
+  // Host-invite expiry: docs carry `expiresAt` for the Firestore TTL policy
+  // (console-configured TTL on expiresAt deletes the doc outright); this
+  // sweep is the defense-in-depth pass that marks lapsed pending invites
+  // expired so a stale invite can never redeem after its window, even where
+  // no TTL policy is configured.
+  try {
+    const dueInvites = await db.collectionGroup("hostInvites")
+      .where("expiresAt", "<=", Timestamp.fromDate(now))
+      .get();
+    for (const inviteDoc of dueInvites.docs) {
+      await db.runTransaction(async (transaction) => {
+        const current = await transaction.get(inviteDoc.ref);
+        if (!current.exists) return;
+        if (current.data()?.status === "pending") {
+          transaction.update(inviteDoc.ref, {
+            status: "expired",
+            expiredAt: FieldValue.serverTimestamp(),
+            updatedAt: FieldValue.serverTimestamp(),
+          });
+        }
+      }).catch(() => undefined);
+    }
+  } catch {
+    // Best-effort: redemption rechecks expiry transactionally regardless.
+  }
+
   const references = new Set<string>();
   const liveJobPairs = new Set<string>();
   const [manifests, jobs, guestMedia, seedVideos] = await Promise.all([

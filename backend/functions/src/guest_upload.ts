@@ -10,7 +10,7 @@ import {
   GUEST_MAX_IMAGE_BYTES,
   GUEST_UPLOAD_TTL_MS,
 } from "./config";
-import { BackendError, requireIdentity, validateId } from "./contracts";
+import { BackendError, isHostSourceConsent, isSupportedConsent, requireIdentity, validateId } from "./contracts";
 import {
   consentRevisionFor,
   GuestMediaDoc,
@@ -128,7 +128,11 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
     if (!isRecord(consent) || consent.accepted !== true) {
       throw new BackendError("FORBIDDEN", "Affirmative guest consent is required before upload.");
     }
-    if (consent.textVersion !== GUEST_CONSENT_TEXT_VERSION || consent.purpose !== GUEST_CONSENT_PURPOSE) {
+    // Consent namespace: guest devices use v1/guest_cameo; host devices use
+    // the distinct host_source_v1/host_source pair (with an attestation copy
+    // stored below). Either pair is a supported consent version/purpose, but
+    // the pairs never mix across roles.
+    if (!isSupportedConsent(consent.textVersion, consent.purpose)) {
       throw new BackendError("INVALID_ARGUMENT", "Guest consent version or purpose is unsupported.");
     }
     const contentType = value.contentType;
@@ -136,13 +140,23 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
         !(GUEST_ALLOWED_CONTENT_TYPES as readonly string[]).includes(contentType)) {
       throw new BackendError("INVALID_ARGUMENT", "Only JPEG or PNG guest photos are supported.");
     }
-    await assertRegisteredPartyDevice(db, identity);
+    const registered = await assertRegisteredPartyDevice(db, identity);
+    const callerRole = String(registered.device.role ?? "guest");
+    const hostCaller = callerRole === "host";
+    if (hostCaller !== isHostSourceConsent(consent.textVersion, consent.purpose)) {
+      throw new BackendError("INVALID_ARGUMENT", "Consent version or purpose does not match the caller role.");
+    }
     const submissionId = newSubmissionId();
     validateId(submissionId, "submissionId");
     const objectPath = guestObjectPath(identity.partyId, identity.deviceId, submissionId);
     const acceptedAt = now();
     const acceptedAtIso = acceptedAt.toISOString();
-    const consentRevision = consentRevisionFor(acceptedAtIso);
+    // Namespaced revision: host sources carry host_source_v1:…, guest
+    // sources carry v1:… (via consentRevisionFor). The revision travels on
+    // the job binding and is rechecked at eligibility time.
+    const consentRevision = hostCaller
+      ? `${String(consent.textVersion)}:${acceptedAtIso}`
+      : consentRevisionFor(acceptedAtIso);
     const expiresAt = new Date(acceptedAt.getTime() + GUEST_UPLOAD_TTL_MS);
     // Immutable creation-based deletion deadline: completion may narrow the
     // visible expiry but must never extend retention past creation + 24h.
@@ -156,10 +170,20 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
       status: "pending_upload",
       consent: {
         accepted: true,
-        textVersion: GUEST_CONSENT_TEXT_VERSION,
-        purpose: GUEST_CONSENT_PURPOSE,
+        textVersion: String(consent.textVersion),
+        purpose: String(consent.purpose),
         acceptedAt: acceptedAtIso,
         deviceId: identity.deviceId,
+      },
+      // Attestation copy: mirrors the consent text/purpose at acceptance so
+      // later audits can distinguish host-originated sources from guest
+      // cameo sources without re-reading the consent history.
+      attestation: {
+        textVersion: String(consent.textVersion),
+        purpose: String(consent.purpose),
+        acceptedAt: acceptedAtIso,
+        deviceId: identity.deviceId,
+        role: hostCaller ? "host" : "guest",
       },
       consentRevision,
       objectPath,
@@ -279,8 +303,8 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
           throw new BackendError("CLIP_EXPIRED", "Guest upload capability has expired.");
         }
         if (!current.consent || current.consent.accepted !== true ||
-            current.consent.textVersion !== GUEST_CONSENT_TEXT_VERSION ||
-            current.consent.purpose !== GUEST_CONSENT_PURPOSE) {
+            !isSupportedConsent(current.consent.textVersion, current.consent.purpose) ||
+            current.consent.deviceId !== identity.deviceId) {
           throw new BackendError("FORBIDDEN", "Guest consent is not recorded for this device.");
         }
         if (current.status === "eligible") {

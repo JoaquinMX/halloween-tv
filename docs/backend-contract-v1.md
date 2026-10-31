@@ -36,6 +36,7 @@ an idempotency key.
 | `withdrawGuestMedia` | callable | party/device-scoped guest |
 | `createHostInvite` | callable | registered TV only |
 | `joinHost` | callable | phone with a valid host invite |
+| `revokeHostDevice` | callable | registered TV only |
 | `listHostVideos` | callable | registered host only |
 | `generateHostVideo` | callable | registered host only |
 | `getHostVideoPreview` | callable | registered host only |
@@ -106,14 +107,30 @@ Firestore role, and the callable gates all distinguish host from guest.
   registered device with `role: "tv"`, else `FORBIDDEN`) mints a short-lived
   (`HOST_INVITE_TTL_MS`, 5 minutes) invite. The token (`hi-…`) is returned
   once; only its SHA-256 hash is stored at
-  `parties/{partyId}/hostInvites/{inviteId}`, bound to party/channel/expiry.
-- `joinHost { partyId, deviceId, channelId, inviteToken }` redeems the invite
+  `parties/{partyId}/hostInvites/{inviteId}`, bound to party/channel/expiry,
+  alongside a salted hash of a server-minted 6-digit `pairingCode` (also
+  returned once, displayed next to the HOST QR on the TV, same 5-minute
+  TTL). Minting a new invite supersedes older pending invites for the same
+  party/channel. Invite docs carry `expiresAt` for the Firestore TTL policy
+  plus the retention-sweep expiry pass.
+- `joinHost { partyId, deviceId, channelId, inviteToken, pairingCode }`
+  redeems the invite
   transactionally for a separate phone identity with the server-assigned
-  host role. Same-device redemption retries are idempotent (`created:
+  host role. BOTH halves are required: a wrong or missing pairing code
+  denies generically with the same error as an unknown invite (no oracle).
+  Same-device redemption retries are idempotent (`created:
   false`); other-device replay, expiry, cross-party/cross-channel reuse,
-  guest PIN reuse (six-digit strings are shape-rejected as tokens), and
+  guest PIN reuse (six-digit strings are shape-rejected as tokens),
+  over-capacity redemption (max 3 active host devices per party; further
+  redemption is denied until a host is revoked), and
   client-supplied role fields (ignored; the role is always written
-  server-side) can never grant host access.
+  server-side) can never grant host access. Redemption records
+  `redeemedFromInviteId`/`redeemedAt` on the device doc.
+- `revokeHostDevice { partyId, deviceId, targetDeviceId }` (TV-only caller:
+  same registered-TV gate as `createHostInvite`) demotes a host device doc
+  (`status: "revoked"`) and writes a `parties/{partyId}/hostAudit` audit
+  record. A revoked host fails the registered-host gate on its next admin
+  operation.
 - Legacy `joinParty` remains guest-only: it writes `role: "guest"`
   server-side, rejects re-registration of non-guest (host/tv) device docs,
   and never upgrades a role.
@@ -216,7 +233,9 @@ Admin SDK. Direct client device writes stay denied by `firestore.rules`.
 - `listPartyDevices` (TV-only caller, unchanged gate `device.role === "tv"`;
   guests get `FORBIDDEN`) response gains OPTIONAL `"joinPin"` (string when a
   PIN is configured, absent otherwise). Device entries are
-  `{ deviceId, label?, role, status }`; `label` may be absent or empty for
+  `{ deviceId, label?, role, status }` and contain ONLY active guest devices
+  (`role === "guest"` AND `status === "active"`): tv/host deviceIds are never
+  returned. `label` may be absent or empty for
   self-registered guests — readers must fall back to a neutral device-based
   display, never duplicate the id as label+value, never prompt for names.
   Device `label` is reserved for later: omit it on create, tolerate
@@ -257,11 +276,15 @@ Anonymous registered-device bearer model: no Firebase Auth, no login, no
 display name. The same party/device/channel registration gate authorizes every
 guest callable.
 
-- `requestGuestUpload { partyId, deviceId, channelId, consent: { accepted: true, textVersion: "v1", purpose: "guest_cameo" }, contentType: "image/jpeg"|"image/png" }`
+- `requestGuestUpload { partyId, deviceId, channelId, consent: { accepted: true, textVersion, purpose }, contentType: "image/jpeg"|"image/png" }`
   records affirmative consent server-side (consent-text version, purpose,
   timestamps, device binding, `pending_upload` status, 15-minute expiry) BEFORE
   issuing a narrowly scoped short-lived signed PUT capability bound to the
-  server-generated object path and the content type. The capability is returned
+  server-generated object path and the content type. Consent is namespaced by
+  caller role: guests use `v1` / `guest_cameo`, host-originated source
+  uploads use `host_source_v1` / `host_source` (with an attestation copy
+  recording text, purpose, and role at acceptance); the pairs never mix
+  across roles and both are enforced at completion eligibility. The capability is returned
   and never persisted in Firestore or logs.
 - `completeGuestUpload { partyId, deviceId, channelId, submissionId }` verifies
   the actual image bytes (JPEG/PNG magic, size within 10 MB), SHA-256, object

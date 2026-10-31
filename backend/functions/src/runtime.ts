@@ -45,6 +45,7 @@ export interface RuntimeServices {
   joinParty: ReturnType<typeof createJoinPartyService>["joinParty"];
   createHostInvite: ReturnType<typeof createHostJoinService>["createHostInvite"];
   joinHost: ReturnType<typeof createHostJoinService>["joinHost"];
+  revokeHostDevice: ReturnType<typeof createHostJoinService>["revokeHostDevice"];
   listHostVideos: ReturnType<typeof createHostMediaService>["listHostVideos"];
   generateHostVideo: ReturnType<typeof createHostMediaService>["generateHostVideo"];
   getHostVideoPreview: ReturnType<typeof createHostMediaService>["getHostVideoPreview"];
@@ -165,6 +166,7 @@ export function createRuntimeServices(options: RuntimeServiceOptions): RuntimeSe
     joinParty: joinPartyService.joinParty,
     createHostInvite: hostJoin.createHostInvite,
     joinHost: hostJoin.joinHost,
+    revokeHostDevice: hostJoin.revokeHostDevice,
     listHostVideos: hostMedia.listHostVideos,
     generateHostVideo: hostMedia.generateHostVideo,
     getHostVideoPreview: hostMedia.getHostVideoPreview,

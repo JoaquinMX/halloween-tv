@@ -47,9 +47,11 @@ export interface HostMediaServiceOptions {
  *
  * Previews are separately referenced (`hostPreviews/{seedId}/…`) from
  * delivery objects (`channels/{channel}/delivery/…`) and are materialized
- * before delivery objects can be ACK-purged (eagerly after the job is
- * ready, retried lazily on list/preview reads), so an ACK purge of delivery
- * bytes never removes preview bytes.
+ * eagerly (inside acknowledgeDelivery for live-seed jobs, before any purge)
+ * with the lazy transactionally-gated path in getHostVideoPreview kept as a
+ * retry, so an ACK purge of delivery bytes never removes preview bytes and
+ * an ACK-first-then-preview sequence yields a typed NOT_FOUND/CLIP_EXPIRED
+ * outcome instead of a raw storage error.
  */
 export function jobIdForHostSeed(seedId: string): string {
   return `hv-${seedId}`;
@@ -139,8 +141,15 @@ export function createHostMediaService(options: HostMediaServiceOptions): {
       if (!exists) {
         // Deleted seeds must never recreate previews: the caller checks the
         // seed status inside a transaction first; this copy is the
-        // materialization step only for live seeds.
-        await bucket.file(clip.objectPath).copy(preview);
+        // materialization step only for live seeds. A purged or missing
+        // source maps to a typed outcome (never raw INTERNAL): the delivery
+        // bytes are gone (ACK-purged before any preview was materialized).
+        try {
+          await bucket.file(clip.objectPath).copy(preview);
+        } catch (error) {
+          if (error instanceof BackendError) throw error;
+          throw new BackendError("NOT_FOUND", "Seed video preview is not ready yet.");
+        }
         await preview
           .setMetadata({
             contentType: "video/mp4",
@@ -285,30 +294,78 @@ export function createHostMediaService(options: HostMediaServiceOptions): {
     }
   }
 
+  /**
+   * Transactional liveness gate: re-reads the seed AND the job's hostDeleted
+   * flag inside a single transaction and rejects deleted/failed/expired
+   * seeds (withdrawal fails the bound seed closed) before any copy. Returns
+   * the live seed doc for the caller.
+   */
+  async function gateLiveSeed(
+    partyId: string,
+    channelId: string,
+    seedId: string,
+  ): Promise<FirebaseFirestore.DocumentData> {
+    return db.runTransaction(async (transaction) => {
+      const seedSnap = await transaction.get(seedRef(db, partyId, seedId));
+      if (!seedSnap.exists) throw new BackendError("NOT_FOUND", "Seed video does not exist.");
+      const seed = seedSnap.data()!;
+      if (seed.partyId !== partyId || seed.channelId !== channelId) {
+        throw new BackendError("FORBIDDEN", "Seed video is outside the registered party and channel.");
+      }
+      // Deleted, failed (incl. guest-withdrawn), or expired seeds never
+      // copy again: no resurrection through the preview path.
+      if (seed.status === "deleted") throw new BackendError("NOT_FOUND", "Seed video does not exist.");
+      if (seed.status === "failed" || seed.status === "expired") {
+        throw new BackendError("NOT_FOUND", "Seed video is no longer available.");
+      }
+      const expiryMs =
+        seed.expiresAt instanceof Timestamp
+          ? seed.expiresAt.toDate().getTime()
+          : Date.parse(String(seed.expiresAt));
+      if (Number.isFinite(expiryMs) && expiryMs <= now().getTime()) {
+        throw new BackendError("CLIP_EXPIRED", "Seed video has expired.");
+      }
+      const jobSnap = await transaction.get(jobRef(db, partyId, String(seed.jobId)));
+      if (!jobSnap.exists) throw new BackendError("NOT_FOUND", "Seed video does not exist.");
+      if (jobSnap.data()?.hostDeleted === true) throw new BackendError("NOT_FOUND", "Seed video does not exist.");
+      return seed;
+    });
+  }
+
   async function getHostVideoPreview(value: unknown): Promise<GetHostVideoPreviewResult> {
     const input = parseGetHostVideoPreviewInput(value);
     const host = await assertRegisteredHostDevice(db, input);
-    const ref = seedRef(db, host.partyId, input.seedId);
-    const seedSnap = await ref.get();
-    if (!seedSnap.exists) throw new BackendError("NOT_FOUND", "Seed video does not exist.");
-    const seed = seedSnap.data()!;
-    if (seed.partyId !== host.partyId || seed.channelId !== host.channelId) {
-      throw new BackendError("FORBIDDEN", "Seed video is outside the registered party and channel.");
-    }
-    // A deleted seed never recreates previews.
-    if (seed.status === "deleted") throw new BackendError("NOT_FOUND", "Seed video does not exist.");
-    const jobSnap = await jobRef(db, host.partyId, String(seed.jobId)).get();
-    if (!jobSnap.exists) throw new BackendError("NOT_FOUND", "Seed video does not exist.");
-    if (jobSnap.data()?.hostDeleted === true) throw new BackendError("NOT_FOUND", "Seed video does not exist.");
-    const clips = await deliveryClipsForJob(host.partyId, host.channelId, String(seed.jobId));
-    const previewExpiry = seed.expiresAt instanceof Timestamp
-      ? seed.expiresAt.toDate()
-      : new Date(Date.parse(String(seed.expiresAt)));
+    // Gate 1 (transactional): re-read seed + job hostDeleted inside a
+    // transaction; deleted/failed/withdrawn/expired seeds are denied here.
+    const liveSeed = await gateLiveSeed(host.partyId, host.channelId, input.seedId);
+    const clips = await deliveryClipsForJob(host.partyId, host.channelId, String(liveSeed.jobId));
+    const previewExpiry = liveSeed.expiresAt instanceof Timestamp
+      ? liveSeed.expiresAt.toDate()
+      : new Date(Date.parse(String(liveSeed.expiresAt)));
     const previewExpiresAt = Number.isFinite(previewExpiry.getTime())
       ? previewExpiry
       : new Date(now().getTime() + HOST_PREVIEW_TTL_MS);
+    // Byte copy happens only after the gate commits.
     const previewPaths = await ensurePreviewCopies(host.partyId, input.seedId, clips, previewExpiresAt);
-    await ref.update({ previewPaths, status: "ready", updatedAt: FieldValue.serverTimestamp() }).catch(() => undefined);
+    // Gate 2 + commit in the SAME transaction: revalidate liveness and make
+    // the status/previewPaths write part of that transaction, so a
+    // delete/withdraw racing the copy cannot resurrect the seed.
+    await db.runTransaction(async (transaction) => {
+      const seedSnap = await transaction.get(seedRef(db, host.partyId, input.seedId));
+      if (!seedSnap.exists) throw new BackendError("NOT_FOUND", "Seed video does not exist.");
+      const seed = seedSnap.data()!;
+      if (seed.partyId !== host.partyId || seed.channelId !== host.channelId) {
+        throw new BackendError("FORBIDDEN", "Seed video is outside the registered party and channel.");
+      }
+      if (seed.status === "deleted") throw new BackendError("NOT_FOUND", "Seed video does not exist.");
+      if (seed.status === "failed" || seed.status === "expired") {
+        throw new BackendError("NOT_FOUND", "Seed video is no longer available.");
+      }
+      const jobSnap = await transaction.get(jobRef(db, host.partyId, String(seed.jobId)));
+      if (!jobSnap.exists) throw new BackendError("NOT_FOUND", "Seed video does not exist.");
+      if (jobSnap.data()?.hostDeleted === true) throw new BackendError("NOT_FOUND", "Seed video does not exist.");
+      transaction.update(seedSnap.ref, { previewPaths, status: "ready", updatedAt: FieldValue.serverTimestamp() });
+    });
     const nowMs = now().getTime();
     // Signed TTL is capped at the preview's own expiry (same pattern as delivery URLs).
     const clipsOut = await Promise.all(

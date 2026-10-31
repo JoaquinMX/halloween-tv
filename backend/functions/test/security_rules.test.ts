@@ -114,29 +114,68 @@ test("anonymous clients cannot read or mutate host invites and seed catalog reco
       await setDoc(doc(firestore, "parties/host-party/seedVideos/seed-1"), {
         seedId: "seed-1", partyId: "host-party", channelId: "main", status: "ready",
       });
+      await setDoc(doc(firestore, "parties/other-party"), { status: "active", activeChannelId: "main" });
+      await setDoc(doc(firestore, "parties/other-party/hostInvites/invite-9"), {
+        tokenHash: "b".repeat(64), partyId: "other-party", channelId: "main", status: "pending",
+      });
     });
-    const client = env.unauthenticatedContext().firestore();
-    await assertFails(getDoc(doc(client, "parties/host-party/hostInvites/invite-1")));
-    await assertFails(setDoc(doc(client, "parties/host-party/hostInvites/invite-1"), { status: "redeemed" }));
-    await assertFails(getDoc(doc(client, "parties/host-party/seedVideos/seed-1")));
-    await assertFails(setDoc(doc(client, "parties/host-party/seedVideos/seed-1"), { status: "deleted" }));
-    await assertFails(setDoc(doc(client, "parties/host-party/seedVideos/forged"), { status: "ready" }));
+    // Every caller context is denied: unauthenticated AND device-authed AND
+    // cross-party. No direct client reads, writes, or listing on invites or
+    // the seed catalog; all access is callable-only through the Admin SDK.
+    for (const client of [env.unauthenticatedContext().firestore(), env.authenticatedContext("tv-1").firestore()]) {
+      await assertFails(getDoc(doc(client, "parties/host-party/hostInvites/invite-1")));
+      await assertFails(setDoc(doc(client, "parties/host-party/hostInvites/invite-1"), { status: "redeemed" }));
+      await assertFails(setDoc(doc(client, "parties/host-party/hostInvites/forged"), { status: "pending" }));
+      await assertFails(getDocs(collection(client, "parties/host-party/hostInvites")));
+      await assertFails(getDoc(doc(client, "parties/host-party/seedVideos/seed-1")));
+      await assertFails(setDoc(doc(client, "parties/host-party/seedVideos/seed-1"), { status: "deleted" }));
+      await assertFails(setDoc(doc(client, "parties/host-party/seedVideos/forged"), { status: "ready" }));
+      await assertFails(getDocs(collection(client, "parties/host-party/seedVideos")));
+      // Cross-party reads are denied from every context as well.
+      await assertFails(getDoc(doc(client, "parties/other-party/hostInvites/invite-9")));
+    }
   } finally {
     await env.cleanup();
   }
 });
 
-test("storage rules keep the host-preview prefix denied for direct access", async () => {
+test("storage rules deny read/write/list on host previews for every caller context", { skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST }, async () => {
+  const host = emulatorHost();
+  // STORAGE_EMULATOR_HOST may carry an http(s) scheme in newer firebase-tools.
+  const [storageHost, rawStoragePort] = (process.env.STORAGE_EMULATOR_HOST ?? "127.0.0.1:9199").replace(/^https?:\/\//, "").split(":");
   const rules = await readFile(resolve(__dirname, "../../storage.rules"), "utf8");
-  // Host previews ride the catch-all deny: no direct client reads/writes.
-  // Signed preview URLs bypass rules with backend validation, exactly like
-  // delivery URLs; the backend never persists them.
-  assert.ok(rules.includes("allow read, write: if false"), "storage rules deny direct access by default");
-});
-
-test("storage rules keep the guest-ingest prefix denied for direct access", async () => {
-  const rules = await readFile(resolve(__dirname, "../../storage.rules"), "utf8");
-  assert.ok(rules.includes("guests/{deviceId}/ingest"), "storage rules carry an explicit guest-ingest section");
-  const guestSection = rules.slice(rules.indexOf("guests/{deviceId}/ingest"));
-  assert.ok(guestSection.includes("allow read, write: if false"), "guest ingest stays denied for direct reads/writes/deletes");
+  const env: RulesTestEnvironment = await initializeTestEnvironment({
+    projectId: PROJECT_ID,
+    firestore: { host: host.host, port: host.port },
+    storage: { host: storageHost, port: Number(rawStoragePort ?? 9199), rules },
+  });
+  const previewPath = (party: string) => `parties/${party}/hostPreviews/seed-1/CAM-01.mp4`;
+  try {
+    // Seed preview bytes with rules disabled (Admin SDK equivalent).
+    await env.withSecurityRulesDisabled(async (context) => {
+      const storage = context.storage();
+      await storage.ref(previewPath("host-party")).put(new Uint8Array([1, 2, 3, 4]));
+    });
+    // Host previews ride the catch-all deny: no direct client reads, writes,
+    // listing, or deletes. Signed preview URLs bypass rules with backend
+    // validation, exactly like delivery URLs; the backend never persists them.
+    // Denied for unauthenticated AND device-authed callers alike.
+    for (const context of [env.unauthenticatedContext(), env.authenticatedContext("tv-1")]) {
+      const storage = context.storage();
+      await assertFails(storage.ref(previewPath("host-party")).getDownloadURL());
+      await assertFails(storage.ref(previewPath("host-party")).getMetadata());
+      await assertFails(storage.ref(previewPath("host-party")).put(new Uint8Array([9])).then(() => undefined));
+      await assertFails(storage.ref(previewPath("host-party")).delete());
+      await assertFails(storage.ref("parties/host-party/hostPreviews/seed-1").listAll());
+      // Cross-party preview objects are denied from every context as well.
+      await assertFails(storage.ref(previewPath("other-party")).getDownloadURL());
+      await assertFails(storage.ref(previewPath("other-party")).put(new Uint8Array([9])).then(() => undefined));
+      // The guest-ingest prefix stays denied for direct reads/writes/deletes
+      // in every context (signed PUT capabilities bypass rules instead).
+      await assertFails(storage.ref("parties/host-party/guests/p-1/ingest/gsub-1/photo.jpg").getDownloadURL());
+      await assertFails(storage.ref("parties/host-party/guests/p-1/ingest/gsub-1/photo.jpg").put(new Uint8Array([9])).then(() => undefined));
+    }
+  } finally {
+    await env.cleanup();
+  }
 });

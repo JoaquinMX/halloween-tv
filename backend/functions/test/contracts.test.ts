@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BackendError, parseAck, parseJoinPartyInput, parseRequestGeneration, requireIdentity, validateCanonicalClips, parseCreateHostInviteInput, parseJoinHostInput, parseDeleteHostVideoInput } from "../src/contracts";
+import { BackendError, HOST_MAX_DEVICES, HOST_SOURCE_CONSENT_PURPOSE, HOST_SOURCE_CONSENT_TEXT_VERSION, isHostSourceConsent, isSupportedConsent, parseAck, parseJoinPartyInput, parseRequestGeneration, requireIdentity, validateCanonicalClips, parseCreateHostInviteInput, parseJoinHostInput, parseDeleteHostVideoInput, parseRevokeHostDeviceInput } from "../src/contracts";
 import { buildCheapDemoRequest, validateCheapDemoControls, validateGuestImageReference } from "../src/video_generation_port";
 import { createVideoGenerationProviderFromEnvironment, FakeVideoGenerationPort } from "../src/providers/fake";
 import { AlibabaVideoGenerationPort } from "../src/providers/alibaba";
@@ -73,8 +73,41 @@ test("manifest validators accept 1/2/4 first-N prefixes and reject gaps, duplica
   }
   // Host invite parsers: guest PINs are never host tokens, roles are server-assigned.
   assert.deepEqual(parseCreateHostInviteInput({ partyId: "p", deviceId: "tv", channelId: "main" }), { partyId: "p", deviceId: "tv", channelId: "main" });
-  assert.throws(() => parseJoinHostInput({ partyId: "p", deviceId: "x", channelId: "main", inviteToken: "004201" }), (e: unknown) => e instanceof BackendError && e.errorCode === "INVALID_ARGUMENT");
+  assert.throws(() => parseJoinHostInput({ partyId: "p", deviceId: "x", channelId: "main", inviteToken: "004201", pairingCode: "000000" }), (e: unknown) => e instanceof BackendError && e.errorCode === "INVALID_ARGUMENT");
   assert.throws(() => parseDeleteHostVideoInput({ partyId: "p", deviceId: "h", channelId: "main", seedIds: [] }), (e: unknown) => e instanceof BackendError && e.errorCode === "INVALID_ARGUMENT");
+});
+
+test("host pairing code is required; wrong/missing codes deny generically (no oracle)", () => {
+  const base = { partyId: "p", deviceId: "x", channelId: "main", inviteToken: "hi-abcdef" };
+  // A correct-shaped pair parses through.
+  assert.deepEqual(parseJoinHostInput({ ...base, pairingCode: "000000" }), { ...base, pairingCode: "000000" });
+  // Missing or malformed codes deny with the SAME generic FORBIDDEN as an
+  // unknown invite (never INVALID_ARGUMENT, which would be an oracle).
+  for (const pairingCode of [undefined, "", "12345", "1234567", "abcdef", "12 456", 4201, null]) {
+    assert.throws(() => parseJoinHostInput({ ...base, pairingCode }), (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN",
+      `pairingCode ${String(pairingCode)} must deny generically`);
+  }
+});
+
+test("host capacity and revocation parsers enforce their wire shapes", () => {
+  assert.equal(HOST_MAX_DEVICES, 3);
+  assert.deepEqual(
+    parseRevokeHostDeviceInput({ partyId: "p", deviceId: "tv-1", channelId: "main", targetDeviceId: "p-host-1" }),
+    { partyId: "p", deviceId: "tv-1", channelId: "main", targetDeviceId: "p-host-1" },
+  );
+  expectCode(() => parseRevokeHostDeviceInput({ partyId: "p", deviceId: "tv-1", channelId: "main" }), "INVALID_ARGUMENT");
+  expectCode(() => parseRevokeHostDeviceInput({ partyId: "p", deviceId: "tv-1", channelId: "main", targetDeviceId: "bad id!" }), "INVALID_ARGUMENT");
+});
+
+test("host and guest consent namespaces stay distinct", () => {
+  assert.equal(HOST_SOURCE_CONSENT_TEXT_VERSION, "host_source_v1");
+  assert.equal(HOST_SOURCE_CONSENT_PURPOSE, "host_source");
+  assert.ok(isSupportedConsent("v1", "guest_cameo"));
+  assert.ok(isSupportedConsent(HOST_SOURCE_CONSENT_TEXT_VERSION, HOST_SOURCE_CONSENT_PURPOSE));
+  assert.ok(!isSupportedConsent("v9", "guest_cameo"));
+  assert.ok(!isSupportedConsent("v1", "host_source"));
+  assert.ok(isHostSourceConsent(HOST_SOURCE_CONSENT_TEXT_VERSION, HOST_SOURCE_CONSENT_PURPOSE));
+  assert.ok(!isHostSourceConsent("v1", "guest_cameo"));
 });
 
 test("joinParty parser enforces identity, channel, and six-digit PIN shape", () => {

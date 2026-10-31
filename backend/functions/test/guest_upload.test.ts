@@ -599,6 +599,69 @@ test("withdrawal revokes delivery: absent everywhere and no new URLs issuable", 
   }
 });
 
+test("host-originated uploads use the namespaced host consent pair with an attestation copy", {
+  skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
+}, async () => {
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  try {
+    await seedParty(db, partyId, "p-host-1", "main");
+    await db.doc(`parties/${partyId}/devices/p-host-1`).update({ role: "host" });
+    const services = servicesFor(db, bucket);
+    const requested = await services.requestGuestUpload({
+      partyId, deviceId: "p-host-1", channelId: "main",
+      consent: { accepted: true, textVersion: "host_source_v1", purpose: "host_source" },
+      contentType: "image/jpeg",
+    });
+    assert.ok(requested.submissionId);
+    const stored = (await db.doc(`parties/${partyId}/guestMedia/${requested.submissionId}`).get()).data()!;
+    assert.equal(stored.consent.textVersion, "host_source_v1");
+    assert.equal(stored.consent.purpose, "host_source");
+    assert.equal(stored.attestation.textVersion, "host_source_v1");
+    assert.equal(stored.attestation.purpose, "host_source");
+    assert.equal(stored.attestation.role, "host");
+    assert.ok(String(requested.consentRevision).startsWith("host_source_v1:"));
+    await bucket.file(requested.objectPath).save(await photoBytes(), { contentType: "image/jpeg" });
+    const completed = await services.completeGuestUpload({ partyId, deviceId: "p-host-1", channelId: "main", submissionId: requested.submissionId });
+    assert.equal(completed.status, "eligible");
+    assert.equal((await db.doc(`parties/${partyId}/guestMedia/${requested.submissionId}`).get()).data()?.status, "eligible");
+  } finally {
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+  }
+});
+
+test("consent pairs never mix across roles", {
+  skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
+}, async () => {
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  try {
+    await seedParty(db, partyId, "p-guest-1", "main");
+    await seedParty(db, partyId, "p-host-1", "main");
+    await db.doc(`parties/${partyId}/devices/p-host-1`).update({ role: "host" });
+    const services = servicesFor(db, bucket);
+    // A guest device presenting the host pair is rejected, and vice versa.
+    await assert.rejects(services.requestGuestUpload({
+      partyId, deviceId: "p-guest-1", channelId: "main",
+      consent: { accepted: true, textVersion: "host_source_v1", purpose: "host_source" },
+      contentType: "image/jpeg",
+    }), (e: unknown) => e instanceof BackendError && e.errorCode === "INVALID_ARGUMENT");
+    await assert.rejects(services.requestGuestUpload({
+      partyId, deviceId: "p-host-1", channelId: "main", consent: CONSENT, contentType: "image/jpeg",
+    }), (e: unknown) => e instanceof BackendError && e.errorCode === "INVALID_ARGUMENT");
+    // Unknown versions stay unsupported for both roles.
+    await assert.rejects(services.requestGuestUpload({
+      partyId, deviceId: "p-host-1", channelId: "main",
+      consent: { accepted: true, textVersion: "v9", purpose: "host_source" },
+      contentType: "image/jpeg",
+    }), (e: unknown) => e instanceof BackendError && e.errorCode === "INVALID_ARGUMENT");
+  } finally {
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+  }
+});
+
 test("withdrawal deletes retained host previews and fails the bound seed closed", {
   skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
 }, async () => {

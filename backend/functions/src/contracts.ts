@@ -236,8 +236,9 @@ export function isErrorCode(value: unknown): value is ErrorCode {
 // expiry, with the host role assigned server-side only.
 //
 // Callable surface (all exported through index.ts + runtime.ts):
-//   createHostInvite  (TV-only)  -> { inviteToken, expiresAt }
+//   createHostInvite  (TV-only)  -> { inviteToken, pairingCode, expiresAt }
 //   joinHost          (phone)     -> { role: "host" } (separate device identity)
+//   revokeHostDevice  (TV-only)  -> { status: "revoked" } + audit record
 //   listHostVideos    (host-only) -> seed catalog entries
 //   generateHostVideo (host-only) -> fixed-preset queued generation + seed entry
 //   getHostVideoPreview (host-only) -> signed preview URLs (never persisted)
@@ -254,11 +255,15 @@ export interface CreateHostInviteResult {
   partyId: string;
   channelId: string;
   inviteToken: string;
+  /** Server-minted 6-digit pairing code shown next to the HOST QR on the TV. */
+  pairingCode: string;
   expiresAt: string;
 }
 
 export interface JoinHostInput extends Identity {
   inviteToken: string;
+  /** 6-digit pairing code displayed next to the HOST QR; required. */
+  pairingCode: string;
 }
 
 export interface JoinHostResult {
@@ -346,7 +351,14 @@ export function parseJoinHostInput(value: unknown): JoinHostInput {
   if (JOIN_PIN_RE.test(value.inviteToken)) {
     throw new BackendError("INVALID_ARGUMENT", "inviteToken must be a host invite, not a guest PIN.");
   }
-  return { partyId, deviceId, channelId, inviteToken: value.inviteToken };
+  // The pairing code is required and shape-checked here, but a missing or
+  // wrong code is denied with the SAME generic FORBIDDEN message as an
+  // unknown invite at redemption time, so callers cannot probe which half
+  // of the credential failed (no oracle).
+  if (typeof value.pairingCode !== "string" || !JOIN_PIN_RE.test(value.pairingCode)) {
+    throw new BackendError("FORBIDDEN", "Host invite is invalid or expired.");
+  }
+  return { partyId, deviceId, channelId, inviteToken: value.inviteToken, pairingCode: value.pairingCode };
 }
 
 export function parseListHostVideosInput(value: unknown): ListHostVideosInput {
@@ -410,4 +422,56 @@ export function parseDeleteHostVideoInput(value: unknown): DeleteHostVideoInput 
     seedIds.push(seedId);
   }
   return { ...identity, seedIds };
+}
+
+// ---------------------------------------------------------------------------
+// Host pairing + capacity + revocation (cycle-12 fix-1, backend authoritative).
+// ---------------------------------------------------------------------------
+
+/** Max active host devices per party: further redemption is denied until a host is revoked. */
+export const HOST_MAX_DEVICES = 3;
+
+/** Pairing-code shape: exactly six ASCII digits (leading zeros significant). */
+export const PAIRING_CODE_RE = /^[0-9]{6}$/;
+
+/**
+ * Host-originated source consent: distinct textVersion/purpose pair for
+ * host-submitted source media, namespaced away from the guest cameo pair
+ * (`v1` / `guest_cameo`). Consent records carrying this pair include an
+ * attestation copy (see guest_upload.ts) and are enforced in eligibility
+ * for host submissions. The guest pair is unchanged.
+ */
+export const HOST_SOURCE_CONSENT_TEXT_VERSION = "host_source_v1";
+export const HOST_SOURCE_CONSENT_PURPOSE = "host_source";
+
+/** Returns true for either supported consent pair (guest cameo or host source). */
+export function isSupportedConsent(textVersion: unknown, purpose: unknown): boolean {
+  return (
+    (textVersion === "v1" && purpose === "guest_cameo") ||
+    (textVersion === HOST_SOURCE_CONSENT_TEXT_VERSION && purpose === HOST_SOURCE_CONSENT_PURPOSE)
+  );
+}
+
+/** Returns true only for the host-originated source consent pair. */
+export function isHostSourceConsent(textVersion: unknown, purpose: unknown): boolean {
+  return textVersion === HOST_SOURCE_CONSENT_TEXT_VERSION && purpose === HOST_SOURCE_CONSENT_PURPOSE;
+}
+
+export interface RevokeHostDeviceInput extends Identity {
+  targetDeviceId: string;
+}
+
+export interface RevokeHostDeviceResult {
+  partyId: string;
+  targetDeviceId: string;
+  status: "revoked";
+}
+
+export function parseRevokeHostDeviceInput(value: unknown): RevokeHostDeviceInput {
+  const identity = requireIdentity(value);
+  if (!identity.channelId) throw new BackendError("INVALID_ARGUMENT", "channelId is required.");
+  if (!isRecord(value) || typeof value.targetDeviceId !== "string" || !value.targetDeviceId) {
+    throw new BackendError("INVALID_ARGUMENT", "targetDeviceId is required.");
+  }
+  return { ...identity, targetDeviceId: validateId(value.targetDeviceId, "targetDeviceId") };
 }

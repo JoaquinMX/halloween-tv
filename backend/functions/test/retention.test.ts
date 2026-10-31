@@ -69,6 +69,36 @@ test("host seed previews are protected while live and purged after expiry", { sk
   }
 });
 
+test("lapsed host invites expire via the sweep (Firestore TTL policy defense-in-depth)", { skip: !HAS_FIRESTORE_EMULATOR }, async () => {
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  try {
+    await seedParty(db, partyId, "tv-1", "main");
+    const past = Timestamp.fromDate(new Date(Date.now() - 1000));
+    const future = Timestamp.fromDate(new Date(Date.now() + 60 * 60 * 1000));
+    await db.doc(`parties/${partyId}/hostInvites/deadbeefdeadbeefdeadbeefdeadbeef`).set({
+      inviteId: "deadbeefdeadbeefdeadbeefdeadbeef",
+      tokenHash: "a".repeat(64),
+      pairingCodeHash: "b".repeat(64),
+      pairingSalt: "c".repeat(32),
+      partyId, channelId: "main", status: "pending", createdByDevice: "tv-1", usedByDevice: null, expiresAt: past,
+    });
+    await db.doc(`parties/${partyId}/hostInvites/livefeedlivefeedlivefeedlivefeed`).set({
+      inviteId: "livefeedlivefeedlivefeedlivefeed",
+      tokenHash: "d".repeat(64),
+      pairingCodeHash: "e".repeat(64),
+      pairingSalt: "f".repeat(32),
+      partyId, channelId: "main", status: "pending", createdByDevice: "tv-1", usedByDevice: null, expiresAt: future,
+    });
+    await sweepExpiredMedia(db, bucket, new Date());
+    assert.equal((await db.doc(`parties/${partyId}/hostInvites/deadbeefdeadbeefdeadbeefdeadbeef`).get()).data()?.status, "expired");
+    assert.equal((await db.doc(`parties/${partyId}/hostInvites/livefeedlivefeedlivefeedlivefeed`).get()).data()?.status, "pending");
+  } finally {
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+  }
+});
+
 test("revoked-manifest objects are retried for deletion, never protected", { skip: !HAS_FIRESTORE_EMULATOR }, async () => {
   const { app, db, bucket } = await createEmulatorContext();
   const partyId = randomPartyId();

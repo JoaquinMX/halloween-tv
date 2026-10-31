@@ -33,7 +33,7 @@ function servicesFor(db: Firestore, bucket: Bucket) {
 
 test("exported host callables are wired through the runtime composition", async () => {
   const handlers = await import("../src/index");
-  for (const name of ["createHostInvite", "joinHost", "listHostVideos", "generateHostVideo", "getHostVideoPreview", "deleteHostVideo"]) {
+  for (const name of ["createHostInvite", "joinHost", "revokeHostDevice", "listHostVideos", "generateHostVideo", "getHostVideoPreview", "deleteHostVideo"]) {
     assert.ok((handlers as Record<string, unknown>)[name] !== undefined, `${name} must be an exported callable`);
   }
   const { createRuntimeServices: compose } = await import("../src/runtime");
@@ -53,8 +53,9 @@ test("host admin end-to-end: invite, roles, fixture-backed generation, preview s
     // Only the registered TV mints the invite; the token hash is stored.
     const invite = await services.createHostInvite({ partyId, deviceId: "tv-1", channelId });
     assert.ok(invite.inviteToken.startsWith("hi-"));
+    assert.match(invite.pairingCode, /^[0-9]{6}$/);
     // Phone redeems for a separate identity with the server-assigned host role.
-    const joined = await services.joinHost({ partyId, deviceId: "p-admin-1", channelId, inviteToken: invite.inviteToken });
+    const joined = await services.joinHost({ partyId, deviceId: "p-admin-1", channelId, inviteToken: invite.inviteToken, pairingCode: invite.pairingCode });
     assert.equal(joined.role, "host");
     assert.equal((await db.doc(`parties/${partyId}/devices/p-admin-1`).get()).data()?.role, "host");
     assert.equal((await db.doc(`parties/${partyId}/devices/tv-1`).get()).data()?.role, "tv");
@@ -98,11 +99,38 @@ test("host admin end-to-end: invite, roles, fixture-backed generation, preview s
     await seedParty(db, foreign, "tv-9", channelId);
     await db.doc(`parties/${foreign}/devices/tv-9`).update({ role: "tv" });
     const foreignInvite = await services.createHostInvite({ partyId: foreign, deviceId: "tv-9", channelId });
-    const foreignHost = await services.joinHost({ partyId: foreign, deviceId: "p-foreign", channelId, inviteToken: foreignInvite.inviteToken });
+    const foreignHost = await services.joinHost({ partyId: foreign, deviceId: "p-foreign", channelId, inviteToken: foreignInvite.inviteToken, pairingCode: foreignInvite.pairingCode });
     assert.equal(foreignHost.role, "host");
     await assert.rejects(services.deleteHostVideo({ partyId, deviceId: "p-foreign", channelId, seedIds: ["catalog-1"] }),
       (e: unknown) => e instanceof BackendError && (e.errorCode === "FORBIDDEN" || e.errorCode === "NOT_FOUND"));
     await db.recursiveDelete(db.doc(`parties/${foreign}`)).catch(() => undefined);
+  } finally {
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+  }
+});
+
+test("listPartyDevices returns only active guests: tv/host deviceIds are never leaked", { skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST }, async () => {
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  const channelId = "main";
+  try {
+    await seedParty(db, partyId, "tv-1", channelId);
+    await db.doc(`parties/${partyId}/devices/tv-1`).update({ role: "tv" });
+    const services = servicesFor(db, bucket);
+    const invite = await services.createHostInvite({ partyId, deviceId: "tv-1", channelId });
+    await services.joinHost({ partyId, deviceId: "p-admin-1", channelId, inviteToken: invite.inviteToken, pairingCode: invite.pairingCode });
+    await db.doc(`parties/${partyId}/devices/p-guest-live`).set({ partyId, deviceId: "p-guest-live", role: "guest", status: "active" });
+    await db.doc(`parties/${partyId}/devices/p-guest-dead`).set({ partyId, deviceId: "p-guest-dead", role: "guest", status: "disabled" });
+    // A revoked host stays excluded too.
+    await services.revokeHostDevice({ partyId, deviceId: "tv-1", channelId, targetDeviceId: "p-admin-1" });
+
+    const listing = await services.listPartyDevices({ partyId, deviceId: "tv-1", channelId });
+    assert.deepEqual(listing.devices.map((entry) => entry.deviceId), ["p-guest-live"]);
+    assert.ok(!listing.devices.some((entry) => entry.deviceId === "tv-1"), "tv deviceId must never be listed");
+    assert.ok(!listing.devices.some((entry) => entry.deviceId === "p-admin-1"), "host deviceId must never be listed");
+    assert.ok(!listing.devices.some((entry) => entry.deviceId === "p-guest-dead"), "inactive guests must be excluded");
+    assert.ok(listing.devices.every((entry) => entry.role === "guest" && entry.status === "active"));
   } finally {
     await clearParty(db, bucket, partyId);
     await disposeEmulatorContext(app);
@@ -117,7 +145,7 @@ test("deletion racing the worker blocks publication through the real pipeline", 
     await db.doc(`parties/${partyId}/devices/tv-1`).update({ role: "tv" });
     const services = servicesFor(db, bucket);
     const invite = await services.createHostInvite({ partyId, deviceId: "tv-1", channelId: "main" });
-    await services.joinHost({ partyId, deviceId: "p-admin-1", channelId: "main", inviteToken: invite.inviteToken });
+    await services.joinHost({ partyId, deviceId: "p-admin-1", channelId: "main", inviteToken: invite.inviteToken, pairingCode: invite.pairingCode });
     const generated = await services.generateHostVideo({ partyId, deviceId: "p-admin-1", channelId: "main", seedId: "race-1", idempotencyKey: "idem-race-1" });
     // Delete wins the race before the worker runs: the tombstone is durable.
     const deleted = await services.deleteHostVideo({ partyId, deviceId: "p-admin-1", channelId: "main", seedIds: ["race-1"] });

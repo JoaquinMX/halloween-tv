@@ -143,6 +143,10 @@ export const createHostInvite = onCall({ maxInstances: 2 }, (request) =>
 export const joinHost = onCall({ maxInstances: 10 }, (request) =>
   callable(() => getServices().joinHost(request.data)));
 
+/** Host TV callable; revokes a host device (demote + audit record). */
+export const revokeHostDevice = onCall({ maxInstances: 2 }, (request) =>
+  callable(() => getServices().revokeHostDevice(request.data)));
+
 /** Host-only callable; lists the server-backed seed catalog. */
 export const listHostVideos = onCall({ maxInstances: 10 }, (request) =>
   callable(() => getServices().listHostVideos(request.data)));
