@@ -9,6 +9,8 @@ import { createJoinPartyService } from "./join_party";
 import { createHostJoinService } from "./host_join";
 import { createHostMediaService } from "./host_media";
 import { FakeVideoGenerationPort, createVideoGenerationProviderFromEnvironment } from "./providers/fake";
+import { FakeImageGenerationPort } from "./providers/fake_image";
+import { ImageGenerationPort } from "./image_generation_port";
 import { CameraId, ProviderResult, VideoGenerationPort } from "./video_generation_port";
 
 export interface RuntimeServiceOptions {
@@ -21,6 +23,8 @@ export interface RuntimeServiceOptions {
   fixtureDirectory?: string;
   enqueueGeneration?: (task: GenerationTask) => Promise<void>;
   provider?: VideoGenerationPort;
+  /** Image-stage provider for the cartoon still (offline fake by default). */
+  imageProvider?: ImageGenerationPort;
   now?: () => Date;
   sleep?: GenerationServiceOptions["sleep"];
   pollIntervalMs?: number;
@@ -82,6 +86,7 @@ export function createRuntimeServices(options: RuntimeServiceOptions): RuntimeSe
       db: options.db,
       bucket: options.bucket,
       provider,
+      imageProvider: options.imageProvider ?? new FakeImageGenerationPort(),
       now: options.now,
       sleep: options.sleep,
       pollIntervalMs: options.pollIntervalMs,

@@ -23,6 +23,13 @@ export interface VideoGenerationRequest {
   autoUpscale: typeof CHEAP_DEMO_PRESET.autoUpscale;
   /** Validated consent-bound guest photo binding. Never changes cheap_demo controls. */
   referenceImage?: GuestImageReference;
+  /**
+   * Cartoon video stage first frame: the exact generated still resolved to a
+   * provider-fetchable signed https URL (in-flight only, never persisted).
+   * Present only on the cartoon CAM-01 video submission; the sha256 binds
+   * the stage to the still (videoStillSha256 === stillSha256).
+   */
+  firstFrame?: CartoonFirstFrame;
 }
 
 export interface GuestImageReference {
@@ -40,6 +47,17 @@ export interface GuestImageReference {
    * path for provenance and is never submitted.
    */
   url?: string;
+}
+
+/**
+ * Provider-fetchable first frame for the cartoon video stage: the exact
+ * generated still bytes resolved to a short-lived signed https URL.
+ * In-flight only, never persisted; the sha256 binds the video stage to the
+ * still stage (videoStillSha256 must equal stillSha256).
+ */
+export interface CartoonFirstFrame {
+  url: string;
+  sha256: string;
 }
 
 export interface ProviderSubmission {
@@ -78,7 +96,8 @@ const CONTROL_FIELDS = [
 const ALLOWED_GENERATION_FIELDS = new Set([
   "partyId", "deviceId", "channelId", "jobId", "idempotencyKey", "presetId", "modelId", "region",
   "resolution", "secondsOut", "aspectRatio", "audio", "outputs", "autoUpscale", "prompt", "cameraId",
-  "promptExtend", "input", "guestMediaId", "referenceImage",
+  "promptExtend", "input", "guestMediaId", "referenceImage", "firstFrame",
+  "scenarioId", "situationId", "portraitSubmissionId", "cartoonPlan", "rehearsalOnly",
 ]);
 
 /** Rejects unsupported generation controls before a provider request can be formed. */
@@ -244,6 +263,7 @@ export function validateVideoGenerationRequest(value: unknown): asserts value is
     }
   }
   if (request.referenceImage !== undefined) validateGuestImageReference(request.referenceImage);
+  if (request.firstFrame !== undefined) validateCartoonFirstFrame(request.firstFrame);
   if (presetId === CAMEO_DEMO_PRESET.presetId) {
     if (request.referenceImage === undefined) {
       throw new BackendError("INVALID_ARGUMENT", "The cameo_demo preset requires a consent-bound reference image.");
@@ -257,4 +277,94 @@ export function validateVideoGenerationRequest(value: unknown): asserts value is
     // a resolved signed https URL is required whenever a reference is sent.
     validateFetchableReferenceImage(request.referenceImage);
   }
+  if (request.firstFrame !== undefined) {
+    // Cartoon video stage: the first frame must already be provider-fetchable.
+    validateFetchableCartoonFirstFrame(request.firstFrame);
+  }
+}
+
+/** Cartoon first-frame binding: sha256 of the exact generated still + in-flight URL. */
+export function validateCartoonFirstFrame(value: unknown): asserts value is CartoonFirstFrame {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new BackendError("INVALID_ARGUMENT", "Cartoon first frame is invalid.");
+  }
+  const frame = value as Record<string, unknown>;
+  if (typeof frame.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(frame.sha256)) {
+    throw new BackendError("INVALID_ARGUMENT", "Cartoon first-frame hash is invalid.");
+  }
+  if (frame.url !== undefined && (typeof frame.url !== "string" || !/^https:\/\//.test(frame.url))) {
+    throw new BackendError("INVALID_ARGUMENT", "Cartoon first frame URL must be a signed https URL.");
+  }
+}
+
+/** Provider-bound gate: the still must resolve to a signed https URL before transport. */
+export function validateFetchableCartoonFirstFrame(value: unknown): asserts value is CartoonFirstFrame {
+  validateCartoonFirstFrame(value);
+  const frame = value as CartoonFirstFrame;
+  if (typeof frame.url !== "string" || !/^https:\/\//.test(frame.url)) {
+    throw new BackendError("INVALID_ARGUMENT", "Cartoon first frame must resolve to a signed https URL for provider submission.");
+  }
+}
+
+/**
+ * Immutable cartoon plan persisted at job creation. Scenario/situation are
+ * the validated catalog pair (see selectScenarioSituation); the portrait is
+ * the consent-bound submission when present. Plan IDs/versions/seeds are
+ * fixed per scenario (see CARTOON_CATALOG_SCENARIOS in contracts).
+ */
+export interface CartoonPlan {
+  scenarioId: string;
+  situationId: string;
+  portraitSubmissionId?: string;
+  stillPlanId: string;
+  videoPlanId: string;
+  version: number;
+  seed: number;
+}
+
+const CARTOON_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+
+/** Structural validation only; catalog compatibility is enforced via selectScenarioSituation. */
+export function validateCartoonPlan(value: unknown): asserts value is CartoonPlan {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new BackendError("INVALID_ARGUMENT", "Cartoon plan must be an object.");
+  }
+  const plan = value as Record<string, unknown>;
+  for (const field of ["scenarioId", "situationId", "stillPlanId", "videoPlanId"] as const) {
+    if (typeof plan[field] !== "string" || !CARTOON_ID_RE.test(plan[field] as string)) {
+      throw new BackendError("INVALID_ARGUMENT", `Cartoon plan ${field} is invalid.`);
+    }
+  }
+  if (plan.portraitSubmissionId !== undefined &&
+      (typeof plan.portraitSubmissionId !== "string" || !CARTOON_ID_RE.test(plan.portraitSubmissionId))) {
+    throw new BackendError("INVALID_ARGUMENT", "Cartoon plan portraitSubmissionId is invalid.");
+  }
+  if (plan.version !== 1 || !Number.isSafeInteger(plan.seed)) {
+    throw new BackendError("INVALID_ARGUMENT", "Cartoon plan version/seed is invalid.");
+  }
+}
+
+/** Deterministic cartoon video request: cheap_demo envelope + locked-camera motion + still first frame. */
+export function buildCartoonVideoRequest(
+  jobId: string,
+  idempotencyKey: string,
+  cameraId: CameraId,
+  motionPrompt: string,
+  firstFrame: CartoonFirstFrame,
+): VideoGenerationRequest {
+  if (typeof motionPrompt !== "string" || !motionPrompt.trim() || motionPrompt.length > 4000) {
+    throw new BackendError("INVALID_ARGUMENT", "Cartoon motion prompt is invalid.");
+  }
+  validateFetchableCartoonFirstFrame(firstFrame);
+  if (cameraId !== "CAM-01") {
+    throw new BackendError("INVALID_ARGUMENT", "Cartoon video is generated only for CAM-01; other slots are fixture slots.");
+  }
+  return {
+    jobId,
+    idempotencyKey: `${idempotencyKey}:cartoon-video:${cameraId}`,
+    cameraId,
+    prompt: motionPrompt,
+    ...CHEAP_DEMO_PRESET,
+    firstFrame: { ...firstFrame },
+  };
 }

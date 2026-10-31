@@ -11,22 +11,33 @@ import { assertGuestEligible } from "./guest_media";
 import { normalizeProviderVideo, NormalizationOptions, removeNormalizedVideo } from "./normalize";
 import { publishManifest as commitManifest } from "./publish";
 import { AlibabaSubmissionError } from "./providers/alibaba";
-import { recordUsageOutcome, UsageLedgerInput } from "./usage";
+import { cartoonStillIntentDocument, recordCartoonStillOutcome, recordUsageOutcome, UsageLedgerInput } from "./usage";
 import { createVideoGenerationProviderFromEnvironment, FakeVideoGenerationPort } from "./providers/fake";
+import { FakeImageGenerationPort } from "./providers/fake_image";
 import {
   buildCameoDemoRequest,
+  buildCartoonVideoRequest,
   buildCheapDemoRequest,
   CameraId,
+  CartoonPlan,
   GuestImageReference,
   ProviderResult,
   ProviderTaskStatus,
+  validateCartoonPlan,
   VideoGenerationPort,
 } from "./video_generation_port";
+import { CartoonStillRequest, ImageGenerationPort } from "./image_generation_port";
+import { buildCartoonMotionPrompt, buildCartoonStillRequest, cartoonStillObjectPath, generateCartoonStill, sha256 as cartoonSha256 } from "./cartoon_pipeline";
+import { loadValidatedCatalogs, resolveFunctionsRoot } from "./scenario_catalog";
+import { canGenerateFromPortrait, provenanceFromGuestMediaDoc } from "./consent_provenance";
+import { cartoonStillLedgerId } from "./usage";
 
 export interface GenerationServiceOptions {
   db: FirebaseFirestore.Firestore;
   bucket: Bucket;
   provider?: VideoGenerationPort;
+  /** Image-stage provider for the cartoon still (defaults to the offline fake). */
+  imageProvider?: ImageGenerationPort;
   now?: () => Date;
   sleep?: (milliseconds: number) => Promise<void>;
   pollIntervalMs?: number;
@@ -34,6 +45,8 @@ export interface GenerationServiceOptions {
   normalization?: NormalizationOptions;
   /** Local fixture directory for consent-bound guest jobs (three fixture slots). */
   fixtureDirectory?: string;
+  /** Functions root for the packaged scenario catalog (defaults to resolved root). */
+  functionsRoot?: string;
   /**
    * Offline-test override for reference URL signing. Production defaults to
    * the bucket's v4 signed read URL (same machinery as delivery signReadUrl,
@@ -41,6 +54,10 @@ export interface GenerationServiceOptions {
    * persist it; the URL is used in-flight only.
    */
   signReferenceUrl?: (objectPath: string) => Promise<string>;
+  /** Override for still-bytes URL resolution (image-stage provider inputs). */
+  resolveImageUrl?: (bytes: Uint8Array, contentType: string, digest: string) => Promise<string>;
+  /** Override for still first-frame URL signing (video-stage input). */
+  signStillUrl?: (objectPath: string) => Promise<string>;
 }
 
 /** Short-lived reference read capability: 15-min TTL is plenty for submit. */
@@ -305,6 +322,284 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
     }
   }
 
+  async function pollStillUntilComplete(
+    taskId: string,
+    imagePort: ImageGenerationPort,
+    deadline = now().getTime() + providerTimeoutMs,
+  ): Promise<{ state: "SUCCEEDED" | "FAILED"; errorCode?: string; errorMessage?: string }> {
+    for (;;) {
+      if (typeof imagePort.getStatus !== "function") return { state: "SUCCEEDED" };
+      const status = await imagePort.getStatus(taskId);
+      if (status.state === "SUCCEEDED") return { state: "SUCCEEDED" };
+      if (status.state === "FAILED") return { state: "FAILED", ...(status.errorCode ? { errorCode: status.errorCode } : {}), ...(status.errorMessage ? { errorMessage: status.errorMessage } : {}) };
+      if (now().getTime() >= deadline) throw new BackendError("PROVIDER_UNAVAILABLE", "Cartoon still polling timed out; task ID is retained for reconciliation.");
+      await sleep(pollIntervalMs);
+    }
+  }
+
+  /**
+   * Two-stage cartoon run: immutable plan persisted at creation is reused
+   * idempotently; the still stage resumes without a duplicate billable
+   * submit (stillTaskId + completed chain), then the wan3.0-video STANDARD
+   * cheap_demo envelope animates that exact still as first_frame on CAM-01
+   * with polling + result retrieval; CAM-02..04 are local fixture slots.
+   * Per-stage usage rows keep unknown credits truthful (null; synthetic
+   * zero only from the offline fake). Signed URLs are in-flight only.
+   */
+  async function runCartoonGeneration(validTask: GenerationTask) {
+    const jobDeadline = now().getTime() + providerTimeoutMs;
+    const functionsRoot = options.functionsRoot ?? resolveFunctionsRoot();
+    const getImagePort = (): ImageGenerationPort => {
+      if (options.imageProvider) return options.imageProvider;
+      // Fake-only rehearsal or offline default: never touches Alibaba.
+      return new FakeImageGenerationPort();
+    };
+    try {
+      let job = await store.getJob(validTask.partyId, validTask.jobId);
+      const plan = job.cartoonPlan as CartoonPlan | undefined;
+      if (!plan) throw new BackendError("INVALID_ARGUMENT", "Cartoon job is missing its immutable plan.");
+      validateCartoonPlan(plan);
+      const rehearsal = (job as Record<string, unknown>).rehearsalOnly === true;
+      const activeVideo: VideoGenerationPort | undefined = rehearsal ? getRehearsalProvider() : undefined;
+      const imagePort = rehearsal
+        ? (getRehearsalImagePort() as ImageGenerationPort)
+        : getImagePort();
+      const { catalog, situations } = loadValidatedCatalogs(functionsRoot);
+      // Portrait bytes: consent-bound submission when the plan cites one.
+      const portraitSubmissionId = typeof plan.portraitSubmissionId === "string" ? plan.portraitSubmissionId : undefined;
+      let portraitBytes: Uint8Array | undefined;
+      let portraitSha: string | undefined;
+      let portraitConsentRevision: string | undefined;
+      if (portraitSubmissionId !== undefined) {
+        const eligible = await assertGuestEligible(options.db, {
+          partyId: validTask.partyId, deviceId: validTask.deviceId, channelId: validTask.channelId,
+        }, portraitSubmissionId, now().getTime());
+        const [bytes] = await options.bucket.file(eligible.objectPath).download().catch(() => [undefined] as unknown as [Buffer | undefined]);
+        if (!bytes || bytes.byteLength <= 0) {
+          throw new BackendError("MANIFEST_MISMATCH", "Cartoon portrait bytes are not available for generation.");
+        }
+        if (createHash("sha256").update(bytes).digest("hex") !== eligible.sourceHash) {
+          throw new BackendError("MANIFEST_MISMATCH", "Cartoon portrait bytes do not match the consented source hash.");
+        }
+        // p3 generation gate over plain data: only guest_mobile provenance
+        // with the full binding may generate; budget/role/markers never grant.
+        const docSnap = await options.db.doc(`parties/${validTask.partyId}/guestMedia/${portraitSubmissionId}`).get().catch(() => undefined);
+        const snapExists = docSnap !== undefined && (docSnap as unknown as { exists: boolean }).exists === true;
+        const docData = snapExists
+          ? (docSnap as unknown as { data: () => Record<string, unknown> }).data()
+          : { ...(eligible as unknown as Record<string, unknown>) };
+        const provenance = provenanceFromGuestMediaDoc(docData, "server:guest_upload", now().toISOString());
+        if (!canGenerateFromPortrait(provenance, {
+          partyId: validTask.partyId, channelId: validTask.channelId, deviceId: validTask.deviceId, nowMs: now().getTime(),
+        })) {
+          throw new BackendError("FORBIDDEN", "Portrait-derived generation is not consented for this scope.");
+        }
+        portraitBytes = new Uint8Array(bytes);
+        portraitSha = eligible.sourceHash;
+        portraitConsentRevision = eligible.consentRevision;
+      } else {
+        throw new BackendError("INVALID_ARGUMENT", "Cartoon plan requires a consent-bound portrait submission.");
+      }
+
+      // Stage 1: still (resume without duplicate billable submit).
+      job = await store.getJob(validTask.partyId, validTask.jobId);
+      let chain = (job.cartoonChain ?? {}) as Record<string, unknown>;
+      let stillSha: string | undefined = typeof chain.stillSha256 === "string" ? chain.stillSha256 as string : undefined;
+      let stillPath: string | undefined = typeof chain.stillPath === "string" ? chain.stillPath as string : undefined;
+      let stillImageBytes: Uint8Array | undefined;
+      if (chain.stillStatus === "completed" && stillSha && stillPath) {
+        const [persisted] = await options.bucket.file(stillPath).download().catch(() => [undefined] as unknown as [Buffer | undefined]);
+        if (!persisted || persisted.byteLength === 0) {
+          throw new BackendError("MANIFEST_MISMATCH", "Persisted cartoon still is unavailable.");
+        }
+        if (createHash("sha256").update(persisted).digest("hex") !== stillSha) {
+          throw new BackendError("MANIFEST_MISMATCH", "Persisted cartoon still does not match its recorded hash.");
+        }
+        stillImageBytes = new Uint8Array(persisted);
+        await recordCartoonStillOutcome(options.db, ledgerInput(job, "CAM-01"), {
+          success: true, secondsOut: 0, secondsIn: 0,
+          creditsCharged: (job as Record<string, unknown>).cartoonStillCredits === 0 ? 0 : null,
+          providerTaskId: typeof chain.stillTaskId === "string" ? chain.stillTaskId as string : null,
+        });
+      } else {
+        const stillRequest: CartoonStillRequest = buildCartoonStillRequest({
+          jobId: validTask.jobId,
+          scenarioId: plan.scenarioId,
+          situationId: plan.situationId,
+          catalog,
+          situations,
+          portraitBytes: portraitBytes!,
+          portraitContentType: "image/jpeg",
+          portraitSha256: portraitSha!,
+          functionsRoot,
+        });
+        const shouldSubmit = await store.beginStillSubmission(validTask.partyId, validTask.jobId);
+        let stillTaskId: string | undefined;
+        if (!shouldSubmit) {
+          job = await store.getJob(validTask.partyId, validTask.jobId);
+          chain = (job.cartoonChain ?? {}) as Record<string, unknown>;
+          stillTaskId = typeof chain.stillTaskId === "string" ? chain.stillTaskId as string : undefined;
+          if (typeof stillTaskId !== "string") {
+            throw new BackendError("PROVIDER_UNAVAILABLE", "No durable cartoon still task ID is available; resubmission is disabled.");
+          }
+          // Reuse path never resubmits: poll + retrieve the durable task.
+          const status = await pollStillUntilComplete(stillTaskId, imagePort, jobDeadline);
+          if (status.state === "FAILED") {
+            throw new BackendError("PROVIDER_UNAVAILABLE", "Cartoon still task failed.");
+          }
+          if (typeof imagePort.getResult === "function") {
+            const reused = await imagePort.getResult(stillTaskId);
+            stillImageBytes = reused.image;
+            stillSha = cartoonSha256(stillImageBytes);
+          } else {
+            throw new BackendError("PROVIDER_UNAVAILABLE", "Cartoon still result is unavailable.");
+          }
+        } else {
+          let submittedTaskId: string;
+          let resultImage: Uint8Array;
+          let credits: number | null = null;
+          if (typeof imagePort.submit === "function" && typeof imagePort.getResult === "function") {
+            const submitted = await imagePort.submit(stillRequest);
+            await store.recordStillSubmission(validTask.partyId, validTask.jobId, submitted.taskId);
+            submittedTaskId = submitted.taskId;
+            const status = await pollStillUntilComplete(submittedTaskId, imagePort, jobDeadline);
+            if (status.state === "FAILED") {
+              await recordCartoonStillOutcome(options.db, ledgerInput(job, "CAM-01"), {
+                success: false, providerTaskId: submittedTaskId, creditsCharged: null, errorCode: "PROVIDER_UNAVAILABLE",
+              });
+              throw new BackendError("PROVIDER_UNAVAILABLE", "Cartoon still task failed.");
+            }
+            const result = await imagePort.getResult(submittedTaskId);
+            resultImage = result.image;
+            credits = result.creditsCharged ?? null;
+          } else {
+            const result = await generateCartoonStill(imagePort, stillRequest);
+            resultImage = result.image;
+            credits = result.creditsCharged ?? null;
+            submittedTaskId = result.taskId;
+            await store.recordStillSubmission(validTask.partyId, validTask.jobId, submittedTaskId);
+          }
+          if (!resultImage!.length) throw new BackendError("PROVIDER_UNAVAILABLE", "Cartoon image provider returned an empty still.");
+          stillSha = cartoonSha256(resultImage!);
+          stillImageBytes = resultImage!;
+          stillPath = cartoonStillObjectPath(validTask.partyId, validTask.jobId);
+          await options.bucket.file(stillPath).save(Buffer.from(stillImageBytes), {
+            resumable: false,
+            metadata: {
+              contentType: "image/png",
+              metadata: { purpose: "cartoon-still", jobId: validTask.jobId, partyId: validTask.partyId, sha256: stillSha },
+            },
+          });
+          await store.recordStillResult(validTask.partyId, validTask.jobId, stillSha, stillPath,
+            portraitSubmissionId, portraitSha, portraitConsentRevision);
+          await recordCartoonStillOutcome(options.db, ledgerInput(job, "CAM-01"), {
+            success: true, secondsOut: 0, secondsIn: 0, creditsCharged: credits, providerTaskId: submittedTaskId!,
+          });
+        }
+        // Persisted hashed consent-bound still: hash + path bound to the chain.
+        if (!stillSha || !stillImageBytes) {
+          throw new BackendError("PROVIDER_UNAVAILABLE", "Cartoon still is unavailable.");
+        }
+        if (!stillPath) {
+          stillPath = cartoonStillObjectPath(validTask.partyId, validTask.jobId);
+          const [persisted] = await options.bucket.file(stillPath).download().catch(() => [undefined] as unknown as [Buffer | undefined]);
+          if (!persisted) {
+            await options.bucket.file(stillPath).save(Buffer.from(stillImageBytes), {
+              resumable: false,
+              metadata: {
+                contentType: "image/png",
+                metadata: { purpose: "cartoon-still", jobId: validTask.jobId, partyId: validTask.partyId, sha256: stillSha },
+              },
+            });
+          }
+          await store.recordStillResult(validTask.partyId, validTask.jobId, stillSha, stillPath,
+            portraitSubmissionId, portraitSha, portraitConsentRevision);
+        }
+      }
+
+      // Stage 2: video from the exact still as first_frame (CAM-01 only).
+      const motion = buildCartoonMotionPrompt({ scenarioId: plan.scenarioId, situationId: plan.situationId, catalog, situations });
+      const signStill = options.signStillUrl
+        ?? (async (objectPath: string) => {
+          const [url] = await options.bucket.file(objectPath).getSignedUrl({
+            action: "read", version: "v4", expires: new Date(now().getTime() + REFERENCE_READ_URL_TTL_MS),
+          });
+          return url;
+        });
+      const stillUrl = await signStill(stillPath!);
+      if (typeof stillUrl !== "string" || !/^https:\/\//.test(stillUrl)) {
+        throw new BackendError("PROVIDER_UNAVAILABLE", "Cartoon still URL signing did not return a fetchable https URL.");
+      }
+      const videoRequest = buildCartoonVideoRequest(validTask.jobId, validTask.idempotencyKey, "CAM-01", motion, { url: stillUrl, sha256: stillSha! });
+      job = await store.getJob(validTask.partyId, validTask.jobId);
+      const stagedCam01 = (job.stagedOutputs ?? {})["CAM-01"] as Record<string, unknown> | undefined;
+      if (!stagedCam01) {
+        let providerTask = (job.providerTasks ?? {})["CAM-01"] as { taskId?: unknown } | undefined;
+        if (!providerTask || typeof providerTask.taskId !== "string") {
+          const shouldSubmit = await store.beginSubmission(validTask.partyId, validTask.jobId, "CAM-01");
+          if (!shouldSubmit) {
+            job = await store.getJob(validTask.partyId, validTask.jobId);
+            providerTask = (job.providerTasks ?? {})["CAM-01"] as { taskId?: unknown } | undefined;
+          } else {
+            const submitted = await (activeVideo ?? getProvider()).submit(videoRequest);
+            await store.recordSubmission(validTask.partyId, validTask.jobId, "CAM-01", submitted.taskId);
+            providerTask = { taskId: submitted.taskId };
+          }
+        }
+        if (typeof providerTask?.taskId !== "string") {
+          throw new BackendError("PROVIDER_UNAVAILABLE", "No durable provider task ID is available; resubmission is disabled.");
+        }
+        await store.heartbeat(validTask.partyId, validTask.jobId);
+        const status = await pollUntilComplete(providerTask.taskId, activeVideo, jobDeadline);
+        if (status.state === "FAILED") {
+          await recordUsageOutcome(options.db, ledgerInput(job, "CAM-01"), {
+            success: false, providerTaskId: providerTask.taskId, creditsCharged: null, errorCode: "PROVIDER_UNAVAILABLE",
+          });
+          throw new BackendError("PROVIDER_UNAVAILABLE", "Provider task failed.");
+        }
+        const result = await (activeVideo ?? getProvider()).getResult(providerTask.taskId);
+        const staged = await normalizeAndStage(validTask.partyId, validTask.jobId, "CAM-01", result);
+        await store.recordCameraResult(validTask.partyId, validTask.jobId, "CAM-01", result, status, staged);
+        await recordUsageOutcome(options.db, ledgerInput(job, "CAM-01"), {
+          success: true, secondsOut: result.secondsOut, secondsIn: result.secondsIn,
+          creditsCharged: result.creditsCharged, providerTaskId: providerTask.taskId,
+        });
+        await store.recordCartoonVideoStaged(validTask.partyId, validTask.jobId);
+      }
+      // Three fixture slots (never billable): CAM-02..04 local fixtures.
+      for (const cameraId of REQUIRED_CAMERA_IDS) {
+        if (cameraId === "CAM-01") continue;
+        const current = await store.getJob(validTask.partyId, validTask.jobId);
+        if ((current.stagedOutputs ?? {})[cameraId]) {
+          await recordUsageOutcome(options.db, ledgerInput(current, cameraId), {
+            success: true, secondsOut: 2, secondsIn: 0, creditsCharged: null, providerTaskId: null, fixture: true,
+          });
+          continue;
+        }
+        const staged = await stageFixtureSlot(validTask.partyId, validTask.jobId, cameraId);
+        await store.recordFixtureResult(validTask.partyId, validTask.jobId, cameraId, staged, 2);
+        await recordUsageOutcome(options.db, ledgerInput(current, cameraId), {
+          success: true, secondsOut: 2, secondsIn: 0, creditsCharged: null, providerTaskId: null, fixture: true,
+        });
+      }
+      const finished = await store.getJob(validTask.partyId, validTask.jobId);
+      await publish(validTask.partyId, validTask.jobId, validTask.idempotencyKey);
+      return { jobId: validTask.jobId, state: "ready", manifestVersion: Number(finished.manifestVersion) };
+    } catch (error) {
+      const latest = await store.getJob(validTask.partyId, validTask.jobId).catch(() => undefined);
+      if (latest && !["failed", "ready"].includes(String(latest.state))) {
+        await store.releaseWorker(validTask.partyId, validTask.jobId).catch(() => undefined);
+      }
+      throw error;
+    }
+  }
+
+  function getRehearsalImagePort(): ImageGenerationPort {
+    let cached: ImageGenerationPort | undefined;
+    return (cached ??= new FakeImageGenerationPort());
+  }
+
+
   async function runGeneration(task: GenerationTask) {
     const validTask: GenerationTask = {
       partyId: validateId(task.partyId, "partyId"),
@@ -316,6 +611,12 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
     await assertRegisteredPartyDevice(options.db, validTask);
     const claim = await store.claimWorker(validTask);
     if (!claim.claimed) return { jobId: validTask.jobId, state: String(claim.job.state), manifestVersion: Number(claim.job.manifestVersion) };
+    // Cartoon jobs take the two-stage still-to-video path (immutable plan,
+    // one generated CAM-01 + three fixture slots); all other jobs keep the
+    // existing cheap_demo/cameo_demo path byte-for-byte.
+    if ((claim.job as Record<string, unknown>).cartoonPlan !== undefined) {
+      return runCartoonGeneration(validTask);
+    }
     // Rehearsal-marked jobs bind to the fake provider before any submit;
     // unmarked jobs keep `undefined` so every default-path call site resolves
     // lazily through getProvider() exactly as before.

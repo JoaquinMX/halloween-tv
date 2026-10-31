@@ -1,0 +1,37 @@
+{
+  "request": {
+    "jobId": "job-cartoon-1",
+    "idempotencyKey": "idem-cartoon-1:cartoon-video:CAM-01",
+    "cameraId": "CAM-01",
+    "prompt": "Animate the supplied illustrated first frame with tiny natural motion only. 0-1s: guest sprints left-to-right through a tight room with exaggerated cartoon strides while a goofy monster reaches from behind. 1-2s: guest trips over a rug/cable/plush (prop from the scenario, never a new object), arms windmill, monster overshoots and face-plants. 2s: both scramble and burst through the room doorway offscreen. One continuous side-tracking shot; both characters visible throughout. Locked camera, no cuts, preserve the illustrated character identity and scene.",
+    "presetId": "cheap_demo",
+    "modelId": "wan3.0-video",
+    "region": "singapore",
+    "resolution": "480P",
+    "secondsOut": 2,
+    "aspectRatio": "16:9",
+    "audio": false,
+    "outputs": 1,
+    "autoUpscale": false,
+    "firstFrame": {
+      "url": "https://signed.invalid/cartoon-still.png",
+      "sha256": "b9c73ef7ecc72fbf0e5d049c3e76e2f5060328dad09f49714e5c534c42600505"
+    }
+  },
+  "body": {
+    "model": "wan3.0-video",
+    "input": {
+      "prompt": "Animate the supplied illustrated first frame with tiny natural motion only. 0-1s: guest sprints left-to-right through a tight room with exaggerated cartoon strides while a goofy monster reaches from behind. 1-2s: guest trips over a rug/cable/plush (prop from the scenario, never a new object), arms windmill, monster overshoots and face-plants. 2s: both scramble and burst through the room doorway offscreen. One continuous side-tracking shot; both characters visible throughout. Locked camera, no cuts, preserve the illustrated character identity and scene. Locked camera, no cuts.",
+      "first_frame": "https://signed.invalid/cartoon-still.png"
+    },
+    "parameters": {
+      "resolution": "480P",
+      "ratio": "16:9",
+      "duration": 2,
+      "audio": false,
+      "watermark": false,
+      "prompt_extend": false,
+      "video_control": "STANDARD"
+    }
+  }
+}

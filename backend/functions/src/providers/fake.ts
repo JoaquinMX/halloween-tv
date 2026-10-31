@@ -34,6 +34,14 @@ export class FakeVideoGenerationPort implements VideoGenerationPort {
         throw new Error("Fake provider reference image must carry a signed https URL.");
       }
     }
+    // Cartoon first frame follows the same fetchability gate: the exact
+    // generated still must resolve to a signed https URL before transport.
+    if (request.firstFrame !== undefined) {
+      const url = (request.firstFrame as { url?: unknown }).url;
+      if (typeof url !== "string" || !/^https:\/\//.test(url)) {
+        throw new Error("Fake provider first frame must carry a signed https URL.");
+      }
+    }
     const oldTaskId = this.byKey.get(request.idempotencyKey);
     if (oldTaskId) return { taskId: oldTaskId };
     const taskId = `${request.cameraId}__${createHash("sha256").update(request.idempotencyKey).digest("hex").slice(0, 24)}`;

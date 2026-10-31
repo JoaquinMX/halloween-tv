@@ -34,7 +34,7 @@ async function main(): Promise<void> {
     const requiredFields = ["model_id", "preset_id", "seconds_out", "seconds_in", "credits_charged", "provider_task_id", "created_at", "success", "partyId", "deviceId", "channelId", "manifestVersion", "timestamp", "idempotencyKey"];
     for (const jobSnapshot of jobs.docs) {
       const job = jobSnapshot.data();
-      if (job.presetId !== "cheap_demo" || typeof job.partyId !== "string" || typeof job.jobId !== "string") continue;
+      if ((job.presetId !== "cheap_demo" && job.presetId !== "cameo_demo") || typeof job.partyId !== "string" || typeof job.jobId !== "string") continue;
       const tasks = job.providerTasks && typeof job.providerTasks === "object" ? job.providerTasks as Record<string, { taskId?: unknown }> : {};
       for (const cameraId of REQUIRED_CAMERA_IDS) {
         const ledgerSnapshot: FirebaseFirestore.DocumentSnapshot = await db.doc(`parties/${job.partyId}/costLogs/${usageLedgerId(job.jobId, cameraId)}`).get();
@@ -69,12 +69,10 @@ async function main(): Promise<void> {
       }
     }
     const issues = [...initialIssues, ...fieldIssues];
-    // Ledger-derived provider call count is provenance-based, never
-    // credit-based: every durable submitted task that is NOT an offline
-    // fake-shaped ID implies a live provider call, even when the realized
-    // charge is still unknown (null credits stay `unknown`, never zero).
-    // Synthetic-zero fake rows (fake-shaped IDs) and fixture rows (null task
-    // IDs) imply zero provider calls and are excluded.
+    // Cartoon still-stage rows ride alongside the camera rows: unknown
+    // credits stay `unknown` (never zero); synthetic-zero fake stills and
+    // fixture rows imply zero provider calls and are excluded from the
+    // live-call count, which stays provenance-based, never credit-based.
     const isOfflineFakeTask = (row: Record<string, unknown>): boolean =>
       typeof row.providerTaskId === "string" &&
       new RegExp(`^${String(row.cameraId)}__[a-f0-9]{24}$`).test(row.providerTaskId);

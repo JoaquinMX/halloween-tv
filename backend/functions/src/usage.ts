@@ -30,8 +30,18 @@ export function usageLedgerId(jobId: string, cameraId: CameraId): string {
   return `${jobId}_${cameraId}`;
 }
 
+/** Still-stage ledger ID: one row per cartoon job for the qwen still. */
+export function cartoonStillLedgerId(jobId: string): string {
+  return `${jobId}_still`;
+}
+
 export function usageLedgerPath(input: UsageLedgerInput): string {
   return `parties/${input.partyId}/costLogs/${usageLedgerId(input.jobId, input.cameraId)}`;
+}
+
+/** Still-stage ledger path for the cartoon image stage. */
+export function cartoonStillLedgerPath(partyId: string, jobId: string): string {
+  return `parties/${partyId}/costLogs/${cartoonStillLedgerId(jobId)}`;
 }
 
 /** Fields match backend-contract-v1; per-camera rows preserve every provider task ID. */
@@ -97,6 +107,66 @@ export interface UsageReconciliationIssue {
   jobId: string;
   cameraId: CameraId;
   code: "MISSING_LEDGER" | "INCOMPLETE_LEDGER" | "MISSING_PROVIDER_TASK_ID" | "TASK_ID_MISMATCH" | "MISSING_SUCCESS_OUTCOME" | "SUBMISSION_OUTCOME_UNKNOWN";
+}
+
+/**
+ * Still-stage intent row: qwen-image-3.0-pro, unknown credits truthful
+ * (null until the provider reports a realized charge; the offline fake
+ * records synthetic zero). Never fabricates a charge.
+ */
+export function cartoonStillIntentDocument(
+  input: UsageLedgerInput,
+  timestamp: unknown = FieldValue.serverTimestamp(),
+) {
+  return {
+    model_id: "qwen-image-3.0-pro",
+    preset_id: "cartoon_still",
+    seconds_out: 0,
+    seconds_in: 0,
+    credits_charged: null,
+    provider_task_id: null,
+    created_at: timestamp,
+    success: false,
+    stage: "still",
+    partyId: input.partyId,
+    deviceId: input.deviceId,
+    channelId: input.channelId,
+    manifestVersion: input.manifestVersion,
+    timestamp,
+    idempotencyKey: `${input.idempotencyKey}:still`,
+    jobId: input.jobId,
+    cameraId: input.cameraId,
+  };
+}
+
+/**
+ * Still-stage outcome: per-stage row alongside the CAM-01 video row.
+ * Unknown credits stay null (never zero, never estimated); the offline fake
+ * is the only writer of synthetic zero.
+ */
+export async function recordCartoonStillOutcome(
+  db: Firestore,
+  input: UsageLedgerInput,
+  outcome: UsageOutcome,
+): Promise<void> {
+  const ref = db.doc(cartoonStillLedgerPath(input.partyId, input.jobId));
+  const patch: Record<string, unknown> = {
+    success: outcome.success,
+    seconds_out: outcome.secondsOut ?? 0,
+    seconds_in: outcome.secondsIn ?? 0,
+    credits_charged: outcome.creditsCharged ?? null,
+    timestamp: FieldValue.serverTimestamp(),
+  };
+  if (outcome.providerTaskId !== undefined) patch.provider_task_id = outcome.providerTaskId;
+  if (outcome.errorCode) patch.errorCode = outcome.errorCode;
+  await db.runTransaction(async (transaction) => {
+    const existing = await transaction.get(ref);
+    if (!existing.exists) {
+      transaction.create(ref, { ...cartoonStillIntentDocument(input), ...patch });
+    } else {
+      transaction.update(ref, patch);
+    }
+  });
 }
 
 /** Read-only consistency check between durable provider attempts and the usage ledger. */
