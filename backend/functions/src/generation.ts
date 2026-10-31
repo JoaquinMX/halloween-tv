@@ -278,7 +278,13 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
             secondsOut?: number; secondsIn?: number; creditsCharged?: number | null; providerState?: string;
           } | undefined;
           if (!cameraResult || cameraResult.providerState !== "SUCCEEDED") {
-            const result = await getProvider().getResult(providerTask.taskId);
+            let result;
+            try {
+              result = await getProvider().getResult(providerTask.taskId);
+            } catch (error) {
+              if (error instanceof BackendError) throw error;
+              throw new BackendError("PROVIDER_UNAVAILABLE", `Provider result is unavailable; task ID ${String(providerTask.taskId)} retained for reconciliation.`);
+            }
             await store.recordCameraResult(validTask.partyId, validTask.jobId, cameraId, result, { state: "SUCCEEDED" }, stagedOutput);
             await recordUsageOutcome(options.db, ledgerInput(job, cameraId), {
               success: true,
@@ -368,7 +374,13 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
           });
           throw new BackendError("PROVIDER_UNAVAILABLE", "Provider task failed.");
         }
-        const result = await getProvider().getResult(providerTask.taskId);
+        let result: ProviderResult;
+        try {
+          result = await getProvider().getResult(providerTask.taskId);
+        } catch (error) {
+          if (error instanceof BackendError) throw error;
+          throw new BackendError("PROVIDER_UNAVAILABLE", `Provider result is unavailable; task ID ${String(providerTask.taskId)} retained for reconciliation.`);
+        }
         const staged = await normalizeAndStage(validTask.partyId, validTask.jobId, cameraId, result);
         await store.recordCameraResult(validTask.partyId, validTask.jobId, cameraId, result, status, staged);
         await recordUsageOutcome(options.db, ledgerInput(job, cameraId), {
