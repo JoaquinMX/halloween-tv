@@ -36,17 +36,28 @@ import { tmpdir } from "node:os";
 import { REQUIRED_CAMERA_IDS } from "../src/config";
 import {
   EXPECTED_NORMALIZATION,
+  EXPECTED_SCENARIO_COUNT,
   FIXTURE_PROFILE,
+  PACKAGED_SCENARIO_DIR,
+  PACKAGED_SCENARIO_REF_DIR,
   PINNED_PACKAGES,
   REQUIRED_FFMPEG_FILTERS,
   RUNTIME_TARGET,
+  SCENARIO_CATALOG_FILENAME,
+  SCENARIO_CATALOG_VERSION,
+  SITUATIONS_CATALOG_VERSION,
+  SITUATIONS_FILENAME,
   assertExecutableMode,
   assertLinuxX64Executable,
+  assertSafePackagedPath,
   fail,
   installedPackageVersion,
   sha256Hex,
   validateFixtureBytes,
+  validateScenarioInventory,
+  validateScenarioReferenceBytes,
   type PinnedEntry,
+  type ScenarioManifestSection,
   type ValidationMode,
 } from "./runtime_artifact";
 
@@ -243,6 +254,52 @@ async function main(): Promise<void> {
   }
   await copyFile(join(sourceAssets, "fixture_manifest.json"), join(fixtureDirectory, "fixture_manifest.json"));
 
+  // Cartoon scenario catalog inventory: both versioned JSONs plus all 16
+  // reference stills are packaged under runtime/scenarios so a relocated
+  // Functions artifact loads every entry without the repository checkout.
+  // Every byte is hashed against its catalog record here; the manifest
+  // scenario section pins the digests for deploy_preflight.
+  const scenarioSection = await (async (): Promise<ScenarioManifestSection> => {
+    const catalogRepoPath = join(packageRoot, "assets", SCENARIO_CATALOG_FILENAME);
+    const situationsRepoPath = join(packageRoot, "assets", SITUATIONS_FILENAME);
+    if (!existsSync(catalogRepoPath)) fail(`Scenario catalog is missing: ${catalogRepoPath}`);
+    if (!existsSync(situationsRepoPath)) fail(`Situations catalog is missing: ${situationsRepoPath}`);
+    const catalog = JSON.parse(await readFile(catalogRepoPath, "utf8")) as unknown;
+    const situations = JSON.parse(await readFile(situationsRepoPath, "utf8")) as unknown;
+    const records = validateScenarioInventory(catalog, situations);
+    if (records.length !== EXPECTED_SCENARIO_COUNT) {
+      fail(`Scenario inventory must hold exactly ${EXPECTED_SCENARIO_COUNT} records.`);
+    }
+    const scenarioDirectory = join(runtimeRoot, "scenarios");
+    const scenarioRefDirectory = join(runtimeRoot, "scenarios", "scenario_refs");
+    await mkdir(scenarioDirectory, { recursive: true });
+    await mkdir(scenarioRefDirectory, { recursive: true });
+    for (const record of records) {
+      assertSafePackagedPath(record.referencePath, `Scenario ${record.id} referencePath`);
+      const source = join(packageRoot, record.referencePath);
+      if (!existsSync(source)) fail(`Scenario ${record.id} reference is missing: ${source}`);
+      const bytes = await readFile(source);
+      validateScenarioReferenceBytes(bytes, record);
+      const target = join(scenarioRefDirectory, record.sourceFilename);
+      await copyFile(source, target);
+      await chmod(target, 0o644);
+      validateScenarioReferenceBytes(await readFile(target), record);
+    }
+    await copyFile(catalogRepoPath, join(scenarioDirectory, SCENARIO_CATALOG_FILENAME));
+    await chmod(join(scenarioDirectory, SCENARIO_CATALOG_FILENAME), 0o644);
+    await copyFile(situationsRepoPath, join(scenarioDirectory, SITUATIONS_FILENAME));
+    await chmod(join(scenarioDirectory, SITUATIONS_FILENAME), 0o644);
+    return {
+      catalogVersion: SCENARIO_CATALOG_VERSION,
+      situationsVersion: SITUATIONS_CATALOG_VERSION,
+      catalogPath: `${PACKAGED_SCENARIO_DIR}/${SCENARIO_CATALOG_FILENAME}`,
+      situationsPath: `${PACKAGED_SCENARIO_DIR}/${SITUATIONS_FILENAME}`,
+      refDirectory: PACKAGED_SCENARIO_REF_DIR,
+      count: records.length,
+      records,
+    };
+  })();
+
   let smokeTested = false;
   if (executingHost) {
     smokeNormalize(join(fixtureDirectory, "cam01.mp4"), ffmpegTarget, ffprobeTarget);
@@ -250,7 +307,8 @@ async function main(): Promise<void> {
   }
 
   const runtimeBytes = packagedFfmpegBytes.byteLength + packagedFfprobeBytes.byteLength +
-    preparedFixtures.reduce((total, fixture) => total + Number(fixture.sizeBytes), 0);
+    preparedFixtures.reduce((total, fixture) => total + Number(fixture.sizeBytes), 0) +
+    scenarioSection.records.reduce((total, record) => total + record.sizeBytes, 0);
   const output = {
     target: RUNTIME_TARGET,
     preparedBy: "tools/prepare_runtime.ts",
@@ -278,6 +336,7 @@ async function main(): Promise<void> {
     },
     fixtures: preparedFixtures,
     normalization: NORMALIZATION,
+    scenarios: scenarioSection,
     runtimeBytes,
   };
   await writeFile(join(runtimeRoot, "runtime-manifest.json"), `${JSON.stringify(output, null, 2)}\n`, { mode: 0o644 });

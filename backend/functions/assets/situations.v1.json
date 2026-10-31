@@ -1,0 +1,139 @@
+{
+  "catalog": "situations",
+  "version": "v1",
+  "formatVersion": 1,
+  "provenance": {
+    "sourceNote": "Comic-spooky action events for the cartoon pipeline. Each event is a timed action choreography, not a style name; scenarios name styles, situations name motion.",
+    "consentScope": "Same scope as scenario_catalog.v1.json: owner-provided cartoon references only; no personal media."
+  },
+  "events": [
+    {
+      "id": "cramped-stumble-chase",
+      "version": 1,
+      "name": "Cramped stumble chase",
+      "action": "0-1s: guest sprints left-to-right through a tight room with exaggerated cartoon strides while a goofy monster reaches from behind. 1-2s: guest trips over a rug/cable/plush (prop from the scenario, never a new object), arms windmill, monster overshoots and face-plants. 2s: both scramble and burst through the room doorway offscreen. One continuous side-tracking shot; both characters visible throughout.",
+      "constraints": "Tight interiors only; trip prop must come from the scenario; no vehicles, no crowds, no gore",
+      "compatibleScenarios": [
+        "attic-computer-corner",
+        "furnace-kitchen-pass",
+        "retro-computer-core",
+        "pink-bedroom"
+      ]
+    },
+    {
+      "id": "grand-staircase-chase",
+      "version": 1,
+      "name": "Grand staircase run-through",
+      "action": "0-1s: guest pelts down the staircase three steps at a time, monster close behind grabbing at air. 1-2s: both slide across the long rug, portraits/rug pattern streak past in a side-tracking shot. 2s: guest dives through the far doorway; monster tangles in the rug fringe. Keep both characters on stairs/rug; no new monogram lore.",
+      "constraints": "Wide staircase halls only; keep rug/windows; no gore",
+      "compatibleScenarios": [
+        "pink-mansion-foyer",
+        "red-gallery-hall"
+      ]
+    },
+    {
+      "id": "lab-bench-slapstick",
+      "version": 1,
+      "name": "Lab-bench slapstick weave",
+      "action": "0-1s: guest weaves between workbenches, vaulting a low bench while the monster knocks over unbreakable flasks that bounce like rubber. 1-2s: guest ducks under hanging cables and springboards off an oversized keyboard. 2s: both vanish behind a rising chalkboard/steam puff. No readable code or text on boards; no gore, no broken glass.",
+      "constraints": "Sterile labs only; flasks bounce, never shatter; no readable text",
+      "compatibleScenarios": [
+        "boy-genius-lab",
+        "retro-computer-core"
+      ]
+    },
+    {
+      "id": "kitchen-slapstick-chase",
+      "version": 1,
+      "name": "Kitchen slapstick chase",
+      "action": "0-1s: guest slips on a tipped pot and skids across the kitchen floor as the monster gives chase. 1-2s: guest ducks behind the cauldron/stew tub while pot lids spin through the air as cover. 2s: a harmless flour/steam puff whites out the frame and both dash offscreen. Food and steam gags only; no burns, no gore.",
+      "constraints": "Kitchens only; steam and pot lids as cover; food gags only",
+      "compatibleScenarios": [
+        "storybook-kitchen",
+        "furnace-kitchen-pass"
+      ]
+    },
+    {
+      "id": "couch-gag-chase",
+      "version": 1,
+      "name": "Couch-gag living-room chase",
+      "action": "0-1s: guest vaults the couch lengthwise, cushions bouncing, monster close behind. 1-2s: guest trips on the rug edge, grabs a floor lamp that wobbles but never falls, and scrambles up. 2s: both race past the off TV (static flickers once) and out the room doorway. Keep living-room scale; lamp never breaks.",
+      "constraints": "Domestic living rooms only; furniture wobbles, never breaks; no menace beyond spooky twist",
+      "compatibleScenarios": [
+        "tv-living-room",
+        "farmhouse-sitting-room"
+      ]
+    },
+    {
+      "id": "mask-lunge-scare",
+      "version": 1,
+      "name": "Mask-lunge scare beat",
+      "action": "0-1s: guest backs into frame center, unaware, while a single green mask-monster looms from the doorway/furniture side. 1-2s: the monster lunges with mismatched eyes wide; the guest recoils with an exaggerated take, hair standing up. 2s: freeze on the scare face, then both break into a run offscreen. Exactly one monster; lunge, never contact; no gore.",
+      "constraints": "Single-monster scares; lunge without contact; keep one monster only",
+      "compatibleScenarios": [
+        "farmhouse-sitting-room",
+        "nowhere-farmhouse",
+        "clock-manor-hall",
+        "attic-computer-corner"
+      ]
+    },
+    {
+      "id": "horde-swarm-chase",
+      "version": 1,
+      "name": "Horde-swarm outdoor chase",
+      "action": "0-1s: guest flees down the road/path as a goofy pumpkin mob (or the chasing monster joining it) pours in from the sides. 1-2s: guest weaves through the crowd, candy/props flying harmlessly, and dives toward the van doorway. 2s: doors slam on the mob; one pumpkin face squishes against the glass. Outdoor night/dusk only; candy and graves stay; no gore.",
+      "constraints": "Outdoor night/dusk chases; monster may join the mob; keep candy/graves/van livery",
+      "compatibleScenarios": [
+        "halloween-graveyard",
+        "mystery-van-road",
+        "nowhere-farmhouse"
+      ]
+    },
+    {
+      "id": "van-door-slam-gag",
+      "version": 1,
+      "name": "Van door-slam gag",
+      "action": "0-1s: guest laps the parked van with the monster cutting the corner too tight and spinning out. 1-2s: guest yanks the sliding door open, dives in, and slams it as the monster face-plants the panel. 2s: the van rocks on its suspension; a hubcap wobbles off and rolls away. Keep van livery; no real plates or text.",
+      "constraints": "Van/road exteriors and daylight porches; keep livery; no readable plates/text",
+      "compatibleScenarios": [
+        "mystery-van-road",
+        "suburb-house-day",
+        "culdesac-house"
+      ]
+    },
+    {
+      "id": "clock-chime-scare",
+      "version": 1,
+      "name": "Clock-chime scare",
+      "action": "0-1s: the sheet ghost drifts across the clock wall as the guest tiptoes through, all clocks ticking. 1-2s: every clock bongs at once; the guest leaps into the settee cushions while the ghost spins in surprise. 2s: dust settles, one small clock keeps ticking, guest and ghost exit opposite sides. Clocks and ghost only; no occult symbols.",
+      "constraints": "Clock/haunted halls and grand foyers; chime is the scare; no occult symbols beyond clocks",
+      "compatibleScenarios": [
+        "clock-manor-hall",
+        "pink-mansion-foyer"
+      ]
+    },
+    {
+      "id": "porch-daylight-gag",
+      "version": 1,
+      "name": "Porch daylight approach gag",
+      "action": "0-1s: guest strolls up the lawn whistling; a goofy monster shadow stretches from the porch long before the monster appears. 1-2s: guest trips on the lawn edge, the garage door rattles open-shut, guest scrambles up the porch steps. 2s: both disappear around the house corner. Daylight exteriors only; keep house silhouette; no address text.",
+      "constraints": "Daylight house exteriors; keep silhouette and palette; no address text",
+      "compatibleScenarios": [
+        "suburb-house-day",
+        "culdesac-house",
+        "nowhere-farmhouse"
+      ]
+    },
+    {
+      "id": "toy-room-chase",
+      "version": 1,
+      "name": "Toy-room chase",
+      "action": "0-1s: guest tiptoes between plush toys and bots as the monster's shadow crosses the round windows. 1-2s: guest trips on a plush, toys bounce harmlessly, guest dives under the heart bed. 2s: the monster lifts the bed skirt to peek; the guest is already gone out the door. Sweet, never menacing beyond a spooky twist.",
+      "constraints": "Playful interiors; trip on plush, hide under bed; keep sweet, no menace",
+      "compatibleScenarios": [
+        "pink-bedroom",
+        "tv-living-room"
+      ]
+    }
+  ]
+}
