@@ -73,9 +73,17 @@ final class FirebaseDeliveryUrls {
       );
     }
     final Set<String> cameras = this.clips.map((clip) => clip.cameraId).toSet();
+    // 1/2/4-camera layouts: the response must carry exactly the first-N
+    // canonical cameras (reordered clips are fine; gaps and extras rejected).
+    if (!isSupportedCctvClipCount(this.clips.length)) {
+      throw const FormatException(
+        'delivery response must contain one URL per canonical camera',
+      );
+    }
+    final List<String> expected = expectedCctvCameraIds(this.clips.length);
     if (cameras.length != this.clips.length ||
-        cameras.length != cctvSlots.length ||
-        !cameras.containsAll(cctvSlots.map((slot) => slot.id))) {
+        cameras.length != expected.length ||
+        !cameras.containsAll(expected)) {
       throw const FormatException(
         'delivery response must contain one URL per canonical camera',
       );
@@ -208,16 +216,24 @@ final class FirebaseDeliveryClient implements DeliveryAcknowledger {
     if (partyId != _identity.partyId) {
       throw ArgumentError.value(partyId, 'partyId', 'does not match identity');
     }
-    final Set<String> canonicalCameras = cctvSlots
-        .map((CctvSlot slot) => slot.id)
-        .toSet();
+    // ACK covers the complete received manifest (1, 2, or 4 clips): the hash
+    // set must exactly equal the first-N canonical prefix — reduced layouts
+    // still ACK every received clip, extras rejected.
     if (manifestVersion <= 0 ||
-        verifiedClipHashes.length != cctvSlots.length ||
-        !verifiedClipHashes.keys.toSet().containsAll(canonicalCameras)) {
+        !isSupportedCctvClipCount(verifiedClipHashes.length)) {
       throw ArgumentError(
         'ACK requires a positive version and one hash for each canonical camera',
       );
     }
+    final List<String> expectedCameras = expectedCctvCameraIds(
+      verifiedClipHashes.length,
+    );
+    if (!verifiedClipHashes.keys.toSet().containsAll(expectedCameras)) {
+      throw ArgumentError(
+        'ACK requires a positive version and one hash for each canonical camera',
+      );
+    }
+    final Set<String> canonicalCameras = expectedCameras.toSet();
     final Map<String, String> hashes = <String, String>{};
     for (final String cameraId in canonicalCameras) {
       final String hash = verifiedClipHashes[cameraId]!.toLowerCase();

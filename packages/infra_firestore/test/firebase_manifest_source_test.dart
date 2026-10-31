@@ -10,6 +10,7 @@ Map<String, Object?> backendManifest({
   Object? schemaVersion = 1,
   String partyId = 'pilot',
   String channelId = 'main',
+  int count = 4,
 }) => <String, Object?>{
   'schemaVersion': schemaVersion,
   'partyId': partyId,
@@ -19,7 +20,7 @@ Map<String, Object?> backendManifest({
   'createdAt': Timestamp.fromDate(DateTime.utc(2026, 10, 29, 13, 0)),
   'expiresAt': '2026-10-30T13:00:00.000Z',
   'cameraClips': <Map<String, Object?>>[
-    for (final int index in List<int>.generate(4, (i) => i + 1))
+    for (final int index in List<int>.generate(count, (i) => i + 1))
       <String, Object?>{
         'cameraId': 'CAM-0$index',
         'objectPath': 'parties/pilot/channels/main/delivery/3/CAM-0$index.mp4',
@@ -145,4 +146,57 @@ void main() {
       expect(manifest[1], manifest[0]);
     },
   );
+
+  test(
+    '1/2/4-camera backend documents map through the real path and validate',
+    () async {
+      for (final int count in <int>[1, 2, 4]) {
+        final FirebaseManifestSource source = sourceFor(
+          (_) => Stream<Map<String, Object?>?>.value(
+            backendManifest(count: count),
+          ),
+        );
+        final PlaybackManifest manifest = await source
+            .watchCurrent(partyId: 'pilot', channelId: 'main')
+            .first;
+        expect(manifest.clips, hasLength(count));
+        expect(
+          manifest.clips.map((clip) => clip.cameraId).toList(),
+          expectedCctvCameraIds(count),
+        );
+        // Storage mapping carries the delivery object path and digest.
+        expect(
+          manifest.clips.first.storageObjectId,
+          'parties/pilot/channels/main/delivery/3/CAM-01.mp4',
+        );
+        expect(validateCctvManifest(manifest).isOk, isTrue);
+        // Durable-cache restoration shape: JSON round-trip keeps count.
+        final PlaybackManifest restored = parseManifest(manifest.toJson());
+        expect(restored.clips, hasLength(count));
+        expect(validateCctvManifest(restored).isOk, isTrue);
+      }
+    },
+  );
+
+  test('3-camera and gapped backend documents fail validation', () async {
+    final FirebaseManifestSource threeSource = sourceFor(
+      (_) => Stream<Map<String, Object?>?>.value(backendManifest(count: 3)),
+    );
+    final PlaybackManifest three = await threeSource
+        .watchCurrent(partyId: 'pilot', channelId: 'main')
+        .first;
+    expect(three.clips, hasLength(3));
+    expect(validateCctvManifest(three).isErr, isTrue);
+
+    final Map<String, Object?> gapped = backendManifest(count: 2);
+    ((gapped['cameraClips']! as List)[1] as Map<String, Object?>)['cameraId'] =
+        'CAM-03';
+    final FirebaseManifestSource gapSource = sourceFor(
+      (_) => Stream<Map<String, Object?>?>.value(gapped),
+    );
+    final PlaybackManifest gap = await gapSource
+        .watchCurrent(partyId: 'pilot', channelId: 'main')
+        .first;
+    expect(validateCctvManifest(gap).isErr, isTrue);
+  });
 }

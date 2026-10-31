@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import test from "node:test";
-import { DeliveryManifest, canonicalManifestHash, parseAck, parseCurrentManifestInput, parseRequestGeneration, validateCanonicalClips } from "../src/contracts";
+import { BackendError, DeliveryManifest, canonicalManifestHash, parseAck, parseCurrentManifestInput, parseRequestGeneration, validateCanonicalClips } from "../src/contracts";
+import { expectedCameraIds } from "../src/config";
 import { GUEST_CONSENT_PURPOSE, GUEST_CONSENT_TEXT_VERSION } from "../src/config";
 import { createRuntimeServices } from "../src/runtime";
 import { FakeVideoGenerationPort } from "../src/providers/fake";
@@ -62,6 +63,55 @@ test("shared v1 fixture parses and hashes through backend contract functions", a
   assert.deepEqual(fixture.guestConsent.fixtureCameras, ["CAM-02", "CAM-03", "CAM-04"]);
 });
 
+test("camera-count fixture accepts 1/2/4 first-N prefixes with legacy four-camera hashes preserved", async () => {
+  const content = await readFile(resolve(__dirname, "../../../test/fixtures/cctv_counts_v1.json"), "utf8");
+  const counts = JSON.parse(content) as {
+    counts: number[]; defaultCount: number; cameraIds: string[];
+    manifests: Record<string, DeliveryManifest>;
+    invalid: Record<string, { cameraClips: unknown }>;
+  };
+  assert.deepEqual(counts.counts, [1, 2, 4]);
+  assert.equal(counts.defaultCount, 4);
+  assert.deepEqual(counts.cameraIds, [...expectedCameraIds(4)]);
+  for (const count of [1, 2, 4]) {
+    const manifest = counts.manifests[String(count)];
+    validateCanonicalClips(manifest.cameraClips);
+    assert.equal(manifest.cameraClips.length, count);
+    // Reordered valid clips remain accepted.
+    validateCanonicalClips([...manifest.cameraClips].reverse());
+    const ack = parseAck({
+      partyId: manifest.partyId, deviceId: "tv-pilot", channelId: manifest.channelId,
+      manifestVersion: manifest.version,
+      clipHashes: Object.fromEntries(manifest.cameraClips.map((clip) => [clip.cameraId, clip.sha256])),
+    });
+    assert.deepEqual(Object.keys(ack.clipHashes).sort(), [...expectedCameraIds(count)].sort());
+  }
+  // Legacy four-camera fixture hashes and idempotency are preserved.
+  const legacy = await readFixture();
+  assert.equal(canonicalManifestHash(counts.manifests["4"]), legacy.canonicalManifestHash);
+  assert.equal(
+    legacy.acknowledgeDelivery.response.ackId,
+    "47aa92e83cf6a4e3cf5ad02a1421357fc29f4fb236f415553e3f6bc8594b1541",
+  );
+  // Unsupported counts, gaps, duplicates, unknown cameras, and invalid
+  // existing metadata are rejected.
+  for (const key of Object.keys(counts.invalid)) {
+    assert.throws(
+      () => validateCanonicalClips((counts.invalid[key] as { cameraClips: unknown }).cameraClips),
+      (error: unknown) => error instanceof BackendError && error.errorCode === "MANIFEST_MISMATCH",
+      `${key} must be rejected`,
+    );
+  }
+  // ACK hashes must exactly match the actual manifest: extra hashes rejected.
+  const two = counts.manifests["2"];
+  assert.throws(
+    () => parseAck({
+      partyId: two.partyId, deviceId: "tv-pilot", channelId: two.channelId, manifestVersion: two.version,
+      clipHashes: Object.fromEntries([...two.cameraClips.map((clip) => [clip.cameraId, clip.sha256] as const), ["CAM-03", "c".repeat(64)] as const]),
+    }),
+    (error: unknown) => error instanceof BackendError && error.errorCode === "MANIFEST_MISMATCH",
+  );
+});
 test("shared v1 fixture runs through callable service composition", { skip: !HAS_FIRESTORE_EMULATOR }, async () => {
   const fixture = await readFixture();
   const { app, db, bucket } = await createEmulatorContext();

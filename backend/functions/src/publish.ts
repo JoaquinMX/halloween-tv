@@ -64,6 +64,20 @@ export async function publishManifest(
 ): Promise<DeliveryManifest> {
   const job = await store.getJob(partyId, jobId);
   if (job.idempotencyKey !== idempotencyKey) throw new BackendError("FORBIDDEN", "Publish idempotency key does not match the job.");
+  // Deletion-race guard: a host-deleted job (deleteHostVideo tombstone) must
+  // never publish, even if the worker staged bytes before the deletion. This
+  // precedes the idempotent-published fast path so a deletion racing the
+  // worker is refused instead of replaying the revoked manifest.
+  if ((job as Record<string, unknown>).hostDeleted === true) {
+    throw new BackendError("FORBIDDEN", "Seed video was deleted; publication is refused.");
+  }
+  if (typeof job.jobId === "string" && job.jobId.startsWith("hv-")) {
+    const seedId = job.jobId.slice("hv-".length);
+    const seedSnap = await store.db.doc(`parties/${partyId}/seedVideos/${seedId}`).get().catch(() => undefined);
+    if (seedSnap?.exists && (seedSnap.data() as Record<string, unknown>).status === "deleted") {
+      throw new BackendError("FORBIDDEN", "Seed video was deleted; publication is refused.");
+    }
+  }
   if (job.publishedManifest) return job.publishedManifest as DeliveryManifest;
   const guest = guestMediaOf(job);
   if (guest) {
@@ -150,6 +164,12 @@ export async function publishManifest(
     const currentJob = jobSnapshot.data();
     if (!currentJob || currentJob.idempotencyKey !== idempotencyKey) {
       throw new BackendError("FORBIDDEN", "Publish idempotency key does not match the job.");
+    }
+    // Transactional recheck of the deletion tombstone: a deleteHostVideo
+    // racing the worker fails the publication instead of republishing. This
+    // precedes the idempotent-published fast path for the same reason.
+    if ((currentJob as Record<string, unknown>).hostDeleted === true) {
+      throw new BackendError("FORBIDDEN", "Seed video was deleted; publication is refused.");
     }
     if (currentJob.publishedManifest) return currentJob.publishedManifest as DeliveryManifest;
     if (currentJob.state !== "running") throw new BackendError("MANIFEST_MISMATCH", "Only a running job can publish a manifest.");

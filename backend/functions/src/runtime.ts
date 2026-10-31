@@ -6,6 +6,8 @@ import { createGenerationServices, GenerationServiceOptions } from "./generation
 import { createGuestListService } from "./guest_list";
 import { createGuestUploadService } from "./guest_upload";
 import { createJoinPartyService } from "./join_party";
+import { createHostJoinService } from "./host_join";
+import { createHostMediaService } from "./host_media";
 import { FakeVideoGenerationPort, createVideoGenerationProviderFromEnvironment } from "./providers/fake";
 import { CameraId, ProviderResult, VideoGenerationPort } from "./video_generation_port";
 
@@ -41,6 +43,12 @@ export interface RuntimeServices {
   acknowledgeDelivery: ReturnType<typeof createDeliveryServices>["acknowledgeDelivery"];
   listPartyDevices: ReturnType<typeof createGuestListService>["listPartyDevices"];
   joinParty: ReturnType<typeof createJoinPartyService>["joinParty"];
+  createHostInvite: ReturnType<typeof createHostJoinService>["createHostInvite"];
+  joinHost: ReturnType<typeof createHostJoinService>["joinHost"];
+  listHostVideos: ReturnType<typeof createHostMediaService>["listHostVideos"];
+  generateHostVideo: ReturnType<typeof createHostMediaService>["generateHostVideo"];
+  getHostVideoPreview: ReturnType<typeof createHostMediaService>["getHostVideoPreview"];
+  deleteHostVideo: ReturnType<typeof createHostMediaService>["deleteHostVideo"];
   requestGuestUpload: ReturnType<typeof createGuestUploadService>["requestGuestUpload"];
   completeGuestUpload: ReturnType<typeof createGuestUploadService>["completeGuestUpload"];
   getGuestMediaStatus: ReturnType<typeof createGuestUploadService>["getGuestMediaStatus"];
@@ -83,6 +91,14 @@ export function createRuntimeServices(options: RuntimeServiceOptions): RuntimeSe
     : undefined;
   const guestList = createGuestListService({ db: options.db });
   const joinPartyService = createJoinPartyService({ db: options.db });
+  const hostJoin = createHostJoinService({ db: options.db, ...(options.now ? { now: options.now } : {}) });
+  const hostMedia = createHostMediaService({
+    db: options.db,
+    bucket: options.bucket,
+    ...(options.now ? { now: options.now } : {}),
+    ...(options.signReadUrl ? { signPreviewUrl: options.signReadUrl } : {}),
+    ...(options.deleteDeliveryObject ? { deleteObject: options.deleteDeliveryObject } : {}),
+  });
   const guestUpload = createGuestUploadService({
     db: options.db,
     bucket: options.bucket,
@@ -147,6 +163,12 @@ export function createRuntimeServices(options: RuntimeServiceOptions): RuntimeSe
     acknowledgeDelivery: delivery.acknowledgeDelivery,
     listPartyDevices: guestList.listPartyDevices,
     joinParty: joinPartyService.joinParty,
+    createHostInvite: hostJoin.createHostInvite,
+    joinHost: hostJoin.joinHost,
+    listHostVideos: hostMedia.listHostVideos,
+    generateHostVideo: hostMedia.generateHostVideo,
+    getHostVideoPreview: hostMedia.getHostVideoPreview,
+    deleteHostVideo: hostMedia.deleteHostVideo,
     requestGuestUpload: guestUpload.requestGuestUpload,
     completeGuestUpload: guestUpload.completeGuestUpload,
     getGuestMediaStatus: guestUpload.getGuestMediaStatus,

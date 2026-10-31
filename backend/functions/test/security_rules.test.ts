@@ -96,6 +96,44 @@ test("anonymous clients cannot read or mutate guest consent and media records", 
   }
 });
 
+test("anonymous clients cannot read or mutate host invites and seed catalog records", { skip: !HAS_FIRESTORE_EMULATOR }, async () => {
+  const host = emulatorHost();
+  const rules = await readFile(resolve(__dirname, "../../firestore.rules"), "utf8");
+  const env: RulesTestEnvironment = await initializeTestEnvironment({
+    projectId: PROJECT_ID,
+    firestore: { host: host.host, port: host.port, rules },
+  });
+  try {
+    await env.withSecurityRulesDisabled(async (context) => {
+      const firestore = context.firestore();
+      await setDoc(doc(firestore, "parties/host-party"), { status: "active", activeChannelId: "main" });
+      await setDoc(doc(firestore, "parties/host-party/devices/tv-1"), { partyId: "host-party", status: "active" });
+      await setDoc(doc(firestore, "parties/host-party/hostInvites/invite-1"), {
+        tokenHash: "a".repeat(64), partyId: "host-party", channelId: "main", status: "pending",
+      });
+      await setDoc(doc(firestore, "parties/host-party/seedVideos/seed-1"), {
+        seedId: "seed-1", partyId: "host-party", channelId: "main", status: "ready",
+      });
+    });
+    const client = env.unauthenticatedContext().firestore();
+    await assertFails(getDoc(doc(client, "parties/host-party/hostInvites/invite-1")));
+    await assertFails(setDoc(doc(client, "parties/host-party/hostInvites/invite-1"), { status: "redeemed" }));
+    await assertFails(getDoc(doc(client, "parties/host-party/seedVideos/seed-1")));
+    await assertFails(setDoc(doc(client, "parties/host-party/seedVideos/seed-1"), { status: "deleted" }));
+    await assertFails(setDoc(doc(client, "parties/host-party/seedVideos/forged"), { status: "ready" }));
+  } finally {
+    await env.cleanup();
+  }
+});
+
+test("storage rules keep the host-preview prefix denied for direct access", async () => {
+  const rules = await readFile(resolve(__dirname, "../../storage.rules"), "utf8");
+  // Host previews ride the catch-all deny: no direct client reads/writes.
+  // Signed preview URLs bypass rules with backend validation, exactly like
+  // delivery URLs; the backend never persists them.
+  assert.ok(rules.includes("allow read, write: if false"), "storage rules deny direct access by default");
+});
+
 test("storage rules keep the guest-ingest prefix denied for direct access", async () => {
   const rules = await readFile(resolve(__dirname, "../../storage.rules"), "utf8");
   assert.ok(rules.includes("guests/{deviceId}/ingest"), "storage rules carry an explicit guest-ingest section");

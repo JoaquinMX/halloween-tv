@@ -84,10 +84,11 @@ export async function sweepExpiredMedia(
 
   const references = new Set<string>();
   const liveJobPairs = new Set<string>();
-  const [manifests, jobs, guestMedia] = await Promise.all([
+  const [manifests, jobs, guestMedia, seedVideos] = await Promise.all([
     db.collectionGroup("manifests").get(),
     db.collectionGroup("jobs").get(),
     db.collectionGroup("guestMedia").get(),
+    db.collectionGroup("seedVideos").get().catch(() => ({ docs: [] as Array<{ data(): FirebaseFirestore.DocumentData; ref: FirebaseFirestore.DocumentReference }> })),
   ]);
   // Guest consent inputs: live (unexpired, not withdrawn) ingest objects are
   // protected from the orphan sweep. Abandoned pending uploads and expired
@@ -144,6 +145,41 @@ export async function sweepExpiredMedia(
       if (typeof guest.objectPath === "string" && (guest.objectPath as string).startsWith("parties/")) {
         revokedPaths.add(guest.objectPath as string);
       }
+    }
+  }
+  // Host seed catalog: live (unexpired, not deleted) preview objects are
+  // protected from the orphan sweep; expired seeds transition and their
+  // preview objects are deleted. Direct client access stays denied by the
+  // catch-all rules; this only manages Admin SDK object lifetime.
+  let deletedSeedPreviews = 0;
+  for (const seedDoc of (seedVideos as { docs: Array<{ data(): FirebaseFirestore.DocumentData; ref: FirebaseFirestore.DocumentReference }> }).docs) {
+    const seed = seedDoc.data() as Record<string, unknown>;
+    const previews = Array.isArray(seed.previewPaths) ? seed.previewPaths.filter((p): p is string => typeof p === "string" && p.startsWith("parties/")) : [];
+    const expiry = expiryDate(seed.expiresAt);
+    const liveSeed = seed.status !== "deleted" && seed.status !== "failed" && expiry !== undefined && expiry > now;
+    if (liveSeed) {
+      for (const path of previews) references.add(path);
+      continue;
+    }
+    if ((seed.status !== "deleted" && seed.status !== "expired") && expiry !== undefined && expiry <= now) {
+      await seedDoc.ref.update({
+        status: "expired",
+        expiredAt: FieldValue.serverTimestamp(),
+      }).catch(() => undefined);
+    }
+    if (seed.status === "deleted" || seed.status === "expired" || (expiry !== undefined && expiry <= now)) {
+      for (const path of previews) {
+        try {
+          const [exists] = await bucket.file(path).exists();
+          if (!exists) continue;
+          await bucket.file(path).delete({ ignoreNotFound: true });
+          deletedSeedPreviews += 1;
+        } catch {
+          // Left for the next sweep; never counted as deleted.
+        }
+      }
+    } else {
+      for (const path of previews) references.add(path);
     }
   }
   for (const manifestDoc of manifests.docs) {
@@ -234,7 +270,7 @@ export async function sweepExpiredMedia(
     await file.delete({ ignoreNotFound: true });
     deletedOrphanObjects += 1;
   }
-  return { expiredJobs, deletedExpiredObjects, deletedOrphanObjects, expiredGuestInputs };
+  return { expiredJobs, deletedExpiredObjects, deletedOrphanObjects: deletedOrphanObjects + deletedSeedPreviews, expiredGuestInputs };
 }
 
 export function createRetentionService(db: Firestore, bucket: Bucket, clock?: () => Date) {

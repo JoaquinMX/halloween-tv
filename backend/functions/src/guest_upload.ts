@@ -415,6 +415,40 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
         if (Array.isArray(list)) for (const item of list) if (typeof item === "string" && item.startsWith("parties/")) attributable.add(item);
       }
     }
+    // Host seed catalog integration: previews retained for bound jobs are
+    // attributable derivatives too. They are queued for deletion here and
+    // their seed entries are failed closed so no preview is recreated and no
+    // deleted/withdrawn binding republishes (publish.ts rechecks the job
+    // tombstone transactionally).
+    try {
+      const seeds = await db.collection(`parties/${identity.partyId}/seedVideos`).get();
+      for (const seedDoc of seeds.docs) {
+        const seed = seedDoc.data() as Record<string, unknown>;
+        if (typeof seed.jobId !== "string" || !boundJobIds.includes(seed.jobId)) continue;
+        const previews = seed.previewPaths;
+        if (Array.isArray(previews)) {
+          for (const item of previews) if (typeof item === "string" && item.startsWith("parties/")) attributable.add(item);
+        }
+        if (seed.status !== "deleted") {
+          await seedDoc.ref.update({
+            status: "failed",
+            reconciliationReason: "GUEST_CONSENT_WITHDRAWN",
+            updatedAt: FieldValue.serverTimestamp(),
+          }).catch(() => undefined);
+        }
+        const boundJob = await db.doc(`parties/${identity.partyId}/jobs/${seed.jobId}`).get().catch(() => undefined);
+        if (boundJob?.exists && (boundJob.data() as Record<string, unknown>).hostDeleted !== true) {
+          await boundJob.ref.update({
+            hostDeleted: true,
+            reconciliationReason: "GUEST_CONSENT_WITHDRAWN",
+            timestamp: FieldValue.serverTimestamp(),
+          }).catch(() => undefined);
+        }
+      }
+    } catch {
+      // Best-effort: delivery paths additionally refuse withdrawn bindings,
+      // and retention retries revoked-manifest objects.
+    }
     // Published manifest clips attributable to a bound job are deliverable
     // until revoked: collect them here and delete the manifest doc below.
     let revokedManifestPaths: string[] = [];

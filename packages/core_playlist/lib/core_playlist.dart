@@ -58,6 +58,41 @@ const List<CctvSlot> cctvSlots = <CctvSlot>[
   CctvSlot(id: 'CAM-04', index: 3, room: 'storage room'),
 ];
 
+/// Supported CCTV manifest clip counts (configurable TV layouts).
+///
+/// Cycle-12: the TV displays 1, 2, or 4 cameras. `cameraCount` (a SettingsPort
+/// display cap) never changes what the backend publishes — generation presets
+/// keep producing 4 clips and reduced layouts still prepare + ACK the complete
+/// received manifest — but validators on both sides accept exactly these
+/// counts so 1/2-camera manifests (first-N canonical slots) flow through the
+/// real mapping, preparation, durable-cache, delivery, and ACK paths.
+/// Four remains the default when the setting is absent/invalid/unreadable.
+const List<int> kSupportedCctvClipCounts = <int>[1, 2, 4];
+
+/// Default clip count when no valid `cameraCount` setting is stored.
+const int kDefaultCctvClipCount = 4;
+
+/// True when [count] is a supported manifest clip count (1, 2, or 4).
+bool isSupportedCctvClipCount(int count) =>
+    kSupportedCctvClipCounts.contains(count);
+
+/// Camera ids expected for a [count]-clip manifest: the first [count]
+/// canonical slot ids in wall order (e.g. 2 → {CAM-01, CAM-02}).
+///
+/// Throws [ArgumentError] for unsupported counts.
+List<String> expectedCctvCameraIds(int count) {
+  if (!isSupportedCctvClipCount(count)) {
+    throw ArgumentError.value(
+      count,
+      'count',
+      'must be one of $kSupportedCctvClipCounts',
+    );
+  }
+  return <String>[
+    for (var i = 0; i < count; i++) cctvSlots[i].id,
+  ];
+}
+
 /// Valid CCTV camera ids, derived from [cctvSlots].
 ///
 /// Kept for callers that only need the id set; prefer [cctvSlots] (or
@@ -401,12 +436,15 @@ PlaybackManifest parseManifest(Map<String, Object?> json) {
 
 /// Validates CCTV manifest rules.
 ///
-/// Enforces: non-empty party/channel, version > 0, exactly 4 clips with
-/// unique ids (each at most [kMaxClipIdLength] characters) and unique
-/// cameraId each in [kCctvCameraIds] (derived from [cctvSlots]), sane sha256
-/// (64 hex chars), sizeBytes > 0 and positive duration. Clip `label` values
-/// are config-driven display strings (owner Q3) and are not length-checked
-/// here — the tile HUD ellipsizes them.
+/// Enforces: non-empty party/channel, version > 0, exactly 1, 2, or 4 clips
+/// (the supported TV layouts; four remains the default) with unique ids
+/// (each at most [kMaxClipIdLength] characters) and unique cameraId values
+/// whose set equals the first N canonical slot ids in wall order
+/// ([expectedCctvCameraIds]; reordered valid clips remain accepted, gaps such
+/// as {CAM-01, CAM-03} are rejected), sane sha256 (64 hex chars), sizeBytes
+/// > 0 and positive duration. Clip `label` values are config-driven display
+/// strings (owner Q3) and are not length-checked here — the tile HUD
+/// ellipsizes them.
 Result<PlaybackManifest> validateCctvManifest(PlaybackManifest m) {
   if (m.partyId.trim().isEmpty) {
     return const Err<PlaybackManifest>('partyId must be non-empty');
@@ -417,11 +455,15 @@ Result<PlaybackManifest> validateCctvManifest(PlaybackManifest m) {
   if (m.version <= 0) {
     return const Err<PlaybackManifest>('version must be > 0');
   }
-  if (m.clips.length != 4) {
+  if (!isSupportedCctvClipCount(m.clips.length)) {
     return Err<PlaybackManifest>(
-      'cctv manifest must have exactly 4 clips, got ${m.clips.length}',
+      'cctv manifest must have 1, 2, or 4 clips (exactly 4 clips is the '
+      'default layout), got ${m.clips.length}',
     );
   }
+  final Set<String> expectedCameras = expectedCctvCameraIds(
+    m.clips.length,
+  ).toSet();
   final seenCameras = <String>{};
   final seenClipIds = <String>{};
   for (final clip in m.clips) {
@@ -459,6 +501,17 @@ Result<PlaybackManifest> validateCctvManifest(PlaybackManifest m) {
     if (clip.mimeType.trim().isEmpty) {
       return const Err<PlaybackManifest>('mimeType must be non-empty');
     }
+  }
+  // Prefix rule: a 1/2/4-clip manifest must carry exactly the first N
+  // canonical cameras (reordered clips are fine; gaps like {CAM-01, CAM-03}
+  // for count 2 are rejected).
+  if (seenCameras.length != expectedCameras.length ||
+      !seenCameras.containsAll(expectedCameras)) {
+    return Err<PlaybackManifest>(
+      'camera set ${seenCameras.toList()..sort()} must equal the first '
+      '${m.clips.length} canonical cameras '
+      '${expectedCameras.toList()..sort()}',
+    );
   }
   return Ok<PlaybackManifest>(m);
 }

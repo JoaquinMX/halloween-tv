@@ -187,8 +187,7 @@ void main() {
 
   test(
     'ACK response must identify the requested version and completed purge',
-    () async {
-      final Map<String, String> hashes = <String, String>{
+    () async {      final Map<String, String> hashes = <String, String>{
         for (final CctvSlot slot in cctvSlots)
           slot.id: String.fromCharCode(96 + slot.index + 1) * 64,
       };
@@ -243,6 +242,136 @@ void main() {
       );
     },
   );
+
+  test(
+    '1/2/4-camera delivery URL and ACK validation through the real client',
+    () async {
+      for (final int count in <int>[1, 2, 4]) {
+        final List<String> cameras = expectedCctvCameraIds(count);
+        final Map<String, String> hashes = <String, String>{
+          for (final String camera in cameras) camera: 'a' * 64,
+        };
+        final _FixtureCallable invoker = _FixtureCallable(<String, Object?>{
+          'getDeliveryUrls': <String, Object?>{
+            'manifestVersion': 3,
+            'manifestHash': 'c' * 64,
+            'clips': <Map<String, Object?>>[
+              for (final String camera in cameras)
+                <String, Object?>{
+                  'cameraId': camera,
+                  'sha256': hashes[camera],
+                  'url': 'https://delivery.test/$camera.mp4',
+                  'expiresAt': '2030-01-01T00:00:00.000Z',
+                },
+            ],
+          },
+          'acknowledgeDelivery': <String, Object?>{
+            'ackId': 'backend-ack-$count',
+            'manifestVersion': 3,
+            'purged': true,
+          },
+        });
+        final FirebaseDeliveryClient client = FirebaseDeliveryClient(
+          identity: FirebaseTvIdentity(partyId: 'pilot', deviceId: 'tv-pilot'),
+          callableInvoker: invoker,
+          now: () => DateTime.utc(2026, 10, 29),
+        );
+        final FirebaseDeliveryUrls urls = await client.getDeliveryUrls(
+          channelId: 'main',
+        );
+        expect(urls.clips, hasLength(count));
+        expect(
+          urls.clips.map((clip) => clip.cameraId).toList(),
+          cameras,
+        );
+        // ACK hashes must exactly match the received manifest: the complete
+        // received set is ACKed (reduced layouts still ACK everything).
+        await client.acknowledge(
+          partyId: 'pilot',
+          channelId: 'main',
+          manifestVersion: 3,
+          verifiedClipHashes: hashes,
+        );
+        expect(invoker.calls.last.$2['clipHashes'], hashes);
+      }
+    },
+  );
+
+  test('delivery and ACK reject unsupported counts, gaps, and extras', () async {
+    FirebaseDeliveryClient clientFor(Object? response) => FirebaseDeliveryClient(
+      identity: FirebaseTvIdentity(partyId: 'pilot', deviceId: 'tv-pilot'),
+      callableInvoker: _OneResponseCallable(response),
+      now: () => DateTime.utc(2026, 10, 29),
+    );
+    Map<String, Object?> clip(String camera) => <String, Object?>{
+      'cameraId': camera,
+      'sha256': 'a' * 64,
+      'url': 'https://delivery.test/$camera.mp4',
+      'expiresAt': '2030-01-01T00:00:00.000Z',
+    };
+    // 3 clips: unsupported count.
+    await expectLater(
+      clientFor(<String, Object?>{
+        'manifestVersion': 1,
+        'manifestHash': 'c' * 64,
+        'clips': [clip('CAM-01'), clip('CAM-02'), clip('CAM-03')],
+      }).getDeliveryUrls(channelId: 'main'),
+      throwsFormatException,
+    );
+    // Gap: {CAM-01, CAM-03} is not the first-2 prefix.
+    await expectLater(
+      clientFor(<String, Object?>{
+        'manifestVersion': 1,
+        'manifestHash': 'c' * 64,
+        'clips': [clip('CAM-01'), clip('CAM-03')],
+      }).getDeliveryUrls(channelId: 'main'),
+      throwsFormatException,
+    );
+    // Duplicate camera.
+    await expectLater(
+      clientFor(<String, Object?>{
+        'manifestVersion': 1,
+        'manifestHash': 'c' * 64,
+        'clips': [clip('CAM-01'), clip('CAM-01')],
+      }).getDeliveryUrls(channelId: 'main'),
+      throwsFormatException,
+    );
+    // ACK with an extra hash beyond the 2-clip prefix is rejected client-side.
+    await expectLater(
+      clientFor(<String, Object?>{
+        'ackId': 'ack',
+        'manifestVersion': 1,
+        'purged': true,
+      }).acknowledge(
+        partyId: 'pilot',
+        channelId: 'main',
+        manifestVersion: 1,
+        verifiedClipHashes: <String, String>{
+          'CAM-01': 'a' * 64,
+          'CAM-02': 'a' * 64,
+          'CAM-03': 'a' * 64,
+        },
+      ),
+      throwsArgumentError,
+    );
+    // ACK with a gapped 2-set is rejected client-side.
+    await expectLater(
+      clientFor(<String, Object?>{
+        'ackId': 'ack',
+        'manifestVersion': 1,
+        'purged': true,
+      }).acknowledge(
+        partyId: 'pilot',
+        channelId: 'main',
+        manifestVersion: 1,
+        verifiedClipHashes: <String, String>{
+          'CAM-01': 'a' * 64,
+          'CAM-03': 'a' * 64,
+        },
+      ),
+      throwsArgumentError,
+    );
+  });
 }
 
 final class _OneResponseCallable implements FirebaseCallableInvoker {

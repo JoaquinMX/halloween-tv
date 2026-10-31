@@ -39,6 +39,36 @@ test("TTL sweep expires due jobs, deletes expired media, and removes orphan obje
   }
 });
 
+test("host seed previews are protected while live and purged after expiry", { skip: !HAS_FIRESTORE_EMULATOR }, async () => {
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  const livePath = `parties/${partyId}/hostPreviews/seed-live/CAM-01.mp4`;
+  const deadPath = `parties/${partyId}/hostPreviews/seed-dead/CAM-01.mp4`;
+  try {
+    await seedParty(db, partyId, "tv-1", "main");
+    await db.doc(`parties/${partyId}/seedVideos/seed-live`).set({
+      seedId: "seed-live", partyId, channelId: "main", jobId: "hv-seed-live",
+      status: "ready", previewPaths: [livePath],
+      expiresAt: Timestamp.fromDate(new Date(Date.now() + 60 * 60 * 1000)),
+    });
+    await db.doc(`parties/${partyId}/seedVideos/seed-dead`).set({
+      seedId: "seed-dead", partyId, channelId: "main", jobId: "hv-seed-dead",
+      status: "ready", previewPaths: [deadPath],
+      expiresAt: Timestamp.fromDate(new Date(Date.now() - 1000)),
+    });
+    await bucket.file(livePath).save(Buffer.from("live-preview"));
+    await bucket.file(deadPath).save(Buffer.from("dead-preview"));
+    const result = await sweepExpiredMedia(db, bucket, new Date());
+    assert.equal((await bucket.file(livePath).exists())[0], true, "live seed previews must be protected from the orphan sweep");
+    assert.equal((await bucket.file(deadPath).exists())[0], false, "expired seed previews must be purged");
+    assert.equal((await db.doc(`parties/${partyId}/seedVideos/seed-dead`).get()).data()?.status, "expired");
+    assert.ok(result.deletedOrphanObjects >= 1);
+  } finally {
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+  }
+});
+
 test("revoked-manifest objects are retried for deletion, never protected", { skip: !HAS_FIRESTORE_EMULATOR }, async () => {
   const { app, db, bucket } = await createEmulatorContext();
   const partyId = randomPartyId();

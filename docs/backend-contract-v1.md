@@ -34,6 +34,12 @@ an idempotency key.
 | `completeGuestUpload` | callable | party/device-scoped guest |
 | `getGuestMediaStatus` | callable | party/device-scoped guest |
 | `withdrawGuestMedia` | callable | party/device-scoped guest |
+| `createHostInvite` | callable | registered TV only |
+| `joinHost` | callable | phone with a valid host invite |
+| `listHostVideos` | callable | registered host only |
+| `generateHostVideo` | callable | registered host only |
+| `getHostVideoPreview` | callable | registered host only |
+| `deleteHostVideo` | callable | registered host only |
 
 Guest ingest objects live under
 `parties/{partyId}/guests/{deviceId}/ingest/{submissionId}/photo.jpg` with
@@ -45,18 +51,105 @@ Firestore guest consent/media docs are callable-only (explicit deny in
 
 Firestore layout: `parties/{partyId}` (`ownerUid`, `status`, `activeChannelId`),
 `channels/{channelId}`, `manifests/current_{channelId}` (`version`,
-`cameraClips[4]`, `schemaVersion`, stable publication `createdAt`),
+`cameraClips[1|2|4]`, `schemaVersion`, stable publication `createdAt`),
 `jobs/{jobId}` (state machine
 `queued → running → ready → delivering → purged`, plus `failed`/`expired` with
 sanitized `errorCode`, `modelId`, `costEstimate`), `devices/{deviceId}`,
-`deliveryAcks/{ackId}`.
+`deliveryAcks/{ackId}`, `hostInvites/{inviteId}` (token hash, party/channel/
+expiry binding), `seedVideos/{seedId}` (status, job link, preview refs).
 
 Storage layout: `parties/{partyId}/channels/{channelId}/delivery/{version}/{camera}.mp4`
 (served only via short-lived signed URLs minted after callable checks; rules
-deny all direct client reads/writes). `ingest/` and `generated/{jobId}/`
+deny all direct client reads/writes). `hostPreviews/{seedId}/{camera}.mp4`
+are separately referenced preview objects with their own TTL metadata (same
+deny-all rules; signed on demand, never persisted). `ingest/` and
+`generated/{jobId}/`
 prefixes are worker-internal. Lifecycle TTL (`storage.lifecycle.json`,
 `daysSinceCustomTime: 1` on `parties/`) is defense-in-depth behind
 `sweepExpiredMedia`.
+
+## Camera counts (configurable 1/2/4 layouts)
+
+Supported manifest clip counts are exactly 1, 2, or 4; four remains the
+default when the `cameraCount` setting is absent, invalid, or unreadable.
+`cameraCount` (a SettingsPort display cap, owned by other partitions) never
+changes what the backend publishes: generation presets keep producing 4
+clips, and reduced layouts still prepare + ACK the complete received
+manifest. Validators on both sides (`validateCctvManifest` in
+`core_playlist`, `validateCanonicalClips`/`parseAck` in `contracts.ts`,
+Dart delivery URL/ACK checks in `firebase_delivery_client.dart`) require the
+camera set to equal the first-N canonical slots in wall order
+(`CAM-01` for 1; `CAM-01`–`CAM-02` for 2; all four for 4). Reordered valid
+clips remain accepted; unsupported counts, gaps (e.g. `{CAM-01, CAM-03}`
+for count 2), duplicates, unknown cameras, and invalid existing metadata
+are rejected. ACK validation is exact at acceptance: the hash set must equal
+the actual manifest's camera set with identical digests, so extra hashes are
+rejected both at shape time (`parseAck`) and against the stored manifest
+(`canonicalClipsMatch`) and on accepted-ACK replay. Legacy four-camera
+fixture hashes and the ACK idempotency key are unchanged
+(`test/fixtures/backend_contract_v1.json`); count vectors live in
+`test/fixtures/cctv_counts_v1.json`.
+
+## Host entry and administration
+
+The companion uses a dedicated host entry screen (`HostEntryScreen` with
+Scan Host QR + an explicit Join-as-guest route; companion/TV UI owned by
+other partitions). Rationale: guest PIN admission is intentionally broad —
+anyone who can see the TV screen can self-register as a guest with full
+party-scoped read/generate/ACK power — so host administration must never be
+reachable through the guest PIN or a client-supplied role string. A separate
+server-minted, short-lived invite capability keeps the two routes visibly
+distinct and makes the privilege boundary auditable: the QR payload, the
+Firestore role, and the callable gates all distinguish host from guest.
+
+- `createHostInvite { partyId, deviceId, channelId }` (TV-only caller:
+  registered device with `role: "tv"`, else `FORBIDDEN`) mints a short-lived
+  (`HOST_INVITE_TTL_MS`, 5 minutes) invite. The token (`hi-…`) is returned
+  once; only its SHA-256 hash is stored at
+  `parties/{partyId}/hostInvites/{inviteId}`, bound to party/channel/expiry.
+- `joinHost { partyId, deviceId, channelId, inviteToken }` redeems the invite
+  transactionally for a separate phone identity with the server-assigned
+  host role. Same-device redemption retries are idempotent (`created:
+  false`); other-device replay, expiry, cross-party/cross-channel reuse,
+  guest PIN reuse (six-digit strings are shape-rejected as tokens), and
+  client-supplied role fields (ignored; the role is always written
+  server-side) can never grant host access.
+- Legacy `joinParty` remains guest-only: it writes `role: "guest"`
+  server-side, rejects re-registration of non-guest (host/tv) device docs,
+  and never upgrades a role.
+- Every administrative operation (`listHostVideos`, `generateHostVideo`,
+  `getHostVideoPreview`, `deleteHostVideo`) revalidates the registered host
+  role and party/channel scope (`assertRegisteredHostDevice`); guests get
+  `FORBIDDEN`. Role examples live in `test/fixtures/join_roles_v1.json`.
+
+## Host seed catalog
+
+`listHostVideos` serves a server-backed seed catalog at
+`parties/{partyId}/seedVideos/{seedId}` containing generation status and
+camera video references. `generateHostVideo { partyId, deviceId, channelId,
+seedId, idempotencyKey, presetId?, guestMediaId? }` is a scoped entry point
+to the existing fixed-preset queue with the same idempotency, single-flight
+budget, and consent checks as `requestGeneration` (the backing job is
+`hv-{seedId}`); queue deduplication and rebinding refusal behave identically.
+`getHostVideoPreview { …, seedId }` materializes separately referenced,
+TTL-limited (`HOST_PREVIEW_TTL_MS`, 24h) preview objects under
+`hostPreviews/{seedId}/…` before delivery objects can be ACK-purged and
+signs them on demand without persisting signed URLs.
+
+Deletion granularity and expiry: `deleteHostVideo { …, seedIds[] }`
+(deleted per selected seed id) removes the seed entries and their associated
+preview + delivery objects, revokes an affected current manifest whose jobId
+matches a deleted seed, and preserves accounting records (costLogs/usage
+ledger rows are never deleted). A job tombstone (`hostDeleted`) is written
+transactionally so deletion/withdrawal races can neither republish (the
+publish path rechecks the tombstone inside its transaction) nor recreate
+previews (deleted seeds return `NOT_FOUND` and never copy again). Guest
+withdrawal of a bound submission deletes retained host previews, fails the
+bound seed closed, and tombstones the job; the retention sweep protects live
+seed previews from the orphan pass and purges expired/deleted ones. Direct
+client access to invites, seeds, and previews remains denied (callable-only
+Firestore docs and Storage objects; previews are served only through signed
+URLs).
 
 ## Payloads
 
@@ -76,13 +169,15 @@ prefixes are worker-internal. Lifecycle TTL (`storage.lifecycle.json`,
   current version for the requested active channel. Older delivery versions
   are never signed. Expired manifest/clip → `CLIP_EXPIRED`.
 - `acknowledgeDelivery { partyId, deviceId, channelId, manifestVersion, clipHashes }`
-  — `clipHashes` is a map keyed by camera ID (`CAM-01` through `CAM-04`) and
-  must carry exactly one canonical SHA-256 hash per camera. A first ACK must
-  match the unexpired current manifest, else `MANIFEST_MISMATCH` or
-  `CLIP_EXPIRED`. The accepted ACK stores the job ID and its four validated
+  — `clipHashes` is a map keyed by camera ID and must carry exactly one
+  canonical SHA-256 hash per camera for a supported layout (1, 2, or 4
+  clips, first-N canonical prefix; four is the default). A first ACK must
+  match the unexpired current manifest exactly — same camera set, same
+  hashes — else `MANIFEST_MISMATCH` or
+  `CLIP_EXPIRED`. The accepted ACK stores the job ID and its validated
   version-scoped object paths and hashes. Repeats revalidate registration and
   hashes, return the same `ackId`, and retry only those stored paths even after
-  expiry or a newer manifest publication. A conflicting hash is rejected;
+  expiry or a newer manifest publication. A conflicting or extra hash is rejected;
   objects belonging to a newer version are never purged by an older ACK.
 
 ## QR join (PIN-gated self-registration)
@@ -265,20 +360,28 @@ credential setup are outside this contract change.
 
 ## Tests
 
-`contracts.test.ts` (payload validation + in-flight/idempotency/error paths),
+`contracts.test.ts` (payload validation + 1/2/4 prefix checks + host parser
+shape checks + in-flight/idempotency/error paths),
 `backend_contract_fixture.test.ts` (shared JSON fixture through parsing, hashing,
-callable service paths, delivery, and ACK), `runtime.test.ts` (disabled default,
+callable service paths, delivery, and ACK, plus the `cctv_counts_v1` count
+vectors with legacy four-camera hash preservation), `runtime.test.ts` (disabled default,
 queue failure, and fake four-camera generation through handler composition),
-`security_rules.test.ts` (party/device-scoped registration reads, denied client
+`host_join.test.ts` (TV-only invite minting, transactional host redemption,
+idempotent retry, replay/expiry/PIN/role-forgery denial, guest-only legacy
+join), `host_media.test.ts` (seed catalog queue/idempotency, preview
+materialization and ACK survival, deletion outcomes and race protection),
+`host_admin_e2e.test.ts` (exported callable coverage and the full host flow
+through real runtime generation with the fixture-backed provider and emulator
+storage), `security_rules.test.ts` (party/device-scoped registration reads, denied client
 registration writes, denied device listing and party/PIN reads, denied manifest
-reads), `seed_join.test.ts` (PIN provisioning preview/apply/idempotency/omit and
+reads, denied host-invite/seed direct access), `seed_join.test.ts` (PIN provisioning preview/apply/idempotency/omit and
 refusal paths against the emulator), `qr_join_e2e.test.ts` (PIN-gated join,
 rejoin, TV listing, and legacy manifest read through the real exported Functions
 emulator endpoints with no auth), `delivery.test.ts` (URL scoping, manifest callable, ACK hash
-checks, bounded retry purge), and `retention.test.ts` (TTL transitions, orphan
-sweeper). Guest flows are covered by `guest_upload.test.ts` (consent refusal,
+checks incl. 1/2/4 exact-match and extra-hash rejection, bounded retry purge), and `retention.test.ts` (TTL transitions, orphan
+sweeper, host preview protection/expiry). Guest flows are covered by `guest_upload.test.ts` (consent refusal,
 completion, scoping, withdrawal, deletion retry, TTL/orphan protection,
-generation refusal), `guest_upload_e2e.test.ts` (real-bytes endpoint lifecycle),
+generation refusal, retained host-preview cleanup), `guest_upload_e2e.test.ts` (real-bytes endpoint lifecycle),
 `guest_media_generation.test.ts` (one provider camera plus three fixture slots,
 truthful usage, withdrawal races), and `alibaba.test.ts` (offline guest-image
 serialization fixture, zero network). Emulator-backed cases skip when `FIRESTORE_EMULATOR_HOST` is unset;

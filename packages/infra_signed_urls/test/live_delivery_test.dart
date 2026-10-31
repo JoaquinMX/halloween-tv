@@ -9,11 +9,14 @@ import 'package:infra_signed_urls/infra_signed_urls.dart';
 import 'support/https_fixture_server.dart';
 
 final class _CallableFake implements FirebaseCallableInvoker {
-  _CallableFake(this.server, this.sha256);
+  _CallableFake(this.server, this.sha256, {this.count = 4});
 
   final HttpsFixtureServer server;
   final String sha256;
+  final int count;
   final List<(String, Map<String, Object?>)> calls = [];
+
+  List<String> get cameras => expectedCctvCameraIds(count);
 
   @override
   Future<Object?> call(String name, Map<String, Object?> payload) async {
@@ -25,9 +28,9 @@ final class _CallableFake implements FirebaseCallableInvoker {
         'manifestVersion': 7,
         'manifestHash': 'f' * 64,
         'clips': <Map<String, Object?>>[
-          for (final CctvSlot slot in cctvSlots)
+          for (final String camera in cameras)
             <String, Object?>{
-              'cameraId': slot.id,
+              'cameraId': camera,
               'sha256': sha256,
               'url': server
                   .uriFor(refreshed ? '/fresh' : '/expired')
@@ -136,6 +139,102 @@ void main() {
             'CAM-04': 'd' * 64,
           });
           expect(ackPayload['manifestVersion'], 7);
+        } finally {
+          await cacheRoot.delete(recursive: true);
+        }
+      } finally {
+        httpClient.close(force: true);
+        await server.close();
+      }
+    },
+  );
+
+  test(
+    '2-camera delivery URL refresh, download, and exact ACK set',
+    () async {
+      final List<int> bytes = <int>[2, 4, 6, 8];
+      final String hash = sha256Hex(bytes);
+      final HttpsFixtureServer server = await HttpsFixtureServer.start(
+        responses: <String, HttpsFixtureResponse>{
+          '/expired': const HttpsFixtureResponse(
+            statusCode: HttpStatus.forbidden,
+          ),
+          '/fresh': HttpsFixtureResponse(
+            statusCode: HttpStatus.ok,
+            body: bytes,
+          ),
+        },
+      );
+      final HttpClient httpClient = testHttpClient();
+      try {
+        final _CallableFake callable = _CallableFake(server, hash, count: 2);
+        final FirebaseDeliveryClient delivery = FirebaseDeliveryClient(
+          identity: FirebaseTvIdentity(partyId: 'pilot', deviceId: 'tv-pilot'),
+          callableInvoker: callable,
+          now: () => DateTime.utc(2026, 10, 29),
+        );
+        final FirebaseUrlSigner signer = FirebaseUrlSigner(
+          deliveryClient: delivery,
+          channelId: 'main',
+        );
+        final ClipDescriptor target = ClipDescriptor(
+          id: 'cam-one',
+          cameraId: 'CAM-01',
+          storageObjectId: 'parties/pilot/delivery/CAM-01.mp4',
+          sha256: hash,
+          sizeBytes: bytes.length,
+          duration: const Duration(seconds: 2),
+          mimeType: 'video/mp4',
+        );
+        final Uri initialUrl = await signer.signFor(target);
+        final Directory cacheRoot = await Directory.systemTemp.createTemp(
+          'delivery-cache-2cam-',
+        );
+        try {
+          final HttpsMediaDownloader downloader = HttpsMediaDownloader(
+            httpClient: httpClient,
+            expiredUrlRefresher: (clip, _) => signer.signFor(clip),
+          );
+          final CachedMedia cached = await downloader.downloadAndCommit(
+            clip: target,
+            source: initialUrl,
+            cacheStore: FileCacheStore(cacheRoot),
+          );
+          expect(await File(cached.localRef).readAsBytes(), bytes);
+          // The 2-clip ACK set exactly matches the received prefix.
+          await delivery.acknowledge(
+            partyId: 'pilot',
+            channelId: 'main',
+            manifestVersion: 7,
+            verifiedClipHashes: <String, String>{
+              'CAM-01': 'a' * 64,
+              'CAM-02': 'b' * 64,
+            },
+          );
+          final (String ackName, Map<String, Object?> ackPayload) =
+              callable.calls.last;
+          expect(ackName, 'acknowledgeDelivery');
+          expect(ackPayload['clipHashes'], <String, String>{
+            'CAM-01': 'a' * 64,
+            'CAM-02': 'b' * 64,
+          });
+          // An extra hash beyond the received prefix is rejected before any
+          // callable is issued.
+          final int callsBefore = callable.calls.length;
+          await expectLater(
+            delivery.acknowledge(
+              partyId: 'pilot',
+              channelId: 'main',
+              manifestVersion: 7,
+              verifiedClipHashes: <String, String>{
+                'CAM-01': 'a' * 64,
+                'CAM-02': 'b' * 64,
+                'CAM-03': 'c' * 64,
+              },
+            ),
+            throwsArgumentError,
+          );
+          expect(callable.calls, hasLength(callsBefore));
         } finally {
           await cacheRoot.delete(recursive: true);
         }

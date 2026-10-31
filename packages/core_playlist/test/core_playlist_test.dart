@@ -385,6 +385,123 @@ void main() {
     });
   });
 
+  group('cctv clip counts (configurable 1/2/4 layouts)', () {
+    List<ClipDescriptor> firstN(int n) => <ClipDescriptor>[
+      for (var i = 1; i <= n; i++) clipAt(i),
+    ];
+
+    test('supported counts, default, and expected prefixes', () {
+      expect(kSupportedCctvClipCounts, <int>[1, 2, 4]);
+      expect(kDefaultCctvClipCount, 4);
+      expect(isSupportedCctvClipCount(1), isTrue);
+      expect(isSupportedCctvClipCount(2), isTrue);
+      expect(isSupportedCctvClipCount(4), isTrue);
+      expect(isSupportedCctvClipCount(0), isFalse);
+      expect(isSupportedCctvClipCount(3), isFalse);
+      expect(isSupportedCctvClipCount(5), isFalse);
+      expect(expectedCctvCameraIds(1), <String>['CAM-01']);
+      expect(expectedCctvCameraIds(2), <String>['CAM-01', 'CAM-02']);
+      expect(
+        expectedCctvCameraIds(4),
+        <String>['CAM-01', 'CAM-02', 'CAM-03', 'CAM-04'],
+      );
+      expect(() => expectedCctvCameraIds(3), throwsArgumentError);
+    });
+
+    test('1, 2, and 4-clip manifests validate through the real path', () {
+      for (final n in <int>[1, 2, 4]) {
+        final m = manifest(clips: firstN(n));
+        final r = validateCctvManifest(m);
+        expect(r.isOk, isTrue, reason: '$n-clip manifest should validate');
+        // JSON round-trip preserves the count and still validates.
+        final reparsed = parseManifest(m.toJson());
+        expect(reparsed.clips, hasLength(n));
+        expect(validateCctvManifest(reparsed).isOk, isTrue);
+      }
+    });
+
+    test('reordered 1/2/4-clip manifests remain accepted', () {
+      expect(
+        validateCctvManifest(manifest(clips: firstN(2).reversed.toList())).isOk,
+        isTrue,
+      );
+      expect(
+        validateCctvManifest(
+          manifest(
+            clips: <ClipDescriptor>[clipAt(4), clipAt(2), clipAt(1), clipAt(3)],
+          ),
+        ).isOk,
+        isTrue,
+      );
+    });
+
+    test('unsupported counts, gaps, duplicates, and unknown cameras reject', () {
+      for (final count in <int>[0, 3, 5, 6]) {
+        final clips = <ClipDescriptor>[
+          for (var i = 1; i <= count; i++)
+            ClipDescriptor(
+              id: 'clip-$i',
+              cameraId: 'CAM-0$i',
+              storageObjectId: 'obj-$i',
+              sha256: sha('clip-$i'),
+              sizeBytes: 10,
+              duration: const Duration(seconds: 5),
+              mimeType: 'video/mp4',
+            ),
+        ];
+        final r = validateCctvManifest(manifest(clips: clips));
+        expect(r.isErr, isTrue, reason: 'count $count should be rejected');
+      }
+      // Gap: {CAM-01, CAM-03} is not the first-2 prefix.
+      final gap = manifest(
+        clips: <ClipDescriptor>[clipAt(1), clipAt(3)],
+      );
+      final gapResult = validateCctvManifest(gap);
+      expect(gapResult.isErr, isTrue);
+      expect(
+        (gapResult as Err<PlaybackManifest>).message,
+        contains('first 2'),
+      );
+      // {CAM-02} alone is not the first-1 prefix.
+      expect(validateCctvManifest(manifest(clips: <ClipDescriptor>[clipAt(2)])).isErr, isTrue);
+      // Duplicate clip ids within a 2-clip manifest.
+      final dupId = <ClipDescriptor>[clipAt(1), clipAt(1)];
+      expect(validateCctvManifest(manifest(clips: dupId)).isErr, isTrue);
+      // Unknown camera within an otherwise supported count.
+      final unknown = <ClipDescriptor>[
+        clipAt(1),
+        ClipDescriptor(
+          id: 'clip-x',
+          cameraId: 'CAM-05',
+          storageObjectId: 'obj-x',
+          sha256: sha('clip-x'),
+          sizeBytes: 10,
+          duration: const Duration(seconds: 5),
+          mimeType: 'video/mp4',
+        ),
+      ];
+      final unknownResult = validateCctvManifest(manifest(clips: unknown));
+      expect(unknownResult.isErr, isTrue);
+      expect(
+        (unknownResult as Err<PlaybackManifest>).message,
+        contains('CAM-05'),
+      );
+      // Invalid existing metadata still rejected at supported counts.
+      final badSha = <ClipDescriptor>[
+        const ClipDescriptor(
+          id: 'clip-01',
+          cameraId: 'CAM-01',
+          storageObjectId: 'obj-01',
+          sha256: 'not-a-hash',
+          sizeBytes: 10,
+          duration: Duration(seconds: 5),
+          mimeType: 'video/mp4',
+        ),
+      ];
+      expect(validateCctvManifest(manifest(clips: badSha)).isErr, isTrue);
+    });
+  });
+
   group('clip labels (config-driven, owner Q3)', () {
     ClipDescriptor labeled(int i, String? label) => ClipDescriptor(
       id: 'clip-0$i',

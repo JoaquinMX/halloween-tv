@@ -38,8 +38,11 @@ final class _BackendCallable
       );
       response['manifestVersion'] = currentDeliveryVersion;
       response['manifestHash'] = 'f' * 64;
+      // The delivery set mirrors the current manifest's camera prefix so
+      // 1/2/4 manifests flow through the same callable path.
       response['clips'] = <Map<String, Object?>>[
-        for (final CctvSlot slot in cctvSlots) _deliveryClip(slot.id),
+        for (final String cameraId in _currentCameraIds)
+          _deliveryClip(cameraId),
       ];
       return response;
     }
@@ -47,6 +50,23 @@ final class _BackendCallable
       await onAcknowledgement?.call(payload);
       if (rejectAcknowledgements) {
         throw StateError('backend rejected stale acknowledgement');
+      }
+      // Exact-match gate (mirrors backend canonicalClipsMatch): the ACK hash
+      // set must equal the current manifest's camera prefix with identical
+      // digests — extras and substitutions are rejected, never purged.
+      final Map<String, String> expected = <String, String>{
+        for (final Object? entry in (currentDocument['cameraClips']! as List))
+          (entry! as Map)['cameraId'].toString():
+              (entry as Map)['sha256'].toString(),
+      };
+      final Map<String, Object?> sent = Map<String, Object?>.from(
+        payload['clipHashes']! as Map,
+      );
+      if (sent.length != expected.length ||
+          !expected.keys.every(
+            (camera) => sent[camera] == expected[camera],
+          )) {
+        throw StateError('ACK hash set does not match the current manifest');
       }
       return <String, Object?>{
         'ackId': 'ack-${payload['manifestVersion']}',
@@ -83,6 +103,10 @@ final class _BackendCallable
     };
   }
 
+  List<String> get _currentCameraIds => (currentDocument['cameraClips']! as List<Object?>)
+      .map((clip) => (clip as Map)['cameraId']! as String)
+      .toList();
+
   HttpsFixtureServer? _server;
 
   set server(HttpsFixtureServer value) => _server = value;
@@ -99,17 +123,21 @@ Map<String, Object?> _backendManifest({
   required Map<String, Object?> fixture,
   required int version,
   required Map<String, List<int>> bytesByCamera,
+  int? count,
 }) {
   final Map<String, Object?> template = Map<String, Object?>.from(
     fixture['manifest']! as Map,
   );
   final String partyId = template['partyId']! as String;
   final String channelId = template['channelId']! as String;
+  final List<CctvSlot> slots = count == null
+      ? cctvSlots
+      : cctvSlots.take(count).toList();
   template['version'] = version;
   template['createdAt'] = DateTime.utc(2026, 10, 29, version).toIso8601String();
   template['expiresAt'] = '2030-01-01T00:00:00.000Z';
   template['cameraClips'] = <Map<String, Object?>>[
-    for (final CctvSlot slot in cctvSlots)
+    for (final CctvSlot slot in slots)
       <String, Object?>{
         'cameraId': slot.id,
         'objectPath':
@@ -123,10 +151,13 @@ Map<String, Object?> _backendManifest({
   return template;
 }
 
-Map<String, List<int>> _bytesForVersion(int version) => <String, List<int>>{
-  for (final CctvSlot slot in cctvSlots)
-    slot.id: <int>[version, slot.index + 10, slot.index + 20, version + 30],
-};
+Map<String, List<int>> _bytesForVersion(int version, {int? count}) =>
+    <String, List<int>>{
+      for (final CctvSlot slot in (count == null
+          ? cctvSlots
+          : cctvSlots.take(count).toList()))
+        slot.id: <int>[version, slot.index + 10, slot.index + 20, version + 30],
+    };
 
 void main() {
   test(
@@ -374,6 +405,153 @@ void main() {
         httpClient.close(force: true);
         await server.close();
         await root.delete(recursive: true);
+      }
+    },
+  );
+
+  test(
+    '1 and 2-camera manifests flow through mapping, delivery, cache, exact ACK, and offline restore',
+    () async {
+      for (final int count in <int>[1, 2]) {
+        final Map<String, Object?> fixture = _readFixture();
+        final Map<String, List<int>> bytes = _bytesForVersion(
+          5,
+          count: count,
+        );
+        final Map<String, HttpsFixtureResponse> responses =
+            <String, HttpsFixtureResponse>{
+              for (final String camera in expectedCctvCameraIds(count))
+                '/fresh/$camera': HttpsFixtureResponse(
+                  statusCode: HttpStatus.ok,
+                  body: bytes[camera]!,
+                ),
+            };
+        final HttpsFixtureServer server = await HttpsFixtureServer.start(
+          responses: responses,
+        );
+        final HttpClient httpClient = testHttpClient();
+        final Directory root = await Directory.systemTemp.createTemp(
+          'backend-delivery-count-',
+        );
+        final Directory indexRoot = Directory('${root.path}/indexes');
+        try {
+          final _BackendCallable callable = _BackendCallable(fixture: fixture)
+            ..server = server;
+          callable.deliveryRequestCount = 10;
+          callable.currentDocument = _backendManifest(
+            fixture: fixture,
+            version: 5,
+            bytesByCamera: bytes,
+            count: count,
+          );
+          final FirebaseManifestSource manifestSource = FirebaseManifestSource(
+            watchDocumentData: FirebaseCallableManifestTransport(
+              identity: FirebaseTvIdentity(
+                partyId: 'pilot',
+                deviceId: 'tv-pilot',
+              ),
+              callableInvoker: callable,
+              pollInterval: const Duration(seconds: 1),
+            ).watchDocumentData,
+          );
+          final FirebaseDeliveryClient delivery = FirebaseDeliveryClient(
+            identity: FirebaseTvIdentity(partyId: 'pilot', deviceId: 'tv-pilot'),
+            callableInvoker: callable,
+            now: () => DateTime.utc(2026, 10, 29),
+          );
+          final FirebaseUrlSigner signer = FirebaseUrlSigner(
+            deliveryClient: delivery,
+            channelId: 'main',
+          );
+          final FileCacheStore cache = FileCacheStore(
+            root,
+            indexRoot: indexRoot,
+          );
+          final FileManifestIndexStore indexes = FileManifestIndexStore(
+            indexRoot,
+          );
+          final PreparePlayback service = PreparePlayback(
+            manifestSource: manifestSource,
+            urlSigner: signer,
+            downloader: HttpsMediaDownloader(httpClient: httpClient),
+            cacheStore: cache,
+            manifestIndexStore: indexes,
+            acknowledger: delivery,
+          );
+          addTearDown(service.dispose);
+
+          final PlaybackSyncSnapshot ready = await service.prepareLatest(
+            partyId: 'pilot',
+            channelId: 'main',
+          );
+          expect(ready.state, PlaybackSyncState.ready, reason: ready.error);
+          expect(ready.manifest?.version, 5);
+          expect(ready.manifest?.clips, hasLength(count));
+          expect(ready.mediaByClipId, hasLength(count));
+          final CommittedManifestIndex committed =
+              (await indexes.readCommitted(
+                partyId: 'pilot',
+                channelId: 'main',
+              ))!;
+          expect(committed.clipHashToLocalRef, hasLength(count));
+          for (final ClipDescriptor clip in ready.manifest!.clips) {
+            expect(
+              await File(committed.localRefFor(clip)!).readAsBytes(),
+              bytes[clip.cameraId],
+            );
+          }
+          // The ACK carries exactly the received prefix hashes.
+          final (String ackName, Map<String, Object?> ackPayload) =
+              callable.calls.singleWhere(
+                (call) => call.$1 == 'acknowledgeDelivery',
+              );
+          expect(ackName, 'acknowledgeDelivery');
+          expect(ackPayload['clipHashes'], <String, String>{
+            for (final ClipDescriptor clip in ready.manifest!.clips)
+              clip.cameraId: clip.sha256,
+          });
+          // An extra hash beyond the received prefix is rejected by the
+          // exact-match gate before any purge.
+          await expectLater(
+            delivery.acknowledge(
+              partyId: 'pilot',
+              channelId: 'main',
+              manifestVersion: 5,
+              verifiedClipHashes: <String, String>{
+                for (final ClipDescriptor clip in ready.manifest!.clips)
+                  clip.cameraId: clip.sha256,
+                'CAM-04': 'd' * 64,
+              },
+            ),
+            throwsArgumentError,
+          );
+          // Offline restore serves the same count without network.
+          final int callsBeforeOffline = callable.calls.length;
+          final PreparePlayback secondInstance = PreparePlayback(
+            manifestSource: FirebaseManifestSource(
+              watchDocumentData: (_) =>
+                  throw StateError('offline restore requested the network'),
+            ),
+            urlSigner: signer,
+            downloader: HttpsMediaDownloader(httpClient: httpClient),
+            cacheStore: FileCacheStore(root, indexRoot: indexRoot),
+            manifestIndexStore: FileManifestIndexStore(indexRoot),
+            acknowledger: delivery,
+          );
+          addTearDown(secondInstance.dispose);
+          final PlaybackSyncSnapshot restored = await secondInstance.bootOffline(
+            partyId: 'pilot',
+            channelId: 'main',
+          );
+          expect(restored.state, PlaybackSyncState.usingCache);
+          expect(restored.manifest?.version, 5);
+          expect(restored.mediaByClipId, hasLength(count));
+          expect(callable.calls, hasLength(callsBeforeOffline));
+        } finally {
+          httpClient.close(force: true);
+          await server.close();
+          await root.delete(recursive: true);
+        }
       }
     },
   );

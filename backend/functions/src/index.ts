@@ -135,6 +135,30 @@ export const onGuestIngestFinalized = onObjectFinalized({ bucket: ingestBucket()
   await getServices().handleGuestIngestFinalized(event.data.name);
 });
 
+/** Host TV callable; only a registered TV may mint a short-lived host invite. */
+export const createHostInvite = onCall({ maxInstances: 2 }, (request) =>
+  callable(() => getServices().createHostInvite(request.data)));
+
+/** Phone callable; redeems a host invite for a server-assigned host role. */
+export const joinHost = onCall({ maxInstances: 10 }, (request) =>
+  callable(() => getServices().joinHost(request.data)));
+
+/** Host-only callable; lists the server-backed seed catalog. */
+export const listHostVideos = onCall({ maxInstances: 10 }, (request) =>
+  callable(() => getServices().listHostVideos(request.data)));
+
+/** Host-only callable; queues fixed-preset generation for a seed entry. */
+export const generateHostVideo = onCall({ maxInstances: 2 }, (request) =>
+  callable(() => getServices().generateHostVideo(request.data)));
+
+/** Host-only callable; signs TTL-limited preview URLs on demand (never persisted). */
+export const getHostVideoPreview = onCall({ maxInstances: 10 }, (request) =>
+  callable(() => getServices().getHostVideoPreview(request.data)));
+
+/** Host-only callable; deletes seeds + objects and revokes affected manifests. */
+export const deleteHostVideo = onCall({ maxInstances: 2 }, (request) =>
+  callable(() => getServices().deleteHostVideo(request.data)));
+
 /** Anonymous TV callable; ACK and purge are idempotent by device/channel/version. */
 export const acknowledgeDelivery = onCall({ maxInstances: 10 }, (request) =>
   callable(() => getServices().acknowledgeDelivery(request.data)));

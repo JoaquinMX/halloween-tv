@@ -1,0 +1,3473 @@
+diff --git a/backend/functions/src/auth.ts b/backend/functions/src/auth.ts
+index 214675804a963a209aebd33a6ac320ac8a90c18a..72408f7440e3db47bf16df8c0bb96d6075a43a32 100644
+--- a/backend/functions/src/auth.ts
++++ b/backend/functions/src/auth.ts
+@@ -11,6 +11,35 @@ export interface RegisteredContext extends Identity {
+  * Anonymous identity is the registered party/device pair. Firebase Auth UIDs and
+  * email claims are intentionally neither required nor used for authorization.
+  */
++
++/**
++ * Host administration gate. The host role is assigned server-side only
++ * (transactional invite redemption in host_join.ts); a client-supplied role
++ * string is never trusted. Every administrative operation revalidates the
++ * registered host role and party/channel scope through this helper.
++ */
++export async function assertRegisteredHostDevice(
++  db: Firestore,
++  identity: Identity,
++): Promise<RegisteredContext> {
++  const registered = await assertRegisteredPartyDevice(db, identity);
++  if (registered.device.role !== "host") {
++    throw new BackendError("FORBIDDEN", "Host administration requires a registered host device.");
++  }
++  return registered;
++}
++
++/** TV-only gate for minting host invites: only a registered TV may invite. */
++export async function assertRegisteredTvDevice(
++  db: Firestore,
++  identity: Identity,
++): Promise<RegisteredContext> {
++  const registered = await assertRegisteredPartyDevice(db, identity);
++  if (registered.device.role !== "tv") {
++    throw new BackendError("FORBIDDEN", "Only a registered TV may mint a host invite.");
++  }
++  return registered;
++}
+ export async function assertRegisteredPartyDevice(
+   db: Firestore,
+   identity: Identity,
+diff --git a/backend/functions/src/config.ts b/backend/functions/src/config.ts
+index c416480508ab27b27869feea167c304c618915cd..590bc25ef357ed32b5a084655a4b37d655505171 100644
+--- a/backend/functions/src/config.ts
++++ b/backend/functions/src/config.ts
+@@ -15,6 +15,33 @@ export const GENERATION_WORKER_MEMORY = "1GiB" as const;
+ export const DELIVERY_URL_TTL_SECONDS = 15 * 60;
+ export const MEDIA_RETENTION_MS = 24 * 60 * 60 * 1000;
+ export const REQUIRED_CAMERA_IDS = ["CAM-01", "CAM-02", "CAM-03", "CAM-04"] as const;
++/**
++ * Supported manifest clip counts (configurable 1/2/4-camera TV layouts).
++ * Generation presets keep producing 4 clips; this is a display/contract CAP:
++ * validators accept exactly these counts and require the camera set to equal
++ * the first N canonical slots. Absent/invalid/unreadable cameraCount
++ * settings default to 4 (see partition p2/p3 SettingsPort handling).
++ */
++export const SUPPORTED_CAMERA_COUNTS = [1, 2, 4] as const;
++export type SupportedCameraCount = (typeof SUPPORTED_CAMERA_COUNTS)[number];
++
++/** First-N canonical camera ids for a supported count, in wall order. */
++export function expectedCameraIds(count: number): readonly string[] {
++  if (!(SUPPORTED_CAMERA_COUNTS as readonly number[]).includes(count)) {
++    throw new Error(`Unsupported camera count ${count}; expected one of ${SUPPORTED_CAMERA_COUNTS.join(", ")}.`);
++  }
++  return REQUIRED_CAMERA_IDS.slice(0, count);
++}
++
++/** Short-lived host-invite capability lifetime (TV-minted, phone-redeemed). */
++export const HOST_INVITE_TTL_MS = 5 * 60 * 1000;
++/** TTL for separately referenced host preview objects (seed catalog). */
++export const HOST_PREVIEW_TTL_MS = 24 * 60 * 60 * 1000;
++
++/** Preview object path: separately referenced from delivery objects so an ACK purge never removes previews. */
++export function hostPreviewObjectPath(partyId: string, seedId: string, cameraId: string): string {
++  return `parties/${partyId}/hostPreviews/${seedId}/${cameraId}.mp4`;
++}
+ 
+ /** Generation is inert unless an operator explicitly opts in. */
+ export function isGenerationEnabled(environment: NodeJS.ProcessEnv = process.env): boolean {
+diff --git a/backend/functions/src/contracts.ts b/backend/functions/src/contracts.ts
+index 31c3c8f290bb54827200259ba205c306904662f9..857c25989e3c84af0618808a47df18aeae824298 100644
+--- a/backend/functions/src/contracts.ts
++++ b/backend/functions/src/contracts.ts
+@@ -1,5 +1,5 @@
+ import { createHash } from "node:crypto";
+-import { CAMEO_DEMO_PRESET, CHEAP_DEMO_PRESET, ERROR_CODES, ErrorCode, REQUIRED_CAMERA_IDS } from "./config";
++import { CAMEO_DEMO_PRESET, CHEAP_DEMO_PRESET, ERROR_CODES, ErrorCode, REQUIRED_CAMERA_IDS, SUPPORTED_CAMERA_COUNTS, expectedCameraIds } from "./config";
+ 
+ export type { ErrorCode };
+ 
+@@ -116,13 +116,20 @@ export function parseAck(value: unknown): AckInput {
+     throw new BackendError("INVALID_ARGUMENT", "A positive manifestVersion is required.");
+   }
+   if (!isRecord(value.clipHashes)) throw new BackendError("INVALID_ARGUMENT", "clipHashes must be an object.");
++  // 1/2/4-camera layouts: the ACK key set must exactly equal the first-N
++  // canonical prefix for one supported count. Extra hashes (beyond the
++  // manifest's prefix) are rejected here; exact match against the actual
++  // manifest (same length + same hashes) is enforced at ACK acceptance.
+   const keys = Object.keys(value.clipHashes).sort();
+-  if (keys.join(",") !== [...REQUIRED_CAMERA_IDS].sort().join(",")) {
+-    throw new BackendError("MANIFEST_MISMATCH", "ACK must include one hash for each canonical camera clip.");
++  const supportedKeySets = (SUPPORTED_CAMERA_COUNTS as readonly number[]).map(
++    (count) => [...expectedCameraIds(count)].sort().join(","),
++  );
++  if (!supportedKeySets.includes(keys.join(","))) {
++    throw new BackendError("MANIFEST_MISMATCH", "ACK must include one hash for each canonical camera clip (1, 2, or 4 clips, first-N prefix).");
+   }
+   const clipHashes: Record<string, string> = {};
+-  for (const cameraId of REQUIRED_CAMERA_IDS) {
+-    const hash = value.clipHashes[cameraId];
++  for (const cameraId of keys) {
++    const hash = (value.clipHashes as Record<string, unknown>)[cameraId];
+     if (typeof hash !== "string" || !HASH_RE.test(hash)) {
+       throw new BackendError("MANIFEST_MISMATCH", "ACK hashes must be canonical SHA-256 hex values.");
+     }
+@@ -172,13 +179,14 @@ export function validateId(value: unknown, label: string): string {
+ }
+ 
+ export function validateCanonicalClips(clips: unknown): asserts clips is CanonicalClip[] {
+-  if (!Array.isArray(clips) || clips.length !== REQUIRED_CAMERA_IDS.length) {
+-    throw new BackendError("MANIFEST_MISMATCH", "A manifest must contain exactly four camera clips.");
++  if (!Array.isArray(clips) || !(SUPPORTED_CAMERA_COUNTS as readonly number[]).includes(clips.length)) {
++    throw new BackendError("MANIFEST_MISMATCH", "A manifest must contain 1, 2, or 4 camera clips (four is the default layout).");
+   }
++  const expected = new Set<string>([...expectedCameraIds(clips.length)]);
+   const byCamera = new Map<string, CanonicalClip>();
+   for (const raw of clips) {
+     if (!isRecord(raw) || typeof raw.cameraId !== "string" ||
+-        !REQUIRED_CAMERA_IDS.includes(raw.cameraId as (typeof REQUIRED_CAMERA_IDS)[number]) ||
++        !expected.has(raw.cameraId) ||
+         typeof raw.objectPath !== "string" || typeof raw.sha256 !== "string" || !HASH_RE.test(raw.sha256) ||
+         !Number.isSafeInteger(raw.sizeBytes) || Number(raw.sizeBytes) <= 0 ||
+         (!Number.isSafeInteger(raw.durationMs) || (Number(raw.durationMs) !== 2000 && Number(raw.durationMs) !== 5000)) ||
+@@ -188,8 +196,10 @@ export function validateCanonicalClips(clips: unknown): asserts clips is Canonic
+     if (byCamera.has(raw.cameraId)) throw new BackendError("MANIFEST_MISMATCH", "Duplicate camera clip.");
+     byCamera.set(raw.cameraId, raw as unknown as CanonicalClip);
+   }
+-  if (REQUIRED_CAMERA_IDS.some((cameraId) => !byCamera.has(cameraId))) {
+-    throw new BackendError("MANIFEST_MISMATCH", "Manifest camera set is incomplete.");
++  // Prefix rule: reordered valid clips are accepted, but gaps (e.g.
++  // {CAM-01, CAM-03} for count 2) and unknown cameras are rejected.
++  if (byCamera.size !== expected.size || [...expected].some((cameraId) => !byCamera.has(cameraId))) {
++    throw new BackendError("MANIFEST_MISMATCH", "Manifest camera set must equal the first-N canonical cameras.");
+   }
+ }
+ 
+@@ -212,3 +222,192 @@ export function ackIdempotencyKey(deviceId: string, channelId: string, manifestV
+ export function isErrorCode(value: unknown): value is ErrorCode {
+   return typeof value === "string" && (ERROR_CODES as readonly string[]).includes(value);
+ }
++
++// ---------------------------------------------------------------------------
++// Host administration (cycle-12, partition p1).
++//
++// The companion uses a dedicated host entry screen (HostEntryScreen with
++// Scan Host QR + explicit Join-as-guest route; see partition p4/5 + README).
++// Rationale: guest PIN admission is intentionally broad (anyone who sees the
++// TV can join as a guest with full party-scoped read/generate/ACK power),
++// so host administration must never be reachable through the guest PIN or a
++// client-supplied role string. Host access is a separate server-minted,
++// short-lived invite capability redeemable once, bound to party/channel/
++// expiry, with the host role assigned server-side only.
++//
++// Callable surface (all exported through index.ts + runtime.ts):
++//   createHostInvite  (TV-only)  -> { inviteToken, expiresAt }
++//   joinHost          (phone)     -> { role: "host" } (separate device identity)
++//   listHostVideos    (host-only) -> seed catalog entries
++//   generateHostVideo (host-only) -> fixed-preset queued generation + seed entry
++//   getHostVideoPreview (host-only) -> signed preview URLs (never persisted)
++//   deleteHostVideo   (host-only) -> delete seeds + objects, revoke manifests
++// ---------------------------------------------------------------------------
++
++/** Server-assigned device roles. Clients can never self-assign "host" or "tv". */
++export const DEVICE_ROLES = ["guest", "host", "tv"] as const;
++export type DeviceRole = (typeof DEVICE_ROLES)[number];
++
++export interface CreateHostInviteInput extends Identity {}
++
++export interface CreateHostInviteResult {
++  partyId: string;
++  channelId: string;
++  inviteToken: string;
++  expiresAt: string;
++}
++
++export interface JoinHostInput extends Identity {
++  inviteToken: string;
++}
++
++export interface JoinHostResult {
++  partyId: string;
++  deviceId: string;
++  channelId: string;
++  role: "host";
++  status: "active";
++  created: boolean;
++}
++
++export interface ListHostVideosInput extends Identity {}
++
++export type HostSeedStatus = "queued" | "running" | "ready" | "failed" | "deleted";
++
++export interface HostSeedEntry {
++  seedId: string;
++  partyId: string;
++  channelId: string;
++  status: HostSeedStatus;
++  jobId: string;
++  createdAt: string;
++  expiresAt: string;
++  previewAvailable: boolean;
++  cameraIds: string[];
++}
++
++export interface GenerateHostVideoInput extends Identity {
++  seedId: string;
++  idempotencyKey: string;
++  presetId: typeof CHEAP_DEMO_PRESET.presetId | typeof CAMEO_DEMO_PRESET.presetId;
++  guestMediaId?: string;
++}
++
++export interface GenerateHostVideoResult {
++  seedId: string;
++  jobId: string;
++  state: string;
++  created: boolean;
++}
++
++export interface GetHostVideoPreviewInput extends Identity {
++  seedId: string;
++}
++
++export interface GetHostVideoPreviewResult {
++  seedId: string;
++  expiresAt: string;
++  clips: Array<{ cameraId: string; sha256: string; url: string; expiresAt: string }>;
++}
++
++export interface DeleteHostVideoInput extends Identity {
++  seedIds: string[];
++}
++
++export interface DeleteHostVideoResult {
++  deletedSeedIds: string[];
++  deletedObjects: string[];
++  revokedManifest: boolean;
++}
++
++export function parseCreateHostInviteInput(value: unknown): CreateHostInviteInput {
++  const identity = requireIdentity(value);
++  if (!identity.channelId) throw new BackendError("INVALID_ARGUMENT", "channelId is required.");
++  return identity;
++}
++
++export function parseJoinHostInput(value: unknown): JoinHostInput {
++  if (!isRecord(value) || typeof value.partyId !== "string" || !value.partyId ||
++      typeof value.deviceId !== "string" || !value.deviceId) {
++    throw new BackendError("UNAUTHENTICATED", "A registered partyId and deviceId are required.");
++  }
++  const partyId = validateId(value.partyId, "partyId");
++  const deviceId = validateId(value.deviceId, "deviceId");
++  if (typeof value.channelId !== "string" || !value.channelId) {
++    throw new BackendError("INVALID_ARGUMENT", "channelId is required.");
++  }
++  const channelId = validateId(value.channelId, "channelId");
++  // The invite token is a server-minted capability, never a guest PIN: PIN
++  // shape alone must not redeem host access, and client-supplied role
++  // strings are ignored (the server assigns "host" transactionally).
++  if (typeof value.inviteToken !== "string" || value.inviteToken.trim() === "" || value.inviteToken.length > 256) {
++    throw new BackendError("INVALID_ARGUMENT", "inviteToken is required.");
++  }
++  if (JOIN_PIN_RE.test(value.inviteToken)) {
++    throw new BackendError("INVALID_ARGUMENT", "inviteToken must be a host invite, not a guest PIN.");
++  }
++  return { partyId, deviceId, channelId, inviteToken: value.inviteToken };
++}
++
++export function parseListHostVideosInput(value: unknown): ListHostVideosInput {
++  const identity = requireIdentity(value);
++  if (!identity.channelId) throw new BackendError("INVALID_ARGUMENT", "channelId is required.");
++  return identity;
++}
++
++export function parseGenerateHostVideoInput(value: unknown): GenerateHostVideoInput {
++  const identity = requireIdentity(value);
++  if (!identity.channelId) throw new BackendError("INVALID_ARGUMENT", "channelId is required.");
++  if (!isRecord(value)) throw new BackendError("INVALID_ARGUMENT", "Request payload must be an object.");
++  const seedId = validateId(value.seedId, "seedId");
++  const idempotencyKey = validateId(value.idempotencyKey, "idempotencyKey");
++  // Fixed-preset queue only: same lock as requestGeneration (cheap_demo or
++  // cameo_demo with its consent binding); caller overrides are rejected.
++  if (value.presetId !== undefined &&
++      value.presetId !== CHEAP_DEMO_PRESET.presetId &&
++      value.presetId !== CAMEO_DEMO_PRESET.presetId) {
++    throw new BackendError("INVALID_ARGUMENT", "Only the fixed generation presets are supported.");
++  }
++  const presetId = (value.presetId ?? CHEAP_DEMO_PRESET.presetId) as GenerateHostVideoInput["presetId"];
++  if (presetId === CAMEO_DEMO_PRESET.presetId) {
++    if (typeof value.guestMediaId !== "string" || !value.guestMediaId) {
++      throw new BackendError("INVALID_ARGUMENT", "The cameo_demo preset requires a consent-bound guestMediaId.");
++    }
++    validateId(value.guestMediaId, "guestMediaId");
++    return { ...identity, seedId, idempotencyKey, presetId, guestMediaId: value.guestMediaId };
++  }
++  if (value.guestMediaId !== undefined) {
++    if (typeof value.guestMediaId !== "string" || !value.guestMediaId) {
++      throw new BackendError("INVALID_ARGUMENT", "guestMediaId is invalid.");
++    }
++    validateId(value.guestMediaId, "guestMediaId");
++    return { ...identity, seedId, idempotencyKey, presetId, guestMediaId: value.guestMediaId };
++  }
++  return { ...identity, seedId, idempotencyKey, presetId };
++}
++
++export function parseGetHostVideoPreviewInput(value: unknown): GetHostVideoPreviewInput {
++  const identity = requireIdentity(value);
++  if (!identity.channelId) throw new BackendError("INVALID_ARGUMENT", "channelId is required.");
++  if (!isRecord(value) || typeof value.seedId !== "string" || !value.seedId) {
++    throw new BackendError("INVALID_ARGUMENT", "seedId is required.");
++  }
++  return { ...identity, seedId: validateId(value.seedId, "seedId") };
++}
++
++export function parseDeleteHostVideoInput(value: unknown): DeleteHostVideoInput {
++  const identity = requireIdentity(value);
++  if (!identity.channelId) throw new BackendError("INVALID_ARGUMENT", "channelId is required.");
++  if (!isRecord(value) || !Array.isArray(value.seedIds) || value.seedIds.length === 0 || value.seedIds.length > 32) {
++    throw new BackendError("INVALID_ARGUMENT", "seedIds must be a non-empty list (max 32).");
++  }
++  const seen = new Set<string>();
++  const seedIds: string[] = [];
++  for (const raw of value.seedIds) {
++    const seedId = validateId(raw, "seedId");
++    if (seen.has(seedId)) throw new BackendError("INVALID_ARGUMENT", "Duplicate seedId.");
++    seen.add(seedId);
++    seedIds.push(seedId);
++  }
++  return { ...identity, seedIds };
++}
+diff --git a/backend/functions/src/delivery.ts b/backend/functions/src/delivery.ts
+index 57c0f9b953cd415fbed9d508308f0a2ef85f0ea4..340eb626d7270addfbec169086cdebcc4e110362 100644
+--- a/backend/functions/src/delivery.ts
++++ b/backend/functions/src/delivery.ts
+@@ -22,7 +22,9 @@ import {
+   DELIVERY_URL_TTL_SECONDS,
+   MEDIA_RETENTION_MS,
+   REQUIRED_CAMERA_IDS,
++  SUPPORTED_CAMERA_COUNTS,
+   SCHEMA_VERSION,
++  expectedCameraIds,
+ } from "./config";
+ import { assertRegisteredPartyDevice } from "./auth";
+ 
+@@ -145,6 +147,14 @@ function canonicalClipsMatch(manifest: DeliveryManifest, ack: AckInput): void {
+   if (manifest.version !== ack.manifestVersion || manifest.partyId !== ack.partyId || manifest.channelId !== ack.channelId) {
+     throw new BackendError("MANIFEST_MISMATCH", "ACK does not match the current party, channel, and manifest version.");
+   }
++  // Exact match: same clip count, same first-N camera set, same hashes.
++  // Extra hashes beyond the manifest's prefix are rejected here (parseAck
++  // only checks the shape is a supported prefix, not that it is THIS prefix).
++  const manifestCameras = manifest.cameraClips.map((clip) => clip.cameraId).sort();
++  const ackCameras = Object.keys(ack.clipHashes).sort();
++  if (manifestCameras.length !== ackCameras.length || manifestCameras.join(",") !== ackCameras.join(",")) {
++    throw new BackendError("MANIFEST_MISMATCH", "ACK hash set does not match the canonical manifest cameras.");
++  }
+   for (const clip of manifest.cameraClips) {
+     if (ack.clipHashes[clip.cameraId] !== clip.sha256) {
+       throw new BackendError("MANIFEST_MISMATCH", "ACK hash does not match the canonical manifest.");
+@@ -309,17 +319,18 @@ export function createDeliveryServices(options: DeliveryServiceOptions): Deliver
+     const job = jobDocument.data();
+     if (job.state !== "running") throw new BackendError("MANIFEST_MISMATCH", "Only a running job can stage generated media.");
+     const { partyId, channelId } = job as { partyId: string; channelId: string };
+-    if (!Array.isArray(inputs) || inputs.length !== REQUIRED_CAMERA_IDS.length) {
+-      throw new BackendError("MANIFEST_MISMATCH", "Staging requires the four canonical camera clips.");
++    if (!Array.isArray(inputs) || !(SUPPORTED_CAMERA_COUNTS as readonly number[]).includes(inputs.length)) {
++      throw new BackendError("MANIFEST_MISMATCH", "Staging requires 1, 2, or 4 canonical camera clips.");
+     }
++    const expectedStaging = [...expectedCameraIds(inputs.length)];
+     const byCamera = new Map(inputs.map((clip) => [clip.cameraId, clip]));
+-    if (byCamera.size !== inputs.length || REQUIRED_CAMERA_IDS.some((id) => !byCamera.has(id))) {
++    if (byCamera.size !== inputs.length || expectedStaging.some((id) => !byCamera.has(id))) {
+       throw new BackendError("MANIFEST_MISMATCH", "Staging camera set is invalid.");
+     }
+     const version = Number(job.manifestVersion ?? 0) + 1;
+     const expiresAt = new Date(now().getTime() + MEDIA_RETENTION_MS).toISOString();
+     const canonical: CanonicalClip[] = [];
+-    for (const cameraId of REQUIRED_CAMERA_IDS) {
++    for (const cameraId of expectedStaging as CanonicalClip["cameraId"][]) {
+       const input = byCamera.get(cameraId)!;
+       const generatedPrefix = `parties/${partyId}/generated/${validJobId}/`;
+       if (!input.sourcePath.startsWith(generatedPrefix) || input.sourcePath.includes("..") || input.sourcePath.includes("\\")) {
+@@ -488,7 +499,7 @@ export function createDeliveryServices(options: DeliveryServiceOptions): Deliver
+ }
+ 
+ interface AcceptedAckClip {
+-  cameraId: (typeof REQUIRED_CAMERA_IDS)[number];
++  cameraId: string;
+   objectPath: string;
+   sha256: string;
+ }
+@@ -505,29 +516,36 @@ function validateAcceptedAck(
+   idempotencyKey: string,
+ ): ValidatedAcceptedAck {
+   const mismatch = (): never => { throw new BackendError("MANIFEST_MISMATCH", "ACK conflicts with the previously accepted delivery ACK."); };
++  // Accepted-ACK replay validation supports the 1/2/4 prefixes: the stored
++  // clip set must exactly equal one first-N prefix, and the replayed hashes
++  // must equal the stored ones (extra hashes rejected).
++  const clipCount = Array.isArray(value?.clips) ? (value as Record<string, unknown>).clips as unknown[] : [];
++  if (!(SUPPORTED_CAMERA_COUNTS as readonly number[]).includes(clipCount.length)) return mismatch();
++  const expectedKeys = [...expectedCameraIds(clipCount.length)].sort().join(",");
+   if (!value || value.ackId !== ackId || value.partyId !== ack.partyId || value.deviceId !== ack.deviceId ||
+       value.channelId !== ack.channelId || value.manifestVersion !== ack.manifestVersion ||
+       value.idempotencyKey !== idempotencyKey || !/^[a-f0-9]{64}$/.test(String(value.manifestHash ?? "")) ||
+-      typeof value.jobId !== "string" || !Array.isArray(value.clips) || value.clips.length !== REQUIRED_CAMERA_IDS.length ||
++      typeof value.jobId !== "string" || !Array.isArray(value.clips) ||
+       !value.clipHashes || typeof value.clipHashes !== "object" || Array.isArray(value.clipHashes) ||
+-      Object.keys(value.clipHashes).sort().join(",") !== [...REQUIRED_CAMERA_IDS].sort().join(",") ||
++      Object.keys(value.clipHashes).sort().join(",") !== expectedKeys ||
++      Object.keys(ack.clipHashes).sort().join(",") !== expectedKeys ||
+       !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value.jobId)) return mismatch();
+-  for (const cameraId of REQUIRED_CAMERA_IDS) {
++  for (const cameraId of expectedCameraIds(clipCount.length)) {
+     if ((value.clipHashes as Record<string, unknown>)[cameraId] !== ack.clipHashes[cameraId]) return mismatch();
+   }
+   const byCamera = new Map<string, AcceptedAckClip>();
+   for (const raw of value.clips) {
+     if (!raw || typeof raw !== "object") return mismatch();
+     const clip = raw as Record<string, unknown>;
+-    if (typeof clip.cameraId !== "string" || !REQUIRED_CAMERA_IDS.includes(clip.cameraId as AcceptedAckClip["cameraId"]) ||
++    if (typeof clip.cameraId !== "string" || !(expectedCameraIds(clipCount.length) as readonly string[]).includes(clip.cameraId) ||
+         typeof clip.objectPath !== "string" || typeof clip.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(clip.sha256) ||
+         byCamera.has(clip.cameraId)) return mismatch();
+-    const cameraId = clip.cameraId as AcceptedAckClip["cameraId"];
++    const cameraId = clip.cameraId;
+     if (clip.objectPath !== deliveryObjectPath(ack.partyId, ack.channelId, ack.manifestVersion, cameraId) ||
+         clip.sha256 !== ack.clipHashes[cameraId]) return mismatch();
+     byCamera.set(cameraId, { cameraId, objectPath: clip.objectPath, sha256: clip.sha256 });
+   }
+-  if (REQUIRED_CAMERA_IDS.some((cameraId) => !byCamera.has(cameraId))) return mismatch();
+-  return { jobId: String(value.jobId), clips: REQUIRED_CAMERA_IDS.map((cameraId) => byCamera.get(cameraId)!) };
++  if ((expectedCameraIds(clipCount.length) as readonly string[]).some((cameraId) => !byCamera.has(cameraId))) return mismatch();
++  return { jobId: String(value.jobId), clips: [...expectedCameraIds(clipCount.length)].map((cameraId) => byCamera.get(cameraId)!) };
+ }
+ 
+diff --git a/backend/functions/src/guest_upload.ts b/backend/functions/src/guest_upload.ts
+index b36740f96ce7fee04661514fd1ac8ea98bf82eb8..0dd1e05cee81ad531482d085cf1ae301a06ee9d4 100644
+--- a/backend/functions/src/guest_upload.ts
++++ b/backend/functions/src/guest_upload.ts
+@@ -415,6 +415,40 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
+         if (Array.isArray(list)) for (const item of list) if (typeof item === "string" && item.startsWith("parties/")) attributable.add(item);
+       }
+     }
++    // Host seed catalog integration: previews retained for bound jobs are
++    // attributable derivatives too. They are queued for deletion here and
++    // their seed entries are failed closed so no preview is recreated and no
++    // deleted/withdrawn binding republishes (publish.ts rechecks the job
++    // tombstone transactionally).
++    try {
++      const seeds = await db.collection(`parties/${identity.partyId}/seedVideos`).get();
++      for (const seedDoc of seeds.docs) {
++        const seed = seedDoc.data() as Record<string, unknown>;
++        if (typeof seed.jobId !== "string" || !boundJobIds.includes(seed.jobId)) continue;
++        const previews = seed.previewPaths;
++        if (Array.isArray(previews)) {
++          for (const item of previews) if (typeof item === "string" && item.startsWith("parties/")) attributable.add(item);
++        }
++        if (seed.status !== "deleted") {
++          await seedDoc.ref.update({
++            status: "failed",
++            reconciliationReason: "GUEST_CONSENT_WITHDRAWN",
++            updatedAt: FieldValue.serverTimestamp(),
++          }).catch(() => undefined);
++        }
++        const boundJob = await db.doc(`parties/${identity.partyId}/jobs/${seed.jobId}`).get().catch(() => undefined);
++        if (boundJob?.exists && (boundJob.data() as Record<string, unknown>).hostDeleted !== true) {
++          await boundJob.ref.update({
++            hostDeleted: true,
++            reconciliationReason: "GUEST_CONSENT_WITHDRAWN",
++            timestamp: FieldValue.serverTimestamp(),
++          }).catch(() => undefined);
++        }
++      }
++    } catch {
++      // Best-effort: delivery paths additionally refuse withdrawn bindings,
++      // and retention retries revoked-manifest objects.
++    }
+     // Published manifest clips attributable to a bound job are deliverable
+     // until revoked: collect them here and delete the manifest doc below.
+     let revokedManifestPaths: string[] = [];
+diff --git a/backend/functions/src/index.ts b/backend/functions/src/index.ts
+index eef977fea806448d77d67cafab8c581b5b8569ce..05f94190ec9cc1978c186fa44b9fe13c365b165d 100644
+--- a/backend/functions/src/index.ts
++++ b/backend/functions/src/index.ts
+@@ -135,6 +135,30 @@ export const onGuestIngestFinalized = onObjectFinalized({ bucket: ingestBucket()
+   await getServices().handleGuestIngestFinalized(event.data.name);
+ });
+ 
++/** Host TV callable; only a registered TV may mint a short-lived host invite. */
++export const createHostInvite = onCall({ maxInstances: 2 }, (request) =>
++  callable(() => getServices().createHostInvite(request.data)));
++
++/** Phone callable; redeems a host invite for a server-assigned host role. */
++export const joinHost = onCall({ maxInstances: 10 }, (request) =>
++  callable(() => getServices().joinHost(request.data)));
++
++/** Host-only callable; lists the server-backed seed catalog. */
++export const listHostVideos = onCall({ maxInstances: 10 }, (request) =>
++  callable(() => getServices().listHostVideos(request.data)));
++
++/** Host-only callable; queues fixed-preset generation for a seed entry. */
++export const generateHostVideo = onCall({ maxInstances: 2 }, (request) =>
++  callable(() => getServices().generateHostVideo(request.data)));
++
++/** Host-only callable; signs TTL-limited preview URLs on demand (never persisted). */
++export const getHostVideoPreview = onCall({ maxInstances: 10 }, (request) =>
++  callable(() => getServices().getHostVideoPreview(request.data)));
++
++/** Host-only callable; deletes seeds + objects and revokes affected manifests. */
++export const deleteHostVideo = onCall({ maxInstances: 2 }, (request) =>
++  callable(() => getServices().deleteHostVideo(request.data)));
++
+ /** Anonymous TV callable; ACK and purge are idempotent by device/channel/version. */
+ export const acknowledgeDelivery = onCall({ maxInstances: 10 }, (request) =>
+   callable(() => getServices().acknowledgeDelivery(request.data)));
+diff --git a/backend/functions/src/publish.ts b/backend/functions/src/publish.ts
+index 992c02538a32749e3664c5d6080f30e25ef0b363..9fa9e9a8137b58158abeb9e1edb85688bf37aafb 100644
+--- a/backend/functions/src/publish.ts
++++ b/backend/functions/src/publish.ts
+@@ -64,6 +64,20 @@ export async function publishManifest(
+ ): Promise<DeliveryManifest> {
+   const job = await store.getJob(partyId, jobId);
+   if (job.idempotencyKey !== idempotencyKey) throw new BackendError("FORBIDDEN", "Publish idempotency key does not match the job.");
++  // Deletion-race guard: a host-deleted job (deleteHostVideo tombstone) must
++  // never publish, even if the worker staged bytes before the deletion. This
++  // precedes the idempotent-published fast path so a deletion racing the
++  // worker is refused instead of replaying the revoked manifest.
++  if ((job as Record<string, unknown>).hostDeleted === true) {
++    throw new BackendError("FORBIDDEN", "Seed video was deleted; publication is refused.");
++  }
++  if (typeof job.jobId === "string" && job.jobId.startsWith("hv-")) {
++    const seedId = job.jobId.slice("hv-".length);
++    const seedSnap = await store.db.doc(`parties/${partyId}/seedVideos/${seedId}`).get().catch(() => undefined);
++    if (seedSnap?.exists && (seedSnap.data() as Record<string, unknown>).status === "deleted") {
++      throw new BackendError("FORBIDDEN", "Seed video was deleted; publication is refused.");
++    }
++  }
+   if (job.publishedManifest) return job.publishedManifest as DeliveryManifest;
+   const guest = guestMediaOf(job);
+   if (guest) {
+@@ -151,6 +165,12 @@ export async function publishManifest(
+     if (!currentJob || currentJob.idempotencyKey !== idempotencyKey) {
+       throw new BackendError("FORBIDDEN", "Publish idempotency key does not match the job.");
+     }
++    // Transactional recheck of the deletion tombstone: a deleteHostVideo
++    // racing the worker fails the publication instead of republishing. This
++    // precedes the idempotent-published fast path for the same reason.
++    if ((currentJob as Record<string, unknown>).hostDeleted === true) {
++      throw new BackendError("FORBIDDEN", "Seed video was deleted; publication is refused.");
++    }
+     if (currentJob.publishedManifest) return currentJob.publishedManifest as DeliveryManifest;
+     if (currentJob.state !== "running") throw new BackendError("MANIFEST_MISMATCH", "Only a running job can publish a manifest.");
+     if (guest) {
+diff --git a/backend/functions/src/retention.ts b/backend/functions/src/retention.ts
+index 3b4cc45e3db5d42693f96ef3fc340ca0c16ff94b..0c5fc45e74d1ba47427468f4cc91aa3c80065a70 100644
+--- a/backend/functions/src/retention.ts
++++ b/backend/functions/src/retention.ts
+@@ -84,10 +84,11 @@ export async function sweepExpiredMedia(
+ 
+   const references = new Set<string>();
+   const liveJobPairs = new Set<string>();
+-  const [manifests, jobs, guestMedia] = await Promise.all([
++  const [manifests, jobs, guestMedia, seedVideos] = await Promise.all([
+     db.collectionGroup("manifests").get(),
+     db.collectionGroup("jobs").get(),
+     db.collectionGroup("guestMedia").get(),
++    db.collectionGroup("seedVideos").get().catch(() => ({ docs: [] as Array<{ data(): FirebaseFirestore.DocumentData; ref: FirebaseFirestore.DocumentReference }> })),
+   ]);
+   // Guest consent inputs: live (unexpired, not withdrawn) ingest objects are
+   // protected from the orphan sweep. Abandoned pending uploads and expired
+@@ -146,6 +147,41 @@ export async function sweepExpiredMedia(
+       }
+     }
+   }
++  // Host seed catalog: live (unexpired, not deleted) preview objects are
++  // protected from the orphan sweep; expired seeds transition and their
++  // preview objects are deleted. Direct client access stays denied by the
++  // catch-all rules; this only manages Admin SDK object lifetime.
++  let deletedSeedPreviews = 0;
++  for (const seedDoc of (seedVideos as { docs: Array<{ data(): FirebaseFirestore.DocumentData; ref: FirebaseFirestore.DocumentReference }> }).docs) {
++    const seed = seedDoc.data() as Record<string, unknown>;
++    const previews = Array.isArray(seed.previewPaths) ? seed.previewPaths.filter((p): p is string => typeof p === "string" && p.startsWith("parties/")) : [];
++    const expiry = expiryDate(seed.expiresAt);
++    const liveSeed = seed.status !== "deleted" && seed.status !== "failed" && expiry !== undefined && expiry > now;
++    if (liveSeed) {
++      for (const path of previews) references.add(path);
++      continue;
++    }
++    if ((seed.status !== "deleted" && seed.status !== "expired") && expiry !== undefined && expiry <= now) {
++      await seedDoc.ref.update({
++        status: "expired",
++        expiredAt: FieldValue.serverTimestamp(),
++      }).catch(() => undefined);
++    }
++    if (seed.status === "deleted" || seed.status === "expired" || (expiry !== undefined && expiry <= now)) {
++      for (const path of previews) {
++        try {
++          const [exists] = await bucket.file(path).exists();
++          if (!exists) continue;
++          await bucket.file(path).delete({ ignoreNotFound: true });
++          deletedSeedPreviews += 1;
++        } catch {
++          // Left for the next sweep; never counted as deleted.
++        }
++      }
++    } else {
++      for (const path of previews) references.add(path);
++    }
++  }
+   for (const manifestDoc of manifests.docs) {
+     const manifest = manifestDoc.data();
+     const expiry = expiryDate(manifest.expiresAt);
+@@ -234,7 +270,7 @@ export async function sweepExpiredMedia(
+     await file.delete({ ignoreNotFound: true });
+     deletedOrphanObjects += 1;
+   }
+-  return { expiredJobs, deletedExpiredObjects, deletedOrphanObjects, expiredGuestInputs };
++  return { expiredJobs, deletedExpiredObjects, deletedOrphanObjects: deletedOrphanObjects + deletedSeedPreviews, expiredGuestInputs };
+ }
+ 
+ export function createRetentionService(db: Firestore, bucket: Bucket, clock?: () => Date) {
+diff --git a/backend/functions/src/runtime.ts b/backend/functions/src/runtime.ts
+index 4bd952c0e44fca62a3ec976dce1ec5e4027a233d..2942a22b8c0f1d0aaab20afae3bd23b76594356d 100644
+--- a/backend/functions/src/runtime.ts
++++ b/backend/functions/src/runtime.ts
+@@ -6,6 +6,8 @@ import { createGenerationServices, GenerationServiceOptions } from "./generation
+ import { createGuestListService } from "./guest_list";
+ import { createGuestUploadService } from "./guest_upload";
+ import { createJoinPartyService } from "./join_party";
++import { createHostJoinService } from "./host_join";
++import { createHostMediaService } from "./host_media";
+ import { FakeVideoGenerationPort, createVideoGenerationProviderFromEnvironment } from "./providers/fake";
+ import { CameraId, ProviderResult, VideoGenerationPort } from "./video_generation_port";
+ 
+@@ -41,6 +43,12 @@ export interface RuntimeServices {
+   acknowledgeDelivery: ReturnType<typeof createDeliveryServices>["acknowledgeDelivery"];
+   listPartyDevices: ReturnType<typeof createGuestListService>["listPartyDevices"];
+   joinParty: ReturnType<typeof createJoinPartyService>["joinParty"];
++  createHostInvite: ReturnType<typeof createHostJoinService>["createHostInvite"];
++  joinHost: ReturnType<typeof createHostJoinService>["joinHost"];
++  listHostVideos: ReturnType<typeof createHostMediaService>["listHostVideos"];
++  generateHostVideo: ReturnType<typeof createHostMediaService>["generateHostVideo"];
++  getHostVideoPreview: ReturnType<typeof createHostMediaService>["getHostVideoPreview"];
++  deleteHostVideo: ReturnType<typeof createHostMediaService>["deleteHostVideo"];
+   requestGuestUpload: ReturnType<typeof createGuestUploadService>["requestGuestUpload"];
+   completeGuestUpload: ReturnType<typeof createGuestUploadService>["completeGuestUpload"];
+   getGuestMediaStatus: ReturnType<typeof createGuestUploadService>["getGuestMediaStatus"];
+@@ -83,6 +91,14 @@ export function createRuntimeServices(options: RuntimeServiceOptions): RuntimeSe
+     : undefined;
+   const guestList = createGuestListService({ db: options.db });
+   const joinPartyService = createJoinPartyService({ db: options.db });
++  const hostJoin = createHostJoinService({ db: options.db, ...(options.now ? { now: options.now } : {}) });
++  const hostMedia = createHostMediaService({
++    db: options.db,
++    bucket: options.bucket,
++    ...(options.now ? { now: options.now } : {}),
++    ...(options.signReadUrl ? { signPreviewUrl: options.signReadUrl } : {}),
++    ...(options.deleteDeliveryObject ? { deleteObject: options.deleteDeliveryObject } : {}),
++  });
+   const guestUpload = createGuestUploadService({
+     db: options.db,
+     bucket: options.bucket,
+@@ -147,6 +163,12 @@ export function createRuntimeServices(options: RuntimeServiceOptions): RuntimeSe
+     acknowledgeDelivery: delivery.acknowledgeDelivery,
+     listPartyDevices: guestList.listPartyDevices,
+     joinParty: joinPartyService.joinParty,
++    createHostInvite: hostJoin.createHostInvite,
++    joinHost: hostJoin.joinHost,
++    listHostVideos: hostMedia.listHostVideos,
++    generateHostVideo: hostMedia.generateHostVideo,
++    getHostVideoPreview: hostMedia.getHostVideoPreview,
++    deleteHostVideo: hostMedia.deleteHostVideo,
+     requestGuestUpload: guestUpload.requestGuestUpload,
+     completeGuestUpload: guestUpload.completeGuestUpload,
+     getGuestMediaStatus: guestUpload.getGuestMediaStatus,
+diff --git a/backend/functions/test/backend_contract_fixture.test.ts b/backend/functions/test/backend_contract_fixture.test.ts
+index acfd2af74b4b4bac9d2f902cbbbea2c94bf38e26..405913b996490829103edb762221004aac6026fb 100644
+--- a/backend/functions/test/backend_contract_fixture.test.ts
++++ b/backend/functions/test/backend_contract_fixture.test.ts
+@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
+ import { readFile } from "node:fs/promises";
+ import { resolve } from "node:path";
+ import test from "node:test";
+-import { DeliveryManifest, canonicalManifestHash, parseAck, parseCurrentManifestInput, parseRequestGeneration, validateCanonicalClips } from "../src/contracts";
++import { BackendError, DeliveryManifest, canonicalManifestHash, parseAck, parseCurrentManifestInput, parseRequestGeneration, validateCanonicalClips } from "../src/contracts";
++import { expectedCameraIds } from "../src/config";
+ import { GUEST_CONSENT_PURPOSE, GUEST_CONSENT_TEXT_VERSION } from "../src/config";
+ import { createRuntimeServices } from "../src/runtime";
+ import { FakeVideoGenerationPort } from "../src/providers/fake";
+@@ -62,6 +63,55 @@ test("shared v1 fixture parses and hashes through backend contract functions", a
+   assert.deepEqual(fixture.guestConsent.fixtureCameras, ["CAM-02", "CAM-03", "CAM-04"]);
+ });
+ 
++test("camera-count fixture accepts 1/2/4 first-N prefixes with legacy four-camera hashes preserved", async () => {
++  const content = await readFile(resolve(__dirname, "../../../test/fixtures/cctv_counts_v1.json"), "utf8");
++  const counts = JSON.parse(content) as {
++    counts: number[]; defaultCount: number; cameraIds: string[];
++    manifests: Record<string, DeliveryManifest>;
++    invalid: Record<string, { cameraClips: unknown }>;
++  };
++  assert.deepEqual(counts.counts, [1, 2, 4]);
++  assert.equal(counts.defaultCount, 4);
++  assert.deepEqual(counts.cameraIds, [...expectedCameraIds(4)]);
++  for (const count of [1, 2, 4]) {
++    const manifest = counts.manifests[String(count)];
++    validateCanonicalClips(manifest.cameraClips);
++    assert.equal(manifest.cameraClips.length, count);
++    // Reordered valid clips remain accepted.
++    validateCanonicalClips([...manifest.cameraClips].reverse());
++    const ack = parseAck({
++      partyId: manifest.partyId, deviceId: "tv-pilot", channelId: manifest.channelId,
++      manifestVersion: manifest.version,
++      clipHashes: Object.fromEntries(manifest.cameraClips.map((clip) => [clip.cameraId, clip.sha256])),
++    });
++    assert.deepEqual(Object.keys(ack.clipHashes).sort(), [...expectedCameraIds(count)].sort());
++  }
++  // Legacy four-camera fixture hashes and idempotency are preserved.
++  const legacy = await readFixture();
++  assert.equal(canonicalManifestHash(counts.manifests["4"]), legacy.canonicalManifestHash);
++  assert.equal(
++    legacy.acknowledgeDelivery.response.ackId,
++    "47aa92e83cf6a4e3cf5ad02a1421357fc29f4fb236f415553e3f6bc8594b1541",
++  );
++  // Unsupported counts, gaps, duplicates, unknown cameras, and invalid
++  // existing metadata are rejected.
++  for (const key of Object.keys(counts.invalid)) {
++    assert.throws(
++      () => validateCanonicalClips((counts.invalid[key] as { cameraClips: unknown }).cameraClips),
++      (error: unknown) => error instanceof BackendError && error.errorCode === "MANIFEST_MISMATCH",
++      `${key} must be rejected`,
++    );
++  }
++  // ACK hashes must exactly match the actual manifest: extra hashes rejected.
++  const two = counts.manifests["2"];
++  assert.throws(
++    () => parseAck({
++      partyId: two.partyId, deviceId: "tv-pilot", channelId: two.channelId, manifestVersion: two.version,
++      clipHashes: Object.fromEntries([...two.cameraClips.map((clip) => [clip.cameraId, clip.sha256] as const), ["CAM-03", "c".repeat(64)] as const]),
++    }),
++    (error: unknown) => error instanceof BackendError && error.errorCode === "MANIFEST_MISMATCH",
++  );
++});
+ test("shared v1 fixture runs through callable service composition", { skip: !HAS_FIRESTORE_EMULATOR }, async () => {
+   const fixture = await readFixture();
+   const { app, db, bucket } = await createEmulatorContext();
+diff --git a/backend/functions/test/contracts.test.ts b/backend/functions/test/contracts.test.ts
+index b45f0aa7c7d9503177c09def0148c0da7feb0165..52c904585669d70c4e371bf4c128e6ce91866320 100644
+--- a/backend/functions/test/contracts.test.ts
++++ b/backend/functions/test/contracts.test.ts
+@@ -1,6 +1,6 @@
+ import assert from "node:assert/strict";
+ import test from "node:test";
+-import { BackendError, parseAck, parseJoinPartyInput, parseRequestGeneration, requireIdentity } from "../src/contracts";
++import { BackendError, parseAck, parseJoinPartyInput, parseRequestGeneration, requireIdentity, validateCanonicalClips, parseCreateHostInviteInput, parseJoinHostInput, parseDeleteHostVideoInput } from "../src/contracts";
+ import { buildCheapDemoRequest, validateCheapDemoControls, validateGuestImageReference } from "../src/video_generation_port";
+ import { createVideoGenerationProviderFromEnvironment, FakeVideoGenerationPort } from "../src/providers/fake";
+ import { AlibabaVideoGenerationPort } from "../src/providers/alibaba";
+@@ -19,15 +19,64 @@ test("payload contracts reject missing identity, unsupported models, and noncano
+   expectCode(() => parseRequestGeneration({
+     partyId: "party", deviceId: "tv", channelId: "main", jobId: "job-1", idempotencyKey: "job-1", presetId: "premium",
+   }), "INVALID_ARGUMENT");
++  // 1/2/4 first-N prefixes parse; anything else (gaps, unknown cameras,
++  // unsupported counts, extra keys) is rejected.
+   expectCode(() => parseAck({
+-    partyId: "party", deviceId: "tv", channelId: "main", manifestVersion: 1, clipHashes: { "CAM-01": "0".repeat(64) },
++    partyId: "party", deviceId: "tv", channelId: "main", manifestVersion: 1, clipHashes: { "CAM-01": "0".repeat(64), "CAM-02": "0".repeat(64), "CAM-03": "0".repeat(64) },
++  }), "MANIFEST_MISMATCH");
++  expectCode(() => parseAck({
++    partyId: "party", deviceId: "tv", channelId: "main", manifestVersion: 1, clipHashes: { "CAM-01": "0".repeat(64), "CAM-03": "0".repeat(64) },
++  }), "MANIFEST_MISMATCH");
++  expectCode(() => parseAck({
++    partyId: "party", deviceId: "tv", channelId: "main", manifestVersion: 1, clipHashes: { "CAM-05": "0".repeat(64) },
++  }), "MANIFEST_MISMATCH");
++  expectCode(() => parseAck({
++    partyId: "party", deviceId: "tv", channelId: "main", manifestVersion: 1, clipHashes: { "CAM-01": "zzz" },
+   }), "MANIFEST_MISMATCH");
++  const ack1 = parseAck({
++    partyId: "party", deviceId: "tv", channelId: "main", manifestVersion: 1, clipHashes: { "CAM-01": "0".repeat(64) },
++  });
++  assert.deepEqual(Object.keys(ack1.clipHashes), ["CAM-01"]);
++  const ack2 = parseAck({
++    partyId: "party", deviceId: "tv", channelId: "main", manifestVersion: 1, clipHashes: { "CAM-02": "1".repeat(64), "CAM-01": "0".repeat(64) },
++  });
++  assert.deepEqual(Object.keys(ack2.clipHashes).sort(), ["CAM-01", "CAM-02"]);
++  const ack4 = parseAck({
++    partyId: "party", deviceId: "tv", channelId: "main", manifestVersion: 1,
++    clipHashes: { "CAM-01": "0".repeat(64), "CAM-02": "1".repeat(64), "CAM-03": "2".repeat(64), "CAM-04": "3".repeat(64) },
++  });
++  assert.deepEqual(Object.keys(ack4.clipHashes).sort(), ["CAM-01", "CAM-02", "CAM-03", "CAM-04"]);
+   const parsed = parseRequestGeneration({
+     partyId: "party", deviceId: "tv", channelId: "main", jobId: "job-1", idempotencyKey: "job-1", presetId: "cheap_demo",
+   });
+   assert.equal(parsed.presetId, "cheap_demo");
+ });
+ 
++test("manifest validators accept 1/2/4 first-N prefixes and reject gaps, duplicates, and unknown cameras", () => {
++  const clip = (cameraId: string, sha256 = "a".repeat(64)) => ({
++    cameraId, objectPath: `parties/pilot/channels/main/delivery/1/${cameraId}.mp4`,
++    sha256, sizeBytes: 12345, durationMs: 2000, expiresAt: "2026-11-29T15:00:00.000Z",
++  });
++  // Reordered valid clips remain accepted at every supported count.
++  validateCanonicalClips([clip("CAM-02"), clip("CAM-01")]);
++  validateCanonicalClips([clip("CAM-04"), clip("CAM-03"), clip("CAM-02"), clip("CAM-01")]);
++  validateCanonicalClips([clip("CAM-01")]);
++  for (const clips of [
++    [clip("CAM-01"), clip("CAM-02"), clip("CAM-03")],
++    [clip("CAM-01"), clip("CAM-03")],
++    [clip("CAM-02")],
++    [clip("CAM-01"), clip("CAM-01")],
++    [clip("CAM-05")],
++    [clip("CAM-01"), { ...clip("CAM-02"), sha256: "zzz" }],
++  ]) {
++    assert.throws(() => validateCanonicalClips(clips as never), (error: unknown) => error instanceof BackendError && error.errorCode === "MANIFEST_MISMATCH");
++  }
++  // Host invite parsers: guest PINs are never host tokens, roles are server-assigned.
++  assert.deepEqual(parseCreateHostInviteInput({ partyId: "p", deviceId: "tv", channelId: "main" }), { partyId: "p", deviceId: "tv", channelId: "main" });
++  assert.throws(() => parseJoinHostInput({ partyId: "p", deviceId: "x", channelId: "main", inviteToken: "004201" }), (e: unknown) => e instanceof BackendError && e.errorCode === "INVALID_ARGUMENT");
++  assert.throws(() => parseDeleteHostVideoInput({ partyId: "p", deviceId: "h", channelId: "main", seedIds: [] }), (e: unknown) => e instanceof BackendError && e.errorCode === "INVALID_ARGUMENT");
++});
++
+ test("joinParty parser enforces identity, channel, and six-digit PIN shape", () => {
+   expectCode(() => parseJoinPartyInput({}), "UNAUTHENTICATED");
+   expectCode(() => parseJoinPartyInput({ partyId: "party", channelId: "main" }), "UNAUTHENTICATED");
+diff --git a/backend/functions/test/delivery.test.ts b/backend/functions/test/delivery.test.ts
+index 1a9c8ed4cd060288dfed7329258004565e26975e..552e71a23d51cf9586ae1e3225a8ec519b47e4ae 100644
+--- a/backend/functions/test/delivery.test.ts
++++ b/backend/functions/test/delivery.test.ts
+@@ -85,6 +85,61 @@ test("delivery URLs stay inside active party scope; canonical ACK purges clips i
+   }
+ });
+ 
++test("two-camera manifest delivers, ACKs exactly, and rejects extra hashes", { skip: !HAS_FIRESTORE_EMULATOR }, async () => {
++  const { app, db, bucket } = await createEmulatorContext();
++  const partyId = randomPartyId();
++  const deviceId = "tv-2cam";
++  const channelId = "main";
++  const version = 2;
++  const jobId = "job-two-cam";
++  const expiry = new Date(Date.now() + 60 * 60 * 1000).toISOString();
++  const cameraIds = ["CAM-01", "CAM-02"] as const;
++  const cameraClips = cameraIds.map((cameraId) => {
++    const bytes = Buffer.from(`two-cam-${cameraId}`);
++    return { cameraId, objectPath: `parties/${partyId}/channels/${channelId}/delivery/${version}/${cameraId}.mp4`, sha256: createHash("sha256").update(bytes).digest("hex"), sizeBytes: bytes.length, durationMs: 2000, expiresAt: expiry, bytes };
++  });
++  try {
++    await seedParty(db, partyId, deviceId, channelId);
++    await Promise.all(cameraClips.map(({ objectPath, bytes }) => bucket.file(objectPath).save(bytes)));
++    await db.doc(`parties/${partyId}/manifests/current_${channelId}`).set({
++      partyId, channelId, version, schemaVersion: SCHEMA_VERSION, jobId, expiresAt: expiry,
++      createdAt: FieldValue.serverTimestamp(),
++      cameraClips: cameraClips.map(({ bytes: _bytes, ...clip }) => clip),
++    });
++    await db.doc(`parties/${partyId}/jobs/${jobId}`).set({ jobId, partyId, deviceId, channelId, manifestVersion: version, idempotencyKey: jobId, state: "ready" });
++    const services = createDeliveryServices({
++      db,
++      bucket,
++      signReadUrl: async (file) => `https://signed.invalid/${encodeURIComponent(file.name)}`,
++    });
++    const delivery = await services.getDeliveryUrls({ partyId, deviceId, channelId });
++    assert.equal(delivery.manifestVersion, version);
++    assert.deepEqual(delivery.clips.map((clip) => clip.cameraId).sort(), ["CAM-01", "CAM-02"]);
++    const current = await services.getCurrentManifest({ partyId, deviceId, channelId });
++    assert.equal(current.cameraClips.length, 2);
++    const clipHashes = Object.fromEntries(cameraClips.map((clip) => [clip.cameraId, clip.sha256]));
++    // Extra hashes beyond the received prefix are rejected, nothing purged.
++    await assert.rejects(services.acknowledgeDelivery({
++      partyId, deviceId, channelId, manifestVersion: version,
++      clipHashes: { ...clipHashes, "CAM-03": "c".repeat(64) },
++    }), (error: unknown) => error instanceof BackendError && error.errorCode === "MANIFEST_MISMATCH");
++    assert.equal((await bucket.file(cameraClips[0].objectPath).exists())[0], true);
++    const ack = await services.acknowledgeDelivery({ partyId, deviceId, channelId, manifestVersion: version, clipHashes });
++    assert.equal(ack.purged, true);
++    for (const clip of cameraClips) assert.equal((await bucket.file(clip.objectPath).exists())[0], false);
++    // Legacy four-camera ACK shape against a two-camera manifest is rejected.
++    await assert.rejects(services.acknowledgeDelivery({
++      partyId, deviceId, channelId, manifestVersion: version,
++      clipHashes: { ...clipHashes, "CAM-03": "c".repeat(64), "CAM-04": "d".repeat(64) },
++    }), (error: unknown) => error instanceof BackendError && error.errorCode === "MANIFEST_MISMATCH");
++    const repeated = await services.acknowledgeDelivery({ partyId, deviceId, channelId, manifestVersion: version, clipHashes });
++    assert.equal(repeated.ackId, ack.ackId);
++  } finally {
++    await clearParty(db, bucket, partyId);
++    await disposeEmulatorContext(app);
++  }
++});
++
+ test("expired canonical clip does not receive a signed URL", { skip: !HAS_FIRESTORE_EMULATOR }, async () => {
+   const { app, db, bucket } = await createEmulatorContext();
+   const partyId = randomPartyId();
+diff --git a/backend/functions/test/guest_upload.test.ts b/backend/functions/test/guest_upload.test.ts
+index eac98b464de5cb4ec9691593bd86e246cbd32904..b4146c6cffb3bdd377a8b63852fe977de2451a43 100644
+--- a/backend/functions/test/guest_upload.test.ts
++++ b/backend/functions/test/guest_upload.test.ts
+@@ -598,3 +598,44 @@ test("withdrawal revokes delivery: absent everywhere and no new URLs issuable",
+     await disposeEmulatorContext(app);
+   }
+ });
++
++test("withdrawal deletes retained host previews and fails the bound seed closed", {
++  skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
++}, async () => {
++  const { app, db, bucket } = await createEmulatorContext();
++  const partyId = randomPartyId();
++  try {
++    await seedParty(db, partyId, "p-guest-1", "main");
++    const services = servicesFor(db, bucket);
++    const requested = await services.requestGuestUpload({
++      partyId, deviceId: "p-guest-1", channelId: "main", consent: CONSENT, contentType: "image/jpeg",
++    });
++    await bucket.file(requested.objectPath).save(await photoBytes(), { contentType: "image/jpeg" });
++    await services.completeGuestUpload({ partyId, deviceId: "p-guest-1", channelId: "main", submissionId: requested.submissionId });
++    // A host seed bound to this submission with retained preview copies.
++    const jobId = "hv-seed-bound";
++    const stagedPath = `parties/${partyId}/channels/main/delivery/9/CAM-01.mp4`;
++    const previewPath = `parties/${partyId}/hostPreviews/seed-bound/CAM-01.mp4`;
++    await bucket.file(stagedPath).save(Buffer.from("staged"));
++    await bucket.file(previewPath).save(Buffer.from("preview"));
++    await db.doc(`parties/${partyId}/jobs/${jobId}`).set({
++      jobId, partyId, deviceId: "p-guest-1", channelId: "main", state: "running",
++      manifestVersion: 9, idempotencyKey: "idem-bound",
++      guestMedia: { submissionId: requested.submissionId },
++      stagedOutputs: { "CAM-01": { cameraId: "CAM-01", objectPath: stagedPath, sha256: "a".repeat(64) } },
++    });
++    await db.doc(`parties/${partyId}/seedVideos/seed-bound`).set({
++      seedId: "seed-bound", partyId, deviceId: "p-guest-1", channelId: "main",
++      jobId, status: "running", previewPaths: [previewPath],
++    });
++    const withdrawn = await services.withdrawGuestMedia({ partyId, deviceId: "p-guest-1", channelId: "main", submissionId: requested.submissionId });
++    assert.ok(withdrawn.deletedObjects.includes(previewPath), "retained host preview must be deleted at withdrawal");
++    assert.ok(withdrawn.deletedObjects.includes(stagedPath), "staged host derivative must be deleted at withdrawal");
++    assert.equal((await bucket.file(previewPath).exists())[0], false);
++    assert.equal((await db.doc(`parties/${partyId}/seedVideos/seed-bound`).get()).data()?.status, "failed");
++    assert.equal((await db.doc(`parties/${partyId}/jobs/${jobId}`).get()).data()?.hostDeleted, true);
++  } finally {
++    await clearParty(db, bucket, partyId);
++    await disposeEmulatorContext(app);
++  }
++});
+diff --git a/backend/functions/test/retention.test.ts b/backend/functions/test/retention.test.ts
+index a318d36ad60113d09b89f3187344345b9ef1aea6..68e46e4ec5e5220c154e181a8f5237189bedc833 100644
+--- a/backend/functions/test/retention.test.ts
++++ b/backend/functions/test/retention.test.ts
+@@ -39,6 +39,36 @@ test("TTL sweep expires due jobs, deletes expired media, and removes orphan obje
+   }
+ });
+ 
++test("host seed previews are protected while live and purged after expiry", { skip: !HAS_FIRESTORE_EMULATOR }, async () => {
++  const { app, db, bucket } = await createEmulatorContext();
++  const partyId = randomPartyId();
++  const livePath = `parties/${partyId}/hostPreviews/seed-live/CAM-01.mp4`;
++  const deadPath = `parties/${partyId}/hostPreviews/seed-dead/CAM-01.mp4`;
++  try {
++    await seedParty(db, partyId, "tv-1", "main");
++    await db.doc(`parties/${partyId}/seedVideos/seed-live`).set({
++      seedId: "seed-live", partyId, channelId: "main", jobId: "hv-seed-live",
++      status: "ready", previewPaths: [livePath],
++      expiresAt: Timestamp.fromDate(new Date(Date.now() + 60 * 60 * 1000)),
++    });
++    await db.doc(`parties/${partyId}/seedVideos/seed-dead`).set({
++      seedId: "seed-dead", partyId, channelId: "main", jobId: "hv-seed-dead",
++      status: "ready", previewPaths: [deadPath],
++      expiresAt: Timestamp.fromDate(new Date(Date.now() - 1000)),
++    });
++    await bucket.file(livePath).save(Buffer.from("live-preview"));
++    await bucket.file(deadPath).save(Buffer.from("dead-preview"));
++    const result = await sweepExpiredMedia(db, bucket, new Date());
++    assert.equal((await bucket.file(livePath).exists())[0], true, "live seed previews must be protected from the orphan sweep");
++    assert.equal((await bucket.file(deadPath).exists())[0], false, "expired seed previews must be purged");
++    assert.equal((await db.doc(`parties/${partyId}/seedVideos/seed-dead`).get()).data()?.status, "expired");
++    assert.ok(result.deletedOrphanObjects >= 1);
++  } finally {
++    await clearParty(db, bucket, partyId);
++    await disposeEmulatorContext(app);
++  }
++});
++
+ test("revoked-manifest objects are retried for deletion, never protected", { skip: !HAS_FIRESTORE_EMULATOR }, async () => {
+   const { app, db, bucket } = await createEmulatorContext();
+   const partyId = randomPartyId();
+diff --git a/backend/functions/test/security_rules.test.ts b/backend/functions/test/security_rules.test.ts
+index e211c10d2d2196e659766f829adbf66aa8e63302..d5f992eb2e42d712f3eb3a02e42821d23d4548ac 100644
+--- a/backend/functions/test/security_rules.test.ts
++++ b/backend/functions/test/security_rules.test.ts
+@@ -96,6 +96,44 @@ test("anonymous clients cannot read or mutate guest consent and media records",
+   }
+ });
+ 
++test("anonymous clients cannot read or mutate host invites and seed catalog records", { skip: !HAS_FIRESTORE_EMULATOR }, async () => {
++  const host = emulatorHost();
++  const rules = await readFile(resolve(__dirname, "../../firestore.rules"), "utf8");
++  const env: RulesTestEnvironment = await initializeTestEnvironment({
++    projectId: PROJECT_ID,
++    firestore: { host: host.host, port: host.port, rules },
++  });
++  try {
++    await env.withSecurityRulesDisabled(async (context) => {
++      const firestore = context.firestore();
++      await setDoc(doc(firestore, "parties/host-party"), { status: "active", activeChannelId: "main" });
++      await setDoc(doc(firestore, "parties/host-party/devices/tv-1"), { partyId: "host-party", status: "active" });
++      await setDoc(doc(firestore, "parties/host-party/hostInvites/invite-1"), {
++        tokenHash: "a".repeat(64), partyId: "host-party", channelId: "main", status: "pending",
++      });
++      await setDoc(doc(firestore, "parties/host-party/seedVideos/seed-1"), {
++        seedId: "seed-1", partyId: "host-party", channelId: "main", status: "ready",
++      });
++    });
++    const client = env.unauthenticatedContext().firestore();
++    await assertFails(getDoc(doc(client, "parties/host-party/hostInvites/invite-1")));
++    await assertFails(setDoc(doc(client, "parties/host-party/hostInvites/invite-1"), { status: "redeemed" }));
++    await assertFails(getDoc(doc(client, "parties/host-party/seedVideos/seed-1")));
++    await assertFails(setDoc(doc(client, "parties/host-party/seedVideos/seed-1"), { status: "deleted" }));
++    await assertFails(setDoc(doc(client, "parties/host-party/seedVideos/forged"), { status: "ready" }));
++  } finally {
++    await env.cleanup();
++  }
++});
++
++test("storage rules keep the host-preview prefix denied for direct access", async () => {
++  const rules = await readFile(resolve(__dirname, "../../storage.rules"), "utf8");
++  // Host previews ride the catch-all deny: no direct client reads/writes.
++  // Signed preview URLs bypass rules with backend validation, exactly like
++  // delivery URLs; the backend never persists them.
++  assert.ok(rules.includes("allow read, write: if false"), "storage rules deny direct access by default");
++});
++
+ test("storage rules keep the guest-ingest prefix denied for direct access", async () => {
+   const rules = await readFile(resolve(__dirname, "../../storage.rules"), "utf8");
+   assert.ok(rules.includes("guests/{deviceId}/ingest"), "storage rules carry an explicit guest-ingest section");
+diff --git a/docs/backend-contract-v1.md b/docs/backend-contract-v1.md
+index 024c0f485721d8d4356c4654f187d521fa1ed50a..1383255bf1e3e40e21da47f2f26ce7dfaa042a3a 100644
+--- a/docs/backend-contract-v1.md
++++ b/docs/backend-contract-v1.md
+@@ -34,6 +34,12 @@ an idempotency key.
+ | `completeGuestUpload` | callable | party/device-scoped guest |
+ | `getGuestMediaStatus` | callable | party/device-scoped guest |
+ | `withdrawGuestMedia` | callable | party/device-scoped guest |
++| `createHostInvite` | callable | registered TV only |
++| `joinHost` | callable | phone with a valid host invite |
++| `listHostVideos` | callable | registered host only |
++| `generateHostVideo` | callable | registered host only |
++| `getHostVideoPreview` | callable | registered host only |
++| `deleteHostVideo` | callable | registered host only |
+ 
+ Guest ingest objects live under
+ `parties/{partyId}/guests/{deviceId}/ingest/{submissionId}/photo.jpg` with
+@@ -45,19 +51,106 @@ Firestore guest consent/media docs are callable-only (explicit deny in
+ 
+ Firestore layout: `parties/{partyId}` (`ownerUid`, `status`, `activeChannelId`),
+ `channels/{channelId}`, `manifests/current_{channelId}` (`version`,
+-`cameraClips[4]`, `schemaVersion`, stable publication `createdAt`),
++`cameraClips[1|2|4]`, `schemaVersion`, stable publication `createdAt`),
+ `jobs/{jobId}` (state machine
+ `queued → running → ready → delivering → purged`, plus `failed`/`expired` with
+ sanitized `errorCode`, `modelId`, `costEstimate`), `devices/{deviceId}`,
+-`deliveryAcks/{ackId}`.
++`deliveryAcks/{ackId}`, `hostInvites/{inviteId}` (token hash, party/channel/
++expiry binding), `seedVideos/{seedId}` (status, job link, preview refs).
+ 
+ Storage layout: `parties/{partyId}/channels/{channelId}/delivery/{version}/{camera}.mp4`
+ (served only via short-lived signed URLs minted after callable checks; rules
+-deny all direct client reads/writes). `ingest/` and `generated/{jobId}/`
++deny all direct client reads/writes). `hostPreviews/{seedId}/{camera}.mp4`
++are separately referenced preview objects with their own TTL metadata (same
++deny-all rules; signed on demand, never persisted). `ingest/` and
++`generated/{jobId}/`
+ prefixes are worker-internal. Lifecycle TTL (`storage.lifecycle.json`,
+ `daysSinceCustomTime: 1` on `parties/`) is defense-in-depth behind
+ `sweepExpiredMedia`.
+ 
++## Camera counts (configurable 1/2/4 layouts)
++
++Supported manifest clip counts are exactly 1, 2, or 4; four remains the
++default when the `cameraCount` setting is absent, invalid, or unreadable.
++`cameraCount` (a SettingsPort display cap, owned by other partitions) never
++changes what the backend publishes: generation presets keep producing 4
++clips, and reduced layouts still prepare + ACK the complete received
++manifest. Validators on both sides (`validateCctvManifest` in
++`core_playlist`, `validateCanonicalClips`/`parseAck` in `contracts.ts`,
++Dart delivery URL/ACK checks in `firebase_delivery_client.dart`) require the
++camera set to equal the first-N canonical slots in wall order
++(`CAM-01` for 1; `CAM-01`–`CAM-02` for 2; all four for 4). Reordered valid
++clips remain accepted; unsupported counts, gaps (e.g. `{CAM-01, CAM-03}`
++for count 2), duplicates, unknown cameras, and invalid existing metadata
++are rejected. ACK validation is exact at acceptance: the hash set must equal
++the actual manifest's camera set with identical digests, so extra hashes are
++rejected both at shape time (`parseAck`) and against the stored manifest
++(`canonicalClipsMatch`) and on accepted-ACK replay. Legacy four-camera
++fixture hashes and the ACK idempotency key are unchanged
++(`test/fixtures/backend_contract_v1.json`); count vectors live in
++`test/fixtures/cctv_counts_v1.json`.
++
++## Host entry and administration
++
++The companion uses a dedicated host entry screen (`HostEntryScreen` with
++Scan Host QR + an explicit Join-as-guest route; companion/TV UI owned by
++other partitions). Rationale: guest PIN admission is intentionally broad —
++anyone who can see the TV screen can self-register as a guest with full
++party-scoped read/generate/ACK power — so host administration must never be
++reachable through the guest PIN or a client-supplied role string. A separate
++server-minted, short-lived invite capability keeps the two routes visibly
++distinct and makes the privilege boundary auditable: the QR payload, the
++Firestore role, and the callable gates all distinguish host from guest.
++
++- `createHostInvite { partyId, deviceId, channelId }` (TV-only caller:
++  registered device with `role: "tv"`, else `FORBIDDEN`) mints a short-lived
++  (`HOST_INVITE_TTL_MS`, 5 minutes) invite. The token (`hi-…`) is returned
++  once; only its SHA-256 hash is stored at
++  `parties/{partyId}/hostInvites/{inviteId}`, bound to party/channel/expiry.
++- `joinHost { partyId, deviceId, channelId, inviteToken }` redeems the invite
++  transactionally for a separate phone identity with the server-assigned
++  host role. Same-device redemption retries are idempotent (`created:
++  false`); other-device replay, expiry, cross-party/cross-channel reuse,
++  guest PIN reuse (six-digit strings are shape-rejected as tokens), and
++  client-supplied role fields (ignored; the role is always written
++  server-side) can never grant host access.
++- Legacy `joinParty` remains guest-only: it writes `role: "guest"`
++  server-side, rejects re-registration of non-guest (host/tv) device docs,
++  and never upgrades a role.
++- Every administrative operation (`listHostVideos`, `generateHostVideo`,
++  `getHostVideoPreview`, `deleteHostVideo`) revalidates the registered host
++  role and party/channel scope (`assertRegisteredHostDevice`); guests get
++  `FORBIDDEN`. Role examples live in `test/fixtures/join_roles_v1.json`.
++
++## Host seed catalog
++
++`listHostVideos` serves a server-backed seed catalog at
++`parties/{partyId}/seedVideos/{seedId}` containing generation status and
++camera video references. `generateHostVideo { partyId, deviceId, channelId,
++seedId, idempotencyKey, presetId?, guestMediaId? }` is a scoped entry point
++to the existing fixed-preset queue with the same idempotency, single-flight
++budget, and consent checks as `requestGeneration` (the backing job is
++`hv-{seedId}`); queue deduplication and rebinding refusal behave identically.
++`getHostVideoPreview { …, seedId }` materializes separately referenced,
++TTL-limited (`HOST_PREVIEW_TTL_MS`, 24h) preview objects under
++`hostPreviews/{seedId}/…` before delivery objects can be ACK-purged and
++signs them on demand without persisting signed URLs.
++
++Deletion granularity and expiry: `deleteHostVideo { …, seedIds[] }`
++(deleted per selected seed id) removes the seed entries and their associated
++preview + delivery objects, revokes an affected current manifest whose jobId
++matches a deleted seed, and preserves accounting records (costLogs/usage
++ledger rows are never deleted). A job tombstone (`hostDeleted`) is written
++transactionally so deletion/withdrawal races can neither republish (the
++publish path rechecks the tombstone inside its transaction) nor recreate
++previews (deleted seeds return `NOT_FOUND` and never copy again). Guest
++withdrawal of a bound submission deletes retained host previews, fails the
++bound seed closed, and tombstones the job; the retention sweep protects live
++seed previews from the orphan pass and purges expired/deleted ones. Direct
++client access to invites, seeds, and previews remains denied (callable-only
++Firestore docs and Storage objects; previews are served only through signed
++URLs).
++
+ ## Payloads
+ 
+ - `requestGeneration { partyId, deviceId, channelId, jobId, idempotencyKey, presetId }`
+@@ -76,13 +169,15 @@ prefixes are worker-internal. Lifecycle TTL (`storage.lifecycle.json`,
+   current version for the requested active channel. Older delivery versions
+   are never signed. Expired manifest/clip → `CLIP_EXPIRED`.
+ - `acknowledgeDelivery { partyId, deviceId, channelId, manifestVersion, clipHashes }`
+-  — `clipHashes` is a map keyed by camera ID (`CAM-01` through `CAM-04`) and
+-  must carry exactly one canonical SHA-256 hash per camera. A first ACK must
+-  match the unexpired current manifest, else `MANIFEST_MISMATCH` or
+-  `CLIP_EXPIRED`. The accepted ACK stores the job ID and its four validated
++  — `clipHashes` is a map keyed by camera ID and must carry exactly one
++  canonical SHA-256 hash per camera for a supported layout (1, 2, or 4
++  clips, first-N canonical prefix; four is the default). A first ACK must
++  match the unexpired current manifest exactly — same camera set, same
++  hashes — else `MANIFEST_MISMATCH` or
++  `CLIP_EXPIRED`. The accepted ACK stores the job ID and its validated
+   version-scoped object paths and hashes. Repeats revalidate registration and
+   hashes, return the same `ackId`, and retry only those stored paths even after
+-  expiry or a newer manifest publication. A conflicting hash is rejected;
++  expiry or a newer manifest publication. A conflicting or extra hash is rejected;
+   objects belonging to a newer version are never purged by an older ACK.
+ 
+ ## QR join (PIN-gated self-registration)
+@@ -265,20 +360,28 @@ credential setup are outside this contract change.
+ 
+ ## Tests
+ 
+-`contracts.test.ts` (payload validation + in-flight/idempotency/error paths),
++`contracts.test.ts` (payload validation + 1/2/4 prefix checks + host parser
++shape checks + in-flight/idempotency/error paths),
+ `backend_contract_fixture.test.ts` (shared JSON fixture through parsing, hashing,
+-callable service paths, delivery, and ACK), `runtime.test.ts` (disabled default,
++callable service paths, delivery, and ACK, plus the `cctv_counts_v1` count
++vectors with legacy four-camera hash preservation), `runtime.test.ts` (disabled default,
+ queue failure, and fake four-camera generation through handler composition),
+-`security_rules.test.ts` (party/device-scoped registration reads, denied client
++`host_join.test.ts` (TV-only invite minting, transactional host redemption,
++idempotent retry, replay/expiry/PIN/role-forgery denial, guest-only legacy
++join), `host_media.test.ts` (seed catalog queue/idempotency, preview
++materialization and ACK survival, deletion outcomes and race protection),
++`host_admin_e2e.test.ts` (exported callable coverage and the full host flow
++through real runtime generation with the fixture-backed provider and emulator
++storage), `security_rules.test.ts` (party/device-scoped registration reads, denied client
+ registration writes, denied device listing and party/PIN reads, denied manifest
+-reads), `seed_join.test.ts` (PIN provisioning preview/apply/idempotency/omit and
++reads, denied host-invite/seed direct access), `seed_join.test.ts` (PIN provisioning preview/apply/idempotency/omit and
+ refusal paths against the emulator), `qr_join_e2e.test.ts` (PIN-gated join,
+ rejoin, TV listing, and legacy manifest read through the real exported Functions
+ emulator endpoints with no auth), `delivery.test.ts` (URL scoping, manifest callable, ACK hash
+-checks, bounded retry purge), and `retention.test.ts` (TTL transitions, orphan
+-sweeper). Guest flows are covered by `guest_upload.test.ts` (consent refusal,
++checks incl. 1/2/4 exact-match and extra-hash rejection, bounded retry purge), and `retention.test.ts` (TTL transitions, orphan
++sweeper, host preview protection/expiry). Guest flows are covered by `guest_upload.test.ts` (consent refusal,
+ completion, scoping, withdrawal, deletion retry, TTL/orphan protection,
+-generation refusal), `guest_upload_e2e.test.ts` (real-bytes endpoint lifecycle),
++generation refusal, retained host-preview cleanup), `guest_upload_e2e.test.ts` (real-bytes endpoint lifecycle),
+ `guest_media_generation.test.ts` (one provider camera plus three fixture slots,
+ truthful usage, withdrawal races), and `alibaba.test.ts` (offline guest-image
+ serialization fixture, zero network). Emulator-backed cases skip when `FIRESTORE_EMULATOR_HOST` is unset;
+diff --git a/packages/core_playlist/README.md b/packages/core_playlist/README.md
+index 4a260d8d279ad8c4008497d043f7cc7a96249e55..942ef07044374a82c72710b78701e9f3a726541e 100644
+--- a/packages/core_playlist/README.md
++++ b/packages/core_playlist/README.md
+@@ -1,39 +1,41 @@
+-<!--
+-This README describes the package. If you publish this package to pub.dev,
+-this README's contents appear on the landing page for your package.
+-
+-For information about how to write a good package README, see the guide for
+-[writing package pages](https://dart.dev/tools/pub/writing-package-pages).
+-
+-For general information about developing packages, see the Dart guide for
+-[creating packages](https://dart.dev/guides/libraries/create-packages)
+-and the Flutter guide for
+-[developing packages and plugins](https://flutter.dev/to/develop-packages).
+--->
+-
+-TODO: Put a short description of the package here that helps potential users
+-know whether this package might be useful for them.
+-
+-## Features
+-
+-TODO: List what your package can do. Maybe include images, gifs, or videos.
+-
+-## Getting started
+-
+-TODO: List prerequisites and provide or point to information on how to
+-start using the package.
+-
+-## Usage
+-
+-TODO: Include short and useful examples for package users. Add longer examples
+-to `/example` folder.
+-
+-```dart
+-const like = 'sample';
+-```
+-
+-## Additional information
+-
+-TODO: Tell users more about the package: where to find more information, how to
+-contribute to the package, how to file issues, what response they can expect
+-from the package authors, and more.
++# core_playlist
++
++Playback manifest domain model for Halloween TV: CCTV camera contracts,
++manifest parsing, and validation shared by every layer.
++
++## Camera identity (single source of truth)
++
++`cctvSlots` is the canonical wall order, camera ids (`CAM-01`–`CAM-04`),
++and default room labels. Tile maps, asset catalogs, and label resolution
++derive from it; no `CAM-0x` literals are duplicated in other layers.
++
++## Configurable 1/2/4-camera layouts
++
++Supported manifest clip counts are exactly **1, 2, or 4**
++(`kSupportedCctvClipCounts`); **four is the default** when the
++`cameraCount` setting (a SettingsPort display cap owned outside this
++package) is absent, invalid, or unreadable (`kDefaultCctvClipCount`).
++
++- `isSupportedCctvClipCount` / `expectedCctvCameraIds` are the shared
++  prefix helpers: a count-`N` manifest must carry exactly the first `N`
++  canonical slot ids in wall order. Backend `contracts.ts`
++  (`SUPPORTED_CAMERA_COUNTS`, `expectedCameraIds`) mirrors them.
++- `validateCctvManifest` accepts 1, 2, or 4 clips with unique clip ids and
++  a camera set equal to the first-`N` prefix. Reordered valid clips remain
++  accepted; unsupported counts, gaps (e.g. `{CAM-01, CAM-03}` for count 2),
++  duplicates, unknown cameras, and invalid existing metadata are rejected.
++- The cap is display-only: generation presets keep producing 4 clips, and
++  reduced layouts still prepare + ACK the complete received manifest
++  (see `PreparePlayback` and the delivery ACK client).
++- Count vectors live in `test/fixtures/cctv_counts_v1.json`; the legacy
++  four-camera hashes are preserved byte-identically.
++
++## Host entry rationale (pointer)
++
++The companion uses a dedicated host entry screen (`HostEntryScreen` with
++Scan Host QR + an explicit Join-as-guest route) so host administration can
++never be reached through the guest PIN or a client-supplied role string.
++The contract half of that boundary (server-minted invites, server-assigned
++host role, host-gated seed catalog) is documented in
++`docs/backend-contract-v1.md`; this package only carries the camera-count
++side of the shared contracts.
+diff --git a/packages/core_playlist/lib/core_playlist.dart b/packages/core_playlist/lib/core_playlist.dart
+index debd565b355af2cb48f2c729bcfda0f55ee2d804..ae42fc0dd92b497a170b9f8b647f19fb00e658f6 100644
+--- a/packages/core_playlist/lib/core_playlist.dart
++++ b/packages/core_playlist/lib/core_playlist.dart
+@@ -58,6 +58,41 @@ const List<CctvSlot> cctvSlots = <CctvSlot>[
+   CctvSlot(id: 'CAM-04', index: 3, room: 'storage room'),
+ ];
+ 
++/// Supported CCTV manifest clip counts (configurable TV layouts).
++///
++/// Cycle-12: the TV displays 1, 2, or 4 cameras. `cameraCount` (a SettingsPort
++/// display cap) never changes what the backend publishes — generation presets
++/// keep producing 4 clips and reduced layouts still prepare + ACK the complete
++/// received manifest — but validators on both sides accept exactly these
++/// counts so 1/2-camera manifests (first-N canonical slots) flow through the
++/// real mapping, preparation, durable-cache, delivery, and ACK paths.
++/// Four remains the default when the setting is absent/invalid/unreadable.
++const List<int> kSupportedCctvClipCounts = <int>[1, 2, 4];
++
++/// Default clip count when no valid `cameraCount` setting is stored.
++const int kDefaultCctvClipCount = 4;
++
++/// True when [count] is a supported manifest clip count (1, 2, or 4).
++bool isSupportedCctvClipCount(int count) =>
++    kSupportedCctvClipCounts.contains(count);
++
++/// Camera ids expected for a [count]-clip manifest: the first [count]
++/// canonical slot ids in wall order (e.g. 2 → {CAM-01, CAM-02}).
++///
++/// Throws [ArgumentError] for unsupported counts.
++List<String> expectedCctvCameraIds(int count) {
++  if (!isSupportedCctvClipCount(count)) {
++    throw ArgumentError.value(
++      count,
++      'count',
++      'must be one of $kSupportedCctvClipCounts',
++    );
++  }
++  return <String>[
++    for (var i = 0; i < count; i++) cctvSlots[i].id,
++  ];
++}
++
+ /// Valid CCTV camera ids, derived from [cctvSlots].
+ ///
+ /// Kept for callers that only need the id set; prefer [cctvSlots] (or
+@@ -401,12 +436,15 @@ PlaybackManifest parseManifest(Map<String, Object?> json) {
+ 
+ /// Validates CCTV manifest rules.
+ ///
+-/// Enforces: non-empty party/channel, version > 0, exactly 4 clips with
+-/// unique ids (each at most [kMaxClipIdLength] characters) and unique
+-/// cameraId each in [kCctvCameraIds] (derived from [cctvSlots]), sane sha256
+-/// (64 hex chars), sizeBytes > 0 and positive duration. Clip `label` values
+-/// are config-driven display strings (owner Q3) and are not length-checked
+-/// here — the tile HUD ellipsizes them.
++/// Enforces: non-empty party/channel, version > 0, exactly 1, 2, or 4 clips
++/// (the supported TV layouts; four remains the default) with unique ids
++/// (each at most [kMaxClipIdLength] characters) and unique cameraId values
++/// whose set equals the first N canonical slot ids in wall order
++/// ([expectedCctvCameraIds]; reordered valid clips remain accepted, gaps such
++/// as {CAM-01, CAM-03} are rejected), sane sha256 (64 hex chars), sizeBytes
++/// > 0 and positive duration. Clip `label` values are config-driven display
++/// strings (owner Q3) and are not length-checked here — the tile HUD
++/// ellipsizes them.
+ Result<PlaybackManifest> validateCctvManifest(PlaybackManifest m) {
+   if (m.partyId.trim().isEmpty) {
+     return const Err<PlaybackManifest>('partyId must be non-empty');
+@@ -417,11 +455,15 @@ Result<PlaybackManifest> validateCctvManifest(PlaybackManifest m) {
+   if (m.version <= 0) {
+     return const Err<PlaybackManifest>('version must be > 0');
+   }
+-  if (m.clips.length != 4) {
++  if (!isSupportedCctvClipCount(m.clips.length)) {
+     return Err<PlaybackManifest>(
+-      'cctv manifest must have exactly 4 clips, got ${m.clips.length}',
++      'cctv manifest must have 1, 2, or 4 clips (exactly 4 clips is the '
++      'default layout), got ${m.clips.length}',
+     );
+   }
++  final Set<String> expectedCameras = expectedCctvCameraIds(
++    m.clips.length,
++  ).toSet();
+   final seenCameras = <String>{};
+   final seenClipIds = <String>{};
+   for (final clip in m.clips) {
+@@ -460,6 +502,17 @@ Result<PlaybackManifest> validateCctvManifest(PlaybackManifest m) {
+       return const Err<PlaybackManifest>('mimeType must be non-empty');
+     }
+   }
++  // Prefix rule: a 1/2/4-clip manifest must carry exactly the first N
++  // canonical cameras (reordered clips are fine; gaps like {CAM-01, CAM-03}
++  // for count 2 are rejected).
++  if (seenCameras.length != expectedCameras.length ||
++      !seenCameras.containsAll(expectedCameras)) {
++    return Err<PlaybackManifest>(
++      'camera set ${seenCameras.toList()..sort()} must equal the first '
++      '${m.clips.length} canonical cameras '
++      '${expectedCameras.toList()..sort()}',
++    );
++  }
+   return Ok<PlaybackManifest>(m);
+ }
+ 
+diff --git a/packages/core_playlist/test/core_playlist_test.dart b/packages/core_playlist/test/core_playlist_test.dart
+index dcd380f28438cb02e9c613f246d027fe71b1f741..0209b7183676a96159a8d36a70b6b6574632c79f 100644
+--- a/packages/core_playlist/test/core_playlist_test.dart
++++ b/packages/core_playlist/test/core_playlist_test.dart
+@@ -385,6 +385,123 @@ void main() {
+     });
+   });
+ 
++  group('cctv clip counts (configurable 1/2/4 layouts)', () {
++    List<ClipDescriptor> firstN(int n) => <ClipDescriptor>[
++      for (var i = 1; i <= n; i++) clipAt(i),
++    ];
++
++    test('supported counts, default, and expected prefixes', () {
++      expect(kSupportedCctvClipCounts, <int>[1, 2, 4]);
++      expect(kDefaultCctvClipCount, 4);
++      expect(isSupportedCctvClipCount(1), isTrue);
++      expect(isSupportedCctvClipCount(2), isTrue);
++      expect(isSupportedCctvClipCount(4), isTrue);
++      expect(isSupportedCctvClipCount(0), isFalse);
++      expect(isSupportedCctvClipCount(3), isFalse);
++      expect(isSupportedCctvClipCount(5), isFalse);
++      expect(expectedCctvCameraIds(1), <String>['CAM-01']);
++      expect(expectedCctvCameraIds(2), <String>['CAM-01', 'CAM-02']);
++      expect(
++        expectedCctvCameraIds(4),
++        <String>['CAM-01', 'CAM-02', 'CAM-03', 'CAM-04'],
++      );
++      expect(() => expectedCctvCameraIds(3), throwsArgumentError);
++    });
++
++    test('1, 2, and 4-clip manifests validate through the real path', () {
++      for (final n in <int>[1, 2, 4]) {
++        final m = manifest(clips: firstN(n));
++        final r = validateCctvManifest(m);
++        expect(r.isOk, isTrue, reason: '$n-clip manifest should validate');
++        // JSON round-trip preserves the count and still validates.
++        final reparsed = parseManifest(m.toJson());
++        expect(reparsed.clips, hasLength(n));
++        expect(validateCctvManifest(reparsed).isOk, isTrue);
++      }
++    });
++
++    test('reordered 1/2/4-clip manifests remain accepted', () {
++      expect(
++        validateCctvManifest(manifest(clips: firstN(2).reversed.toList())).isOk,
++        isTrue,
++      );
++      expect(
++        validateCctvManifest(
++          manifest(
++            clips: <ClipDescriptor>[clipAt(4), clipAt(2), clipAt(1), clipAt(3)],
++          ),
++        ).isOk,
++        isTrue,
++      );
++    });
++
++    test('unsupported counts, gaps, duplicates, and unknown cameras reject', () {
++      for (final count in <int>[0, 3, 5, 6]) {
++        final clips = <ClipDescriptor>[
++          for (var i = 1; i <= count; i++)
++            ClipDescriptor(
++              id: 'clip-$i',
++              cameraId: 'CAM-0$i',
++              storageObjectId: 'obj-$i',
++              sha256: sha('clip-$i'),
++              sizeBytes: 10,
++              duration: const Duration(seconds: 5),
++              mimeType: 'video/mp4',
++            ),
++        ];
++        final r = validateCctvManifest(manifest(clips: clips));
++        expect(r.isErr, isTrue, reason: 'count $count should be rejected');
++      }
++      // Gap: {CAM-01, CAM-03} is not the first-2 prefix.
++      final gap = manifest(
++        clips: <ClipDescriptor>[clipAt(1), clipAt(3)],
++      );
++      final gapResult = validateCctvManifest(gap);
++      expect(gapResult.isErr, isTrue);
++      expect(
++        (gapResult as Err<PlaybackManifest>).message,
++        contains('first 2'),
++      );
++      // {CAM-02} alone is not the first-1 prefix.
++      expect(validateCctvManifest(manifest(clips: <ClipDescriptor>[clipAt(2)])).isErr, isTrue);
++      // Duplicate clip ids within a 2-clip manifest.
++      final dupId = <ClipDescriptor>[clipAt(1), clipAt(1)];
++      expect(validateCctvManifest(manifest(clips: dupId)).isErr, isTrue);
++      // Unknown camera within an otherwise supported count.
++      final unknown = <ClipDescriptor>[
++        clipAt(1),
++        ClipDescriptor(
++          id: 'clip-x',
++          cameraId: 'CAM-05',
++          storageObjectId: 'obj-x',
++          sha256: sha('clip-x'),
++          sizeBytes: 10,
++          duration: const Duration(seconds: 5),
++          mimeType: 'video/mp4',
++        ),
++      ];
++      final unknownResult = validateCctvManifest(manifest(clips: unknown));
++      expect(unknownResult.isErr, isTrue);
++      expect(
++        (unknownResult as Err<PlaybackManifest>).message,
++        contains('CAM-05'),
++      );
++      // Invalid existing metadata still rejected at supported counts.
++      final badSha = <ClipDescriptor>[
++        const ClipDescriptor(
++          id: 'clip-01',
++          cameraId: 'CAM-01',
++          storageObjectId: 'obj-01',
++          sha256: 'not-a-hash',
++          sizeBytes: 10,
++          duration: Duration(seconds: 5),
++          mimeType: 'video/mp4',
++        ),
++      ];
++      expect(validateCctvManifest(manifest(clips: badSha)).isErr, isTrue);
++    });
++  });
++
+   group('clip labels (config-driven, owner Q3)', () {
+     ClipDescriptor labeled(int i, String? label) => ClipDescriptor(
+       id: 'clip-0$i',
+diff --git a/packages/infra_firestore/test/firebase_manifest_source_test.dart b/packages/infra_firestore/test/firebase_manifest_source_test.dart
+index f050480bdb7b308bdbb2363b8e80b05bd1773bb8..e8aff78226be44dc5999ef5a9dd96d374f99b0f4 100644
+--- a/packages/infra_firestore/test/firebase_manifest_source_test.dart
++++ b/packages/infra_firestore/test/firebase_manifest_source_test.dart
+@@ -10,6 +10,7 @@ Map<String, Object?> backendManifest({
+   Object? schemaVersion = 1,
+   String partyId = 'pilot',
+   String channelId = 'main',
++  int count = 4,
+ }) => <String, Object?>{
+   'schemaVersion': schemaVersion,
+   'partyId': partyId,
+@@ -19,7 +20,7 @@ Map<String, Object?> backendManifest({
+   'createdAt': Timestamp.fromDate(DateTime.utc(2026, 10, 29, 13, 0)),
+   'expiresAt': '2026-10-30T13:00:00.000Z',
+   'cameraClips': <Map<String, Object?>>[
+-    for (final int index in List<int>.generate(4, (i) => i + 1))
++    for (final int index in List<int>.generate(count, (i) => i + 1))
+       <String, Object?>{
+         'cameraId': 'CAM-0$index',
+         'objectPath': 'parties/pilot/channels/main/delivery/3/CAM-0$index.mp4',
+@@ -145,4 +146,57 @@ void main() {
+       expect(manifest[1], manifest[0]);
+     },
+   );
++
++  test(
++    '1/2/4-camera backend documents map through the real path and validate',
++    () async {
++      for (final int count in <int>[1, 2, 4]) {
++        final FirebaseManifestSource source = sourceFor(
++          (_) => Stream<Map<String, Object?>?>.value(
++            backendManifest(count: count),
++          ),
++        );
++        final PlaybackManifest manifest = await source
++            .watchCurrent(partyId: 'pilot', channelId: 'main')
++            .first;
++        expect(manifest.clips, hasLength(count));
++        expect(
++          manifest.clips.map((clip) => clip.cameraId).toList(),
++          expectedCctvCameraIds(count),
++        );
++        // Storage mapping carries the delivery object path and digest.
++        expect(
++          manifest.clips.first.storageObjectId,
++          'parties/pilot/channels/main/delivery/3/CAM-01.mp4',
++        );
++        expect(validateCctvManifest(manifest).isOk, isTrue);
++        // Durable-cache restoration shape: JSON round-trip keeps count.
++        final PlaybackManifest restored = parseManifest(manifest.toJson());
++        expect(restored.clips, hasLength(count));
++        expect(validateCctvManifest(restored).isOk, isTrue);
++      }
++    },
++  );
++
++  test('3-camera and gapped backend documents fail validation', () async {
++    final FirebaseManifestSource threeSource = sourceFor(
++      (_) => Stream<Map<String, Object?>?>.value(backendManifest(count: 3)),
++    );
++    final PlaybackManifest three = await threeSource
++        .watchCurrent(partyId: 'pilot', channelId: 'main')
++        .first;
++    expect(three.clips, hasLength(3));
++    expect(validateCctvManifest(three).isErr, isTrue);
++
++    final Map<String, Object?> gapped = backendManifest(count: 2);
++    ((gapped['cameraClips']! as List)[1] as Map<String, Object?>)['cameraId'] =
++        'CAM-03';
++    final FirebaseManifestSource gapSource = sourceFor(
++      (_) => Stream<Map<String, Object?>?>.value(gapped),
++    );
++    final PlaybackManifest gap = await gapSource
++        .watchCurrent(partyId: 'pilot', channelId: 'main')
++        .first;
++    expect(validateCctvManifest(gap).isErr, isTrue);
++  });
+ }
+diff --git a/packages/infra_signed_urls/lib/src/firebase_delivery_client.dart b/packages/infra_signed_urls/lib/src/firebase_delivery_client.dart
+index 0534a3a960e08fe5bcd1c95238e7759ae03dddf8..1f69d8ecc5319e0ab86e502536bd6617bdf4b82e 100644
+--- a/packages/infra_signed_urls/lib/src/firebase_delivery_client.dart
++++ b/packages/infra_signed_urls/lib/src/firebase_delivery_client.dart
+@@ -73,9 +73,17 @@ final class FirebaseDeliveryUrls {
+       );
+     }
+     final Set<String> cameras = this.clips.map((clip) => clip.cameraId).toSet();
++    // 1/2/4-camera layouts: the response must carry exactly the first-N
++    // canonical cameras (reordered clips are fine; gaps and extras rejected).
++    if (!isSupportedCctvClipCount(this.clips.length)) {
++      throw const FormatException(
++        'delivery response must contain one URL per canonical camera',
++      );
++    }
++    final List<String> expected = expectedCctvCameraIds(this.clips.length);
+     if (cameras.length != this.clips.length ||
+-        cameras.length != cctvSlots.length ||
+-        !cameras.containsAll(cctvSlots.map((slot) => slot.id))) {
++        cameras.length != expected.length ||
++        !cameras.containsAll(expected)) {
+       throw const FormatException(
+         'delivery response must contain one URL per canonical camera',
+       );
+@@ -208,16 +216,24 @@ final class FirebaseDeliveryClient implements DeliveryAcknowledger {
+     if (partyId != _identity.partyId) {
+       throw ArgumentError.value(partyId, 'partyId', 'does not match identity');
+     }
+-    final Set<String> canonicalCameras = cctvSlots
+-        .map((CctvSlot slot) => slot.id)
+-        .toSet();
++    // ACK covers the complete received manifest (1, 2, or 4 clips): the hash
++    // set must exactly equal the first-N canonical prefix — reduced layouts
++    // still ACK every received clip, extras rejected.
+     if (manifestVersion <= 0 ||
+-        verifiedClipHashes.length != cctvSlots.length ||
+-        !verifiedClipHashes.keys.toSet().containsAll(canonicalCameras)) {
++        !isSupportedCctvClipCount(verifiedClipHashes.length)) {
++      throw ArgumentError(
++        'ACK requires a positive version and one hash for each canonical camera',
++      );
++    }
++    final List<String> expectedCameras = expectedCctvCameraIds(
++      verifiedClipHashes.length,
++    );
++    if (!verifiedClipHashes.keys.toSet().containsAll(expectedCameras)) {
+       throw ArgumentError(
+         'ACK requires a positive version and one hash for each canonical camera',
+       );
+     }
++    final Set<String> canonicalCameras = expectedCameras.toSet();
+     final Map<String, String> hashes = <String, String>{};
+     for (final String cameraId in canonicalCameras) {
+       final String hash = verifiedClipHashes[cameraId]!.toLowerCase();
+diff --git a/packages/infra_signed_urls/test/backend_contract_fixture_test.dart b/packages/infra_signed_urls/test/backend_contract_fixture_test.dart
+index 972e6a852e503a02294a85316c6cff216a8286ef..16208dd38eff5d98b7f7593d437bc134221145df 100644
+--- a/packages/infra_signed_urls/test/backend_contract_fixture_test.dart
++++ b/packages/infra_signed_urls/test/backend_contract_fixture_test.dart
+@@ -187,8 +187,7 @@ void main() {
+ 
+   test(
+     'ACK response must identify the requested version and completed purge',
+-    () async {
+-      final Map<String, String> hashes = <String, String>{
++    () async {      final Map<String, String> hashes = <String, String>{
+         for (final CctvSlot slot in cctvSlots)
+           slot.id: String.fromCharCode(96 + slot.index + 1) * 64,
+       };
+@@ -243,6 +242,136 @@ void main() {
+       );
+     },
+   );
++
++  test(
++    '1/2/4-camera delivery URL and ACK validation through the real client',
++    () async {
++      for (final int count in <int>[1, 2, 4]) {
++        final List<String> cameras = expectedCctvCameraIds(count);
++        final Map<String, String> hashes = <String, String>{
++          for (final String camera in cameras) camera: 'a' * 64,
++        };
++        final _FixtureCallable invoker = _FixtureCallable(<String, Object?>{
++          'getDeliveryUrls': <String, Object?>{
++            'manifestVersion': 3,
++            'manifestHash': 'c' * 64,
++            'clips': <Map<String, Object?>>[
++              for (final String camera in cameras)
++                <String, Object?>{
++                  'cameraId': camera,
++                  'sha256': hashes[camera],
++                  'url': 'https://delivery.test/$camera.mp4',
++                  'expiresAt': '2030-01-01T00:00:00.000Z',
++                },
++            ],
++          },
++          'acknowledgeDelivery': <String, Object?>{
++            'ackId': 'backend-ack-$count',
++            'manifestVersion': 3,
++            'purged': true,
++          },
++        });
++        final FirebaseDeliveryClient client = FirebaseDeliveryClient(
++          identity: FirebaseTvIdentity(partyId: 'pilot', deviceId: 'tv-pilot'),
++          callableInvoker: invoker,
++          now: () => DateTime.utc(2026, 10, 29),
++        );
++        final FirebaseDeliveryUrls urls = await client.getDeliveryUrls(
++          channelId: 'main',
++        );
++        expect(urls.clips, hasLength(count));
++        expect(
++          urls.clips.map((clip) => clip.cameraId).toList(),
++          cameras,
++        );
++        // ACK hashes must exactly match the received manifest: the complete
++        // received set is ACKed (reduced layouts still ACK everything).
++        await client.acknowledge(
++          partyId: 'pilot',
++          channelId: 'main',
++          manifestVersion: 3,
++          verifiedClipHashes: hashes,
++        );
++        expect(invoker.calls.last.$2['clipHashes'], hashes);
++      }
++    },
++  );
++
++  test('delivery and ACK reject unsupported counts, gaps, and extras', () async {
++    FirebaseDeliveryClient clientFor(Object? response) => FirebaseDeliveryClient(
++      identity: FirebaseTvIdentity(partyId: 'pilot', deviceId: 'tv-pilot'),
++      callableInvoker: _OneResponseCallable(response),
++      now: () => DateTime.utc(2026, 10, 29),
++    );
++    Map<String, Object?> clip(String camera) => <String, Object?>{
++      'cameraId': camera,
++      'sha256': 'a' * 64,
++      'url': 'https://delivery.test/$camera.mp4',
++      'expiresAt': '2030-01-01T00:00:00.000Z',
++    };
++    // 3 clips: unsupported count.
++    await expectLater(
++      clientFor(<String, Object?>{
++        'manifestVersion': 1,
++        'manifestHash': 'c' * 64,
++        'clips': [clip('CAM-01'), clip('CAM-02'), clip('CAM-03')],
++      }).getDeliveryUrls(channelId: 'main'),
++      throwsFormatException,
++    );
++    // Gap: {CAM-01, CAM-03} is not the first-2 prefix.
++    await expectLater(
++      clientFor(<String, Object?>{
++        'manifestVersion': 1,
++        'manifestHash': 'c' * 64,
++        'clips': [clip('CAM-01'), clip('CAM-03')],
++      }).getDeliveryUrls(channelId: 'main'),
++      throwsFormatException,
++    );
++    // Duplicate camera.
++    await expectLater(
++      clientFor(<String, Object?>{
++        'manifestVersion': 1,
++        'manifestHash': 'c' * 64,
++        'clips': [clip('CAM-01'), clip('CAM-01')],
++      }).getDeliveryUrls(channelId: 'main'),
++      throwsFormatException,
++    );
++    // ACK with an extra hash beyond the 2-clip prefix is rejected client-side.
++    await expectLater(
++      clientFor(<String, Object?>{
++        'ackId': 'ack',
++        'manifestVersion': 1,
++        'purged': true,
++      }).acknowledge(
++        partyId: 'pilot',
++        channelId: 'main',
++        manifestVersion: 1,
++        verifiedClipHashes: <String, String>{
++          'CAM-01': 'a' * 64,
++          'CAM-02': 'a' * 64,
++          'CAM-03': 'a' * 64,
++        },
++      ),
++      throwsArgumentError,
++    );
++    // ACK with a gapped 2-set is rejected client-side.
++    await expectLater(
++      clientFor(<String, Object?>{
++        'ackId': 'ack',
++        'manifestVersion': 1,
++        'purged': true,
++      }).acknowledge(
++        partyId: 'pilot',
++        channelId: 'main',
++        manifestVersion: 1,
++        verifiedClipHashes: <String, String>{
++          'CAM-01': 'a' * 64,
++          'CAM-03': 'a' * 64,
++        },
++      ),
++      throwsArgumentError,
++    );
++  });
+ }
+ 
+ final class _OneResponseCallable implements FirebaseCallableInvoker {
+diff --git a/packages/infra_signed_urls/test/live_delivery_test.dart b/packages/infra_signed_urls/test/live_delivery_test.dart
+index 893b18f78ccb3847a2c1dd03267f95e636034688..5c7a64602c95f462030cf3661717ef4d25563594 100644
+--- a/packages/infra_signed_urls/test/live_delivery_test.dart
++++ b/packages/infra_signed_urls/test/live_delivery_test.dart
+@@ -9,12 +9,15 @@ import 'package:infra_signed_urls/infra_signed_urls.dart';
+ import 'support/https_fixture_server.dart';
+ 
+ final class _CallableFake implements FirebaseCallableInvoker {
+-  _CallableFake(this.server, this.sha256);
++  _CallableFake(this.server, this.sha256, {this.count = 4});
+ 
+   final HttpsFixtureServer server;
+   final String sha256;
++  final int count;
+   final List<(String, Map<String, Object?>)> calls = [];
+ 
++  List<String> get cameras => expectedCctvCameraIds(count);
++
+   @override
+   Future<Object?> call(String name, Map<String, Object?> payload) async {
+     calls.add((name, Map<String, Object?>.of(payload)));
+@@ -25,9 +28,9 @@ final class _CallableFake implements FirebaseCallableInvoker {
+         'manifestVersion': 7,
+         'manifestHash': 'f' * 64,
+         'clips': <Map<String, Object?>>[
+-          for (final CctvSlot slot in cctvSlots)
++          for (final String camera in cameras)
+             <String, Object?>{
+-              'cameraId': slot.id,
++              'cameraId': camera,
+               'sha256': sha256,
+               'url': server
+                   .uriFor(refreshed ? '/fresh' : '/expired')
+@@ -145,4 +148,100 @@ void main() {
+       }
+     },
+   );
++
++  test(
++    '2-camera delivery URL refresh, download, and exact ACK set',
++    () async {
++      final List<int> bytes = <int>[2, 4, 6, 8];
++      final String hash = sha256Hex(bytes);
++      final HttpsFixtureServer server = await HttpsFixtureServer.start(
++        responses: <String, HttpsFixtureResponse>{
++          '/expired': const HttpsFixtureResponse(
++            statusCode: HttpStatus.forbidden,
++          ),
++          '/fresh': HttpsFixtureResponse(
++            statusCode: HttpStatus.ok,
++            body: bytes,
++          ),
++        },
++      );
++      final HttpClient httpClient = testHttpClient();
++      try {
++        final _CallableFake callable = _CallableFake(server, hash, count: 2);
++        final FirebaseDeliveryClient delivery = FirebaseDeliveryClient(
++          identity: FirebaseTvIdentity(partyId: 'pilot', deviceId: 'tv-pilot'),
++          callableInvoker: callable,
++          now: () => DateTime.utc(2026, 10, 29),
++        );
++        final FirebaseUrlSigner signer = FirebaseUrlSigner(
++          deliveryClient: delivery,
++          channelId: 'main',
++        );
++        final ClipDescriptor target = ClipDescriptor(
++          id: 'cam-one',
++          cameraId: 'CAM-01',
++          storageObjectId: 'parties/pilot/delivery/CAM-01.mp4',
++          sha256: hash,
++          sizeBytes: bytes.length,
++          duration: const Duration(seconds: 2),
++          mimeType: 'video/mp4',
++        );
++        final Uri initialUrl = await signer.signFor(target);
++        final Directory cacheRoot = await Directory.systemTemp.createTemp(
++          'delivery-cache-2cam-',
++        );
++        try {
++          final HttpsMediaDownloader downloader = HttpsMediaDownloader(
++            httpClient: httpClient,
++            expiredUrlRefresher: (clip, _) => signer.signFor(clip),
++          );
++          final CachedMedia cached = await downloader.downloadAndCommit(
++            clip: target,
++            source: initialUrl,
++            cacheStore: FileCacheStore(cacheRoot),
++          );
++          expect(await File(cached.localRef).readAsBytes(), bytes);
++          // The 2-clip ACK set exactly matches the received prefix.
++          await delivery.acknowledge(
++            partyId: 'pilot',
++            channelId: 'main',
++            manifestVersion: 7,
++            verifiedClipHashes: <String, String>{
++              'CAM-01': 'a' * 64,
++              'CAM-02': 'b' * 64,
++            },
++          );
++          final (String ackName, Map<String, Object?> ackPayload) =
++              callable.calls.last;
++          expect(ackName, 'acknowledgeDelivery');
++          expect(ackPayload['clipHashes'], <String, String>{
++            'CAM-01': 'a' * 64,
++            'CAM-02': 'b' * 64,
++          });
++          // An extra hash beyond the received prefix is rejected before any
++          // callable is issued.
++          final int callsBefore = callable.calls.length;
++          await expectLater(
++            delivery.acknowledge(
++              partyId: 'pilot',
++              channelId: 'main',
++              manifestVersion: 7,
++              verifiedClipHashes: <String, String>{
++                'CAM-01': 'a' * 64,
++                'CAM-02': 'b' * 64,
++                'CAM-03': 'c' * 64,
++              },
++            ),
++            throwsArgumentError,
++          );
++          expect(callable.calls, hasLength(callsBefore));
++        } finally {
++          await cacheRoot.delete(recursive: true);
++        }
++      } finally {
++        httpClient.close(force: true);
++        await server.close();
++      }
++    },
++  );
+ }
+diff --git a/packages/kernel_app/test/backend_delivery_contract_test.dart b/packages/kernel_app/test/backend_delivery_contract_test.dart
+index 8a7d77034bed818c7ba579acb9c8e7bd8fd4960f..abbed7b344100a1820f8909edbad6d29048f74fe 100644
+--- a/packages/kernel_app/test/backend_delivery_contract_test.dart
++++ b/packages/kernel_app/test/backend_delivery_contract_test.dart
+@@ -38,8 +38,11 @@ final class _BackendCallable
+       );
+       response['manifestVersion'] = currentDeliveryVersion;
+       response['manifestHash'] = 'f' * 64;
++      // The delivery set mirrors the current manifest's camera prefix so
++      // 1/2/4 manifests flow through the same callable path.
+       response['clips'] = <Map<String, Object?>>[
+-        for (final CctvSlot slot in cctvSlots) _deliveryClip(slot.id),
++        for (final String cameraId in _currentCameraIds)
++          _deliveryClip(cameraId),
+       ];
+       return response;
+     }
+@@ -48,6 +51,23 @@ final class _BackendCallable
+       if (rejectAcknowledgements) {
+         throw StateError('backend rejected stale acknowledgement');
+       }
++      // Exact-match gate (mirrors backend canonicalClipsMatch): the ACK hash
++      // set must equal the current manifest's camera prefix with identical
++      // digests — extras and substitutions are rejected, never purged.
++      final Map<String, String> expected = <String, String>{
++        for (final Object? entry in (currentDocument['cameraClips']! as List))
++          (entry! as Map)['cameraId'].toString():
++              (entry as Map)['sha256'].toString(),
++      };
++      final Map<String, Object?> sent = Map<String, Object?>.from(
++        payload['clipHashes']! as Map,
++      );
++      if (sent.length != expected.length ||
++          !expected.keys.every(
++            (camera) => sent[camera] == expected[camera],
++          )) {
++        throw StateError('ACK hash set does not match the current manifest');
++      }
+       return <String, Object?>{
+         'ackId': 'ack-${payload['manifestVersion']}',
+         'manifestVersion': payload['manifestVersion'],
+@@ -83,6 +103,10 @@ final class _BackendCallable
+     };
+   }
+ 
++  List<String> get _currentCameraIds => (currentDocument['cameraClips']! as List<Object?>)
++      .map((clip) => (clip as Map)['cameraId']! as String)
++      .toList();
++
+   HttpsFixtureServer? _server;
+ 
+   set server(HttpsFixtureServer value) => _server = value;
+@@ -99,17 +123,21 @@ Map<String, Object?> _backendManifest({
+   required Map<String, Object?> fixture,
+   required int version,
+   required Map<String, List<int>> bytesByCamera,
++  int? count,
+ }) {
+   final Map<String, Object?> template = Map<String, Object?>.from(
+     fixture['manifest']! as Map,
+   );
+   final String partyId = template['partyId']! as String;
+   final String channelId = template['channelId']! as String;
++  final List<CctvSlot> slots = count == null
++      ? cctvSlots
++      : cctvSlots.take(count).toList();
+   template['version'] = version;
+   template['createdAt'] = DateTime.utc(2026, 10, 29, version).toIso8601String();
+   template['expiresAt'] = '2030-01-01T00:00:00.000Z';
+   template['cameraClips'] = <Map<String, Object?>>[
+-    for (final CctvSlot slot in cctvSlots)
++    for (final CctvSlot slot in slots)
+       <String, Object?>{
+         'cameraId': slot.id,
+         'objectPath':
+@@ -123,10 +151,13 @@ Map<String, Object?> _backendManifest({
+   return template;
+ }
+ 
+-Map<String, List<int>> _bytesForVersion(int version) => <String, List<int>>{
+-  for (final CctvSlot slot in cctvSlots)
+-    slot.id: <int>[version, slot.index + 10, slot.index + 20, version + 30],
+-};
++Map<String, List<int>> _bytesForVersion(int version, {int? count}) =>
++    <String, List<int>>{
++      for (final CctvSlot slot in (count == null
++          ? cctvSlots
++          : cctvSlots.take(count).toList()))
++        slot.id: <int>[version, slot.index + 10, slot.index + 20, version + 30],
++    };
+ 
+ void main() {
+   test(
+@@ -377,4 +408,151 @@ void main() {
+       }
+     },
+   );
++
++  test(
++    '1 and 2-camera manifests flow through mapping, delivery, cache, exact ACK, and offline restore',
++    () async {
++      for (final int count in <int>[1, 2]) {
++        final Map<String, Object?> fixture = _readFixture();
++        final Map<String, List<int>> bytes = _bytesForVersion(
++          5,
++          count: count,
++        );
++        final Map<String, HttpsFixtureResponse> responses =
++            <String, HttpsFixtureResponse>{
++              for (final String camera in expectedCctvCameraIds(count))
++                '/fresh/$camera': HttpsFixtureResponse(
++                  statusCode: HttpStatus.ok,
++                  body: bytes[camera]!,
++                ),
++            };
++        final HttpsFixtureServer server = await HttpsFixtureServer.start(
++          responses: responses,
++        );
++        final HttpClient httpClient = testHttpClient();
++        final Directory root = await Directory.systemTemp.createTemp(
++          'backend-delivery-count-',
++        );
++        final Directory indexRoot = Directory('${root.path}/indexes');
++        try {
++          final _BackendCallable callable = _BackendCallable(fixture: fixture)
++            ..server = server;
++          callable.deliveryRequestCount = 10;
++          callable.currentDocument = _backendManifest(
++            fixture: fixture,
++            version: 5,
++            bytesByCamera: bytes,
++            count: count,
++          );
++          final FirebaseManifestSource manifestSource = FirebaseManifestSource(
++            watchDocumentData: FirebaseCallableManifestTransport(
++              identity: FirebaseTvIdentity(
++                partyId: 'pilot',
++                deviceId: 'tv-pilot',
++              ),
++              callableInvoker: callable,
++              pollInterval: const Duration(seconds: 1),
++            ).watchDocumentData,
++          );
++          final FirebaseDeliveryClient delivery = FirebaseDeliveryClient(
++            identity: FirebaseTvIdentity(partyId: 'pilot', deviceId: 'tv-pilot'),
++            callableInvoker: callable,
++            now: () => DateTime.utc(2026, 10, 29),
++          );
++          final FirebaseUrlSigner signer = FirebaseUrlSigner(
++            deliveryClient: delivery,
++            channelId: 'main',
++          );
++          final FileCacheStore cache = FileCacheStore(
++            root,
++            indexRoot: indexRoot,
++          );
++          final FileManifestIndexStore indexes = FileManifestIndexStore(
++            indexRoot,
++          );
++          final PreparePlayback service = PreparePlayback(
++            manifestSource: manifestSource,
++            urlSigner: signer,
++            downloader: HttpsMediaDownloader(httpClient: httpClient),
++            cacheStore: cache,
++            manifestIndexStore: indexes,
++            acknowledger: delivery,
++          );
++          addTearDown(service.dispose);
++
++          final PlaybackSyncSnapshot ready = await service.prepareLatest(
++            partyId: 'pilot',
++            channelId: 'main',
++          );
++          expect(ready.state, PlaybackSyncState.ready, reason: ready.error);
++          expect(ready.manifest?.version, 5);
++          expect(ready.manifest?.clips, hasLength(count));
++          expect(ready.mediaByClipId, hasLength(count));
++          final CommittedManifestIndex committed =
++              (await indexes.readCommitted(
++                partyId: 'pilot',
++                channelId: 'main',
++              ))!;
++          expect(committed.clipHashToLocalRef, hasLength(count));
++          for (final ClipDescriptor clip in ready.manifest!.clips) {
++            expect(
++              await File(committed.localRefFor(clip)!).readAsBytes(),
++              bytes[clip.cameraId],
++            );
++          }
++          // The ACK carries exactly the received prefix hashes.
++          final (String ackName, Map<String, Object?> ackPayload) =
++              callable.calls.singleWhere(
++                (call) => call.$1 == 'acknowledgeDelivery',
++              );
++          expect(ackName, 'acknowledgeDelivery');
++          expect(ackPayload['clipHashes'], <String, String>{
++            for (final ClipDescriptor clip in ready.manifest!.clips)
++              clip.cameraId: clip.sha256,
++          });
++          // An extra hash beyond the received prefix is rejected by the
++          // exact-match gate before any purge.
++          await expectLater(
++            delivery.acknowledge(
++              partyId: 'pilot',
++              channelId: 'main',
++              manifestVersion: 5,
++              verifiedClipHashes: <String, String>{
++                for (final ClipDescriptor clip in ready.manifest!.clips)
++                  clip.cameraId: clip.sha256,
++                'CAM-04': 'd' * 64,
++              },
++            ),
++            throwsArgumentError,
++          );
++          // Offline restore serves the same count without network.
++          final int callsBeforeOffline = callable.calls.length;
++          final PreparePlayback secondInstance = PreparePlayback(
++            manifestSource: FirebaseManifestSource(
++              watchDocumentData: (_) =>
++                  throw StateError('offline restore requested the network'),
++            ),
++            urlSigner: signer,
++            downloader: HttpsMediaDownloader(httpClient: httpClient),
++            cacheStore: FileCacheStore(root, indexRoot: indexRoot),
++            manifestIndexStore: FileManifestIndexStore(indexRoot),
++            acknowledger: delivery,
++          );
++          addTearDown(secondInstance.dispose);
++          final PlaybackSyncSnapshot restored = await secondInstance.bootOffline(
++            partyId: 'pilot',
++            channelId: 'main',
++          );
++          expect(restored.state, PlaybackSyncState.usingCache);
++          expect(restored.manifest?.version, 5);
++          expect(restored.mediaByClipId, hasLength(count));
++          expect(callable.calls, hasLength(callsBeforeOffline));
++        } finally {
++          httpClient.close(force: true);
++          await server.close();
++          await root.delete(recursive: true);
++        }
++      }
++    },
++  );
+ }
+diff --git a/packages/kernel_app/test/prepare_playback_test.dart b/packages/kernel_app/test/prepare_playback_test.dart
+index 4a8d9c138ac4f3c2523a47dc63199fded7e8260b..ae75edfddc2dee951e57189780a72ca19b006f1e 100644
+--- a/packages/kernel_app/test/prepare_playback_test.dart
++++ b/packages/kernel_app/test/prepare_playback_test.dart
+@@ -203,8 +203,7 @@ List<int> _bytesFor(ClipDescriptor clip) {
+   return <int>[firstByte, firstByte + 10, firstByte + 20];
+ }
+ 
+-PlaybackManifest _manifest({int version = 1, List<ClipDescriptor>? clips}) {
+-  final List<ClipDescriptor> selected =
++PlaybackManifest _manifest({int version = 1, List<ClipDescriptor>? clips}) {  final List<ClipDescriptor> selected =
+       clips ??
+       <ClipDescriptor>[
+         for (var i = 1; i <= 4; i++)
+@@ -608,4 +607,109 @@ void main() {
+       expect(ack.records.map((record) => record.version), <int>[1]);
+     },
+   );
++
++  test(
++    '1 and 2-camera manifests prepare, ACK the complete set, and restore offline',
++    () async {
++      for (final int count in <int>[1, 2]) {
++        final _CacheStore cache = _CacheStore();
++        final _IndexStore indexes = _IndexStore();
++        final _Downloader downloader = _Downloader();
++        final _Acknowledger ack = _Acknowledger();
++        final List<ClipDescriptor> clips = _manifest().clips
++            .take(count)
++            .toList();
++        final PreparePlayback service = _useCase(
++          cache: cache,
++          index: indexes,
++          downloader: downloader,
++          acknowledger: ack,
++        );
++        addTearDown(service.dispose);
++        final PlaybackManifest manifest = _manifest(
++          version: 1,
++          clips: clips,
++        );
++        final PlaybackSyncSnapshot prepared = await service.prepareManifest(
++          manifest,
++        );
++        expect(prepared.state, PlaybackSyncState.ready);
++        expect(prepared.mediaByClipId, hasLength(count));
++        expect(indexes.indexes.values.single.committedVersion, 1);
++        // The ACK covers the complete received manifest (first-N prefix).
++        expect(ack.records.single.hashes, hasLength(count));
++        expect(
++          ack.records.single.hashes,
++          <String, String>{
++            for (final ClipDescriptor clip in clips)
++              clip.cameraId: clip.sha256,
++          },
++        );
++        expect(
++          ack.records.single.hashes.keys.toSet(),
++          expectedCctvCameraIds(count).toSet(),
++        );
++        // Durable-cache restoration serves the same count without network.
++        final _Downloader offlineDownloader = _Downloader();
++        final PreparePlayback offline = _useCase(
++          cache: cache,
++          index: indexes,
++          downloader: offlineDownloader,
++          acknowledger: _Acknowledger(),
++        );
++        addTearDown(offline.dispose);
++        final PlaybackSyncSnapshot cached = await offline.bootOffline(
++          partyId: 'party-1',
++          channelId: 'cctv',
++        );
++        expect(cached.state, PlaybackSyncState.usingCache);
++        expect(cached.mediaByClipId, hasLength(count));
++        expect(offlineDownloader.downloadCount, 0);
++      }
++    },
++  );
++
++  test(
++    'unsupported counts and gapped camera sets are fatal without ACK',
++    () async {
++      for (final List<ClipDescriptor> clips in <List<ClipDescriptor>>[
++        // 3 clips: unsupported count.
++        _manifest().clips.take(3).toList(),
++        // Gap: {CAM-01, CAM-03}.
++        <ClipDescriptor>[_manifest().clips[0], _manifest().clips[2]],
++        // Unknown camera at a supported count.
++        <ClipDescriptor>[
++          _manifest().clips[0],
++          ClipDescriptor(
++            id: 'bad-cam',
++            cameraId: 'CAM-05',
++            storageObjectId: 'v1-camera-9.mp4',
++            sha256: sha256Hex(<int>[9, 9, 9]),
++            sizeBytes: 3,
++            duration: const Duration(seconds: 5),
++            mimeType: 'video/mp4',
++          ),
++        ],
++      ]) {
++        final _CacheStore cache = _CacheStore();
++        final _IndexStore indexes = _IndexStore();
++        final _Downloader downloader = _Downloader();
++        final _Acknowledger ack = _Acknowledger();
++        final PreparePlayback service = _useCase(
++          cache: cache,
++          index: indexes,
++          downloader: downloader,
++          acknowledger: ack,
++        );
++        addTearDown(service.dispose);
++        final PlaybackSyncSnapshot invalid = await service.prepareManifest(
++          _manifest(version: 1, clips: clips),
++        );
++        expect(invalid.state, PlaybackSyncState.errorFatal);
++        expect(indexes.indexes, isEmpty);
++        expect(ack.records, isEmpty);
++        expect(downloader.downloadCount, 0);
++      }
++    },
++  );
+ }
+diff --git a/backend/functions/src/host_join.ts b/backend/functions/src/host_join.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..fc7fe847c714fb0b46e9c35335c78fe54d3119f0
+--- /dev/null
++++ b/backend/functions/src/host_join.ts
+@@ -0,0 +1,186 @@
++import { createHash, randomBytes } from "node:crypto";
++import { FieldValue, Firestore, Timestamp } from "firebase-admin/firestore";
++import {
++  BackendError,
++  CreateHostInviteResult,
++  JoinHostResult,
++  parseCreateHostInviteInput,
++  parseJoinHostInput,
++} from "./contracts";
++import { HOST_INVITE_TTL_MS } from "./config";
++import { assertRegisteredTvDevice } from "./auth";
++
++export interface HostJoinServiceOptions {
++  db: Firestore;
++  now?: () => Date;
++}
++
++function inviteTokenHash(token: string): string {
++  return createHash("sha256").update(token).digest("hex");
++}
++
++function inviteRef(db: Firestore, partyId: string, inviteId: string) {
++  return db.doc(`parties/${partyId}/hostInvites/${inviteId}`);
++}
++
++/**
++ * Host invite + redemption service.
++ *
++ * Only a registered TV may mint a short-lived host invite. The token is
++ * returned once and only its SHA-256 hash is stored, bound to
++ * party/channel/expiry. Redemption is transactional for a separate phone
++ * identity with the server-assigned host role: same-device redemption
++ * retries are idempotent, while other-device replay, expiry, guest PIN
++ * reuse, and client-only role changes can never grant host access. Legacy
++ * joinParty remains guest-only (see join_party.ts: non-guest device docs
++ * are rejected and the role is always written server-side).
++ */
++export function createHostJoinService(options: HostJoinServiceOptions): {
++  createHostInvite(value: unknown): Promise<CreateHostInviteResult>;
++  joinHost(value: unknown): Promise<JoinHostResult>;
++} {
++  const { db } = options;
++  const now = options.now ?? (() => new Date());
++
++  async function createHostInvite(value: unknown): Promise<CreateHostInviteResult> {
++    const input = parseCreateHostInviteInput(value);
++    const tv = await assertRegisteredTvDevice(db, input);
++    const token = `hi-${randomBytes(24).toString("hex")}`;
++    const tokenHash = inviteTokenHash(token);
++    const inviteId = tokenHash.slice(0, 32);
++    const createdAt = now();
++    const expiresAt = new Date(createdAt.getTime() + HOST_INVITE_TTL_MS);
++    await inviteRef(db, tv.partyId, inviteId).create({
++      inviteId,
++      tokenHash,
++      partyId: tv.partyId,
++      channelId: tv.channelId,
++      status: "pending",
++      createdByDevice: tv.deviceId,
++      usedByDevice: null,
++      createdAt: FieldValue.serverTimestamp(),
++      expiresAt: Timestamp.fromDate(expiresAt),
++    });
++    return {
++      partyId: tv.partyId,
++      channelId: tv.channelId,
++      inviteToken: token,
++      expiresAt: expiresAt.toISOString(),
++    };
++  }
++
++  async function joinHost(value: unknown): Promise<JoinHostResult> {
++    const input = parseJoinHostInput(value);
++    const tokenHash = inviteTokenHash(input.inviteToken);
++    const inviteId = tokenHash.slice(0, 32);
++    return db.runTransaction(async (transaction) => {
++      const inviteSnap = await transaction.get(inviteRef(db, input.partyId, inviteId));
++      if (!inviteSnap.exists) {
++        throw new BackendError("FORBIDDEN", "Host invite is invalid or expired.");
++      }
++      const invite = inviteSnap.data()!;
++      if (
++        invite.tokenHash !== tokenHash ||
++        invite.partyId !== input.partyId ||
++        invite.channelId !== input.channelId
++      ) {
++        throw new BackendError("FORBIDDEN", "Host invite is invalid or expired.");
++      }
++      const expiresMs =
++        invite.expiresAt instanceof Timestamp
++          ? invite.expiresAt.toDate().getTime()
++          : Date.parse(String(invite.expiresAt));
++      if (!Number.isFinite(expiresMs) || expiresMs <= now().getTime()) {
++        throw new BackendError("FORBIDDEN", "Host invite is invalid or expired.");
++      }
++      // Cross-party / wrong-channel tokens never redeem: the invite doc lives
++      // under the party path and binds the channel explicitly.
++      const partyRef = db.doc(`parties/${input.partyId}`);
++      const channelRef = partyRef.collection("channels").doc(input.channelId);
++      const deviceRef = partyRef.collection("devices").doc(input.deviceId);
++      const [partySnap, channelSnap, deviceSnap] = await Promise.all([
++        transaction.get(partyRef),
++        transaction.get(channelRef),
++        transaction.get(deviceRef),
++      ]);
++      if (!partySnap.exists || partySnap.data()?.status !== "active") {
++        throw new BackendError("FORBIDDEN", "Host invite is invalid or expired.");
++      }
++      if (
++        !channelSnap.exists ||
++        channelSnap.data()?.partyId !== input.partyId ||
++        channelSnap.data()?.status !== "active" ||
++        partySnap.data()?.activeChannelId !== input.channelId
++      ) {
++        throw new BackendError("FORBIDDEN", "Host invite is invalid or expired.");
++      }
++      // Other-device replay: an invite redeemed by one phone cannot admit
++      // another phone, even with the same token.
++      if (
++        typeof invite.usedByDevice === "string" &&
++        invite.usedByDevice !== input.deviceId
++      ) {
++        throw new BackendError("FORBIDDEN", "Host invite is invalid or expired.");
++      }
++      if (deviceSnap.exists) {
++        const device = deviceSnap.data()!;
++        if (
++          device.partyId !== input.partyId ||
++          device.status !== "active" ||
++          (typeof device.deviceId === "string" && device.deviceId !== input.deviceId)
++        ) {
++          throw new BackendError("FORBIDDEN", "Host invite is invalid or expired.");
++        }
++        // A guest-PIN registration (role guest) or any non-host doc can never
++        // be upgraded by re-presenting the invite for a different device, and
++        // a client-supplied role string is ignored: the role below is always
++        // written server-side.
++        if (device.role === "host") {
++          if (invite.status !== "redeemed" || invite.usedByDevice !== input.deviceId) {
++            transaction.update(inviteRef(db, input.partyId, inviteId), {
++              status: "redeemed",
++              usedByDevice: input.deviceId,
++              redeemedAt: FieldValue.serverTimestamp(),
++            });
++          }
++          return {
++            partyId: input.partyId,
++            deviceId: input.deviceId,
++            channelId: input.channelId,
++            role: "host" as const,
++            status: "active" as const,
++            created: false,
++          };
++        }
++        throw new BackendError("FORBIDDEN", "Host invite is invalid or expired.");
++      }
++      transaction.set(deviceRef, {
++        partyId: input.partyId,
++        deviceId: input.deviceId,
++        role: "host",
++        status: "active",
++        registeredAt: FieldValue.serverTimestamp(),
++      });
++      transaction.update(inviteRef(db, input.partyId, inviteId), {
++        status: "redeemed",
++        usedByDevice: input.deviceId,
++        redeemedAt: FieldValue.serverTimestamp(),
++      });
++      return {
++        partyId: input.partyId,
++        deviceId: input.deviceId,
++        channelId: input.channelId,
++        role: "host" as const,
++        status: "active" as const,
++        created: true,
++      };
++    });
++  }
++
++  return { createHostInvite, joinHost };
++}
++
++/** Test/ops helper: hash an invite token to locate its stored invite doc. */
++export function hashHostInviteToken(token: string): string {
++  return inviteTokenHash(token);
++}
+diff --git a/backend/functions/src/host_media.ts b/backend/functions/src/host_media.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..6bc77f64026d905ecc3d5ae6ca9529f88d5a80a6
+--- /dev/null
++++ b/backend/functions/src/host_media.ts
+@@ -0,0 +1,439 @@
++import { Bucket, File } from "@google-cloud/storage";
++import { FieldValue, Firestore, Timestamp } from "firebase-admin/firestore";
++import {
++  BackendError,
++  DeleteHostVideoResult,
++  GenerateHostVideoResult,
++  GetHostVideoPreviewResult,
++  HostSeedEntry,
++  HostSeedStatus,
++  parseDeleteHostVideoInput,
++  parseGenerateHostVideoInput,
++  parseGetHostVideoPreviewInput,
++  parseListHostVideosInput,
++} from "./contracts";
++import {
++  DELIVERY_URL_TTL_SECONDS,
++  HOST_PREVIEW_TTL_MS,
++  REQUIRED_CAMERA_IDS,
++  hostPreviewObjectPath,
++} from "./config";
++import { assertRegisteredHostDevice } from "./auth";
++import { FirestoreGenerationStore } from "./generation_store";
++
++export interface HostMediaServiceOptions {
++  db: Firestore;
++  bucket: Bucket;
++  now?: () => Date;
++  signPreviewUrl?: (file: File, expiresAt: Date) => Promise<string>;
++  deleteObject?: (file: File) => Promise<void>;
++}
++
++/**
++ * Server-backed seed catalog (cycle-12 host administration).
++ *
++ * Catalog entries live at `parties/{partyId}/seedVideos/{seedId}` and carry
++ * generation status plus the camera video references. Deletion granularity:
++ * `deleteHostVideo` removes selected seed entries and their associated
++ * preview + delivery objects, revokes an affected current manifest whose
++ * jobId matches a deleted seed, and preserves accounting records (costLogs
++ * / usage ledger rows are never deleted). Expiry: each seed carries
++ * `expiresAt` (creation + HOST_PREVIEW_TTL_MS); the retention sweep expires
++ * due seeds and deletes their preview objects, while live seeds protect
++ * their preview paths from the orphan pass. Direct client access remains
++ * denied: callable-only Firestore docs (catch-all deny in firestore.rules)
++ * and callable-only Storage objects (catch-all deny in storage.rules);
++ * preview URLs are signed on demand and never persisted.
++ *
++ * Previews are separately referenced (`hostPreviews/{seedId}/…`) from
++ * delivery objects (`channels/{channel}/delivery/…`) and are materialized
++ * before delivery objects can be ACK-purged (eagerly after the job is
++ * ready, retried lazily on list/preview reads), so an ACK purge of delivery
++ * bytes never removes preview bytes.
++ */
++export function jobIdForHostSeed(seedId: string): string {
++  return `hv-${seedId}`;
++}
++
++function seedIdForHostJob(jobId: string): string | undefined {
++  return jobId.startsWith("hv-") ? jobId.slice("hv-".length) : undefined;
++}
++
++function seedRef(db: Firestore, partyId: string, seedId: string) {
++  return db.doc(`parties/${partyId}/seedVideos/${seedId}`);
++}
++
++function jobRef(db: Firestore, partyId: string, jobId: string) {
++  return db.doc(`parties/${partyId}/jobs/${jobId}`);
++}
++
++export function createHostMediaService(options: HostMediaServiceOptions): {
++  listHostVideos(value: unknown): Promise<{ videos: HostSeedEntry[] }>;
++  generateHostVideo(value: unknown): Promise<GenerateHostVideoResult>;
++  getHostVideoPreview(value: unknown): Promise<GetHostVideoPreviewResult>;
++  deleteHostVideo(value: unknown): Promise<DeleteHostVideoResult>;
++} {
++  const { db, bucket } = options;
++  const now = options.now ?? (() => new Date());
++  const signPreviewUrl =
++    options.signPreviewUrl ??
++    (async (file, expiresAt) => {
++      const [url] = await file.getSignedUrl({ action: "read", expires: expiresAt, version: "v4" });
++      return url;
++    });
++  const deleteObject =
++    options.deleteObject ??
++    (async (file) => {
++      await file.delete({ ignoreNotFound: true });
++    });
++  const store = new FirestoreGenerationStore({ db, bucket, now });
++
++  function exposedIso(value: unknown): string {
++    if (value instanceof Timestamp) return value.toDate().toISOString();
++    if (value instanceof Date) return value.toISOString();
++    if (typeof value === "string") return value;
++    return now().toISOString();
++  }
++
++  async function syncSeedStatus(
++    partyId: string,
++    seedSnap: FirebaseFirestore.DocumentSnapshot,
++  ): Promise<FirebaseFirestore.DocumentData | undefined> {
++    const seed = seedSnap.data();
++    if (!seed || seed.status === "deleted") return seed ?? undefined;
++    try {
++      const jobSnap = await jobRef(db, partyId, String(seed.jobId)).get();
++      if (!jobSnap.exists) return seed;
++      const job = jobSnap.data()!;
++      const state = String(job.state);
++      const next: HostSeedStatus | undefined =
++        state === "ready" || state === "delivering" || state === "purged"
++          ? "ready"
++          : state === "failed" || state === "expired"
++            ? "failed"
++            : state === "running"
++              ? "running"
++              : undefined;
++      if (next && next !== seed.status) {
++        await seedSnap.ref.update({ status: next, updatedAt: FieldValue.serverTimestamp() }).catch(() => undefined);
++        return { ...seed, status: next };
++      }
++      return seed;
++    } catch {
++      return seed;
++    }
++  }
++
++  /** Copies delivery bytes to separately referenced preview objects (idempotent). */
++  async function ensurePreviewCopies(
++    partyId: string,
++    seedId: string,
++    clips: Array<{ cameraId: string; objectPath: string; sha256: string }>,
++    previewExpiresAt: Date,
++  ): Promise<string[]> {
++    const paths: string[] = [];
++    for (const clip of clips) {
++      const previewPath = hostPreviewObjectPath(partyId, seedId, clip.cameraId);
++      const preview = bucket.file(previewPath);
++      const [exists] = await preview.exists().catch(() => [false] as unknown as [boolean]);
++      if (!exists) {
++        // Deleted seeds must never recreate previews: the caller checks the
++        // seed status inside a transaction first; this copy is the
++        // materialization step only for live seeds.
++        await bucket.file(clip.objectPath).copy(preview);
++        await preview
++          .setMetadata({
++            contentType: "video/mp4",
++            customTime: previewExpiresAt.toISOString(),
++            metadata: {
++              expiresAt: previewExpiresAt.toISOString(),
++              partyId,
++              seedId,
++              jobId: jobIdForHostSeed(seedId),
++              cameraId: clip.cameraId,
++              purpose: "host-preview",
++              sha256: clip.sha256,
++            },
++          })
++          .catch(() => undefined);
++      }
++      paths.push(previewPath);
++    }
++    return paths;
++  }
++
++  async function deliveryClipsForJob(
++    partyId: string,
++    channelId: string,
++    jobId: string,
++  ): Promise<Array<{ cameraId: string; objectPath: string; sha256: string }>> {
++    const jobSnap = await jobRef(db, partyId, jobId).get();
++    if (!jobSnap.exists) throw new BackendError("NOT_FOUND", "Seed video does not exist.");
++    const job = jobSnap.data()!;
++    const staged = (job.stagedOutputs ?? {}) as Record<string, { objectPath?: unknown; sha256?: unknown; cameraId?: unknown }>;
++    const fromStaged = Object.values(staged).filter(
++      (clip): clip is { cameraId: string; objectPath: string; sha256: string } =>
++        !!clip && typeof clip.objectPath === "string" && typeof clip.sha256 === "string" && typeof clip.cameraId === "string",
++    );
++    if (fromStaged.length > 0) return fromStaged;
++    // Fall back to the published current manifest when it belongs to this job.
++    const current = await db.doc(`parties/${partyId}/manifests/current_${channelId}`).get();
++    if (current.exists) {
++      const manifest = current.data() as { jobId?: unknown; cameraClips?: unknown };
++      if (manifest.jobId === jobId && Array.isArray(manifest.cameraClips)) {
++        return (manifest.cameraClips as Array<Record<string, unknown>>)
++          .filter((clip) => typeof clip.cameraId === "string" && typeof clip.objectPath === "string" && typeof clip.sha256 === "string")
++          .map((clip) => ({ cameraId: clip.cameraId as string, objectPath: clip.objectPath as string, sha256: clip.sha256 as string }));
++      }
++    }
++    throw new BackendError("NOT_FOUND", "Seed video preview is not ready yet.");
++  }
++
++  async function listHostVideos(value: unknown): Promise<{ videos: HostSeedEntry[] }> {
++    const input = parseListHostVideosInput(value);
++    const host = await assertRegisteredHostDevice(db, input);
++    const snapshot = await db.collection(`parties/${host.partyId}/seedVideos`).get();
++    const videos: HostSeedEntry[] = [];
++    for (const doc of snapshot.docs) {
++      const seed = doc.data();
++      if (seed.partyId !== host.partyId || seed.channelId !== host.channelId) continue;
++      const synced = await syncSeedStatus(host.partyId, doc);
++      const current = synced ?? seed;
++      videos.push({
++        seedId: String(seed.seedId),
++        partyId: host.partyId,
++        channelId: host.channelId,
++        status: current.status as HostSeedStatus,
++        jobId: String(seed.jobId),
++        createdAt: exposedIso(seed.createdAt),
++        expiresAt: exposedIso(seed.expiresAt),
++        previewAvailable: Array.isArray(seed.previewPaths) && seed.previewPaths.length > 0,
++        cameraIds: Array.isArray(seed.cameraIds) ? (seed.cameraIds as string[]) : [...REQUIRED_CAMERA_IDS],
++      });
++    }
++    videos.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
++    return { videos };
++  }
++
++  async function generateHostVideo(value: unknown): Promise<GenerateHostVideoResult> {
++    const input = parseGenerateHostVideoInput(value);
++    const host = await assertRegisteredHostDevice(db, input);
++    const jobId = jobIdForHostSeed(input.seedId);
++    const ref = seedRef(db, host.partyId, input.seedId);
++    const existing = await ref.get();
++    if (existing.exists) {
++      const old = existing.data()!;
++      if (
++        old.partyId !== host.partyId ||
++        old.channelId !== host.channelId ||
++        old.jobId !== jobId ||
++        old.idempotencyKey !== input.idempotencyKey ||
++        old.deviceId !== host.deviceId ||
++        (old.guestMediaId ?? undefined) !== (input.guestMediaId ?? undefined) ||
++        old.presetId !== input.presetId
++      ) {
++        throw new BackendError("FORBIDDEN", "seedId is already bound to a different request.");
++      }
++      const synced = await syncSeedStatus(host.partyId, existing);
++      const jobSnap = await jobRef(db, host.partyId, jobId).get();
++      return {
++        seedId: input.seedId,
++        jobId,
++        state: jobSnap.exists ? String(jobSnap.data()?.state ?? synced?.status ?? "queued") : String(synced?.status ?? "queued"),
++        created: false,
++      };
++    }
++    // Deletion/withdrawal races: a seed id bound to a deleted seed can never
++    // be resurrected through generate (tombstone check below is best-effort;
++    // the publish path rechecks transactionally).
++    const createdAt = now();
++    const expiresAt = new Date(createdAt.getTime() + HOST_PREVIEW_TTL_MS);
++    await ref.create({
++      seedId: input.seedId,
++      partyId: host.partyId,
++      deviceId: host.deviceId,
++      channelId: host.channelId,
++      jobId,
++      idempotencyKey: input.idempotencyKey,
++      presetId: input.presetId,
++      ...(input.guestMediaId ? { guestMediaId: input.guestMediaId } : {}),
++      status: "queued",
++      cameraIds: [...REQUIRED_CAMERA_IDS],
++      previewPaths: [],
++      createdAt: FieldValue.serverTimestamp(),
++      updatedAt: FieldValue.serverTimestamp(),
++      expiresAt: Timestamp.fromDate(expiresAt),
++    });
++    // Fixed-preset queue with the existing idempotency, budget, and consent
++    // checks: host generation is a scoped entry point to the same pipeline,
++    // never a parallel one.
++    try {
++      const request = await store.requestGeneration({
++        partyId: host.partyId,
++        deviceId: host.deviceId,
++        channelId: host.channelId,
++        jobId,
++        idempotencyKey: input.idempotencyKey,
++        presetId: input.presetId,
++        ...(input.guestMediaId ? { guestMediaId: input.guestMediaId } : {}),
++      });
++      await ref.update({ status: request.state === "queued" ? "queued" : request.state, updatedAt: FieldValue.serverTimestamp() }).catch(() => undefined);
++      return { seedId: input.seedId, jobId, state: request.state, created: request.created };
++    } catch (error) {
++      await ref.update({ status: "failed", updatedAt: FieldValue.serverTimestamp() }).catch(() => undefined);
++      throw error;
++    }
++  }
++
++  async function getHostVideoPreview(value: unknown): Promise<GetHostVideoPreviewResult> {
++    const input = parseGetHostVideoPreviewInput(value);
++    const host = await assertRegisteredHostDevice(db, input);
++    const ref = seedRef(db, host.partyId, input.seedId);
++    const seedSnap = await ref.get();
++    if (!seedSnap.exists) throw new BackendError("NOT_FOUND", "Seed video does not exist.");
++    const seed = seedSnap.data()!;
++    if (seed.partyId !== host.partyId || seed.channelId !== host.channelId) {
++      throw new BackendError("FORBIDDEN", "Seed video is outside the registered party and channel.");
++    }
++    // A deleted seed never recreates previews.
++    if (seed.status === "deleted") throw new BackendError("NOT_FOUND", "Seed video does not exist.");
++    const jobSnap = await jobRef(db, host.partyId, String(seed.jobId)).get();
++    if (!jobSnap.exists) throw new BackendError("NOT_FOUND", "Seed video does not exist.");
++    if (jobSnap.data()?.hostDeleted === true) throw new BackendError("NOT_FOUND", "Seed video does not exist.");
++    const clips = await deliveryClipsForJob(host.partyId, host.channelId, String(seed.jobId));
++    const previewExpiry = seed.expiresAt instanceof Timestamp
++      ? seed.expiresAt.toDate()
++      : new Date(Date.parse(String(seed.expiresAt)));
++    const previewExpiresAt = Number.isFinite(previewExpiry.getTime())
++      ? previewExpiry
++      : new Date(now().getTime() + HOST_PREVIEW_TTL_MS);
++    const previewPaths = await ensurePreviewCopies(host.partyId, input.seedId, clips, previewExpiresAt);
++    await ref.update({ previewPaths, status: "ready", updatedAt: FieldValue.serverTimestamp() }).catch(() => undefined);
++    const nowMs = now().getTime();
++    // Signed TTL is capped at the preview's own expiry (same pattern as delivery URLs).
++    const clipsOut = await Promise.all(
++      clips.map(async (clip) => {
++        const previewPath = hostPreviewObjectPath(host.partyId, input.seedId, clip.cameraId);
++        const expiresAt = new Date(Math.min(nowMs + DELIVERY_URL_TTL_SECONDS * 1000, previewExpiresAt.getTime()));
++        return {
++          cameraId: clip.cameraId,
++          sha256: clip.sha256,
++          url: await signPreviewUrl(bucket.file(previewPath), expiresAt),
++          expiresAt: expiresAt.toISOString(),
++        };
++      }),
++    );
++    return { seedId: input.seedId, expiresAt: previewExpiresAt.toISOString(), clips: clipsOut };
++  }
++
++  async function deleteHostVideo(value: unknown): Promise<DeleteHostVideoResult> {
++    const input = parseDeleteHostVideoInput(value);
++    const host = await assertRegisteredHostDevice(db, input);
++    const deletedSeedIds: string[] = [];
++    const doomedObjects = new Set<string>();
++    const doomedJobs: string[] = [];
++    let revokedManifest = false;
++    for (const seedId of input.seedIds) {
++      const ref = seedRef(db, host.partyId, seedId);
++      const outcome = await db.runTransaction(async (transaction) => {
++        const seedSnap = await transaction.get(ref);
++        if (!seedSnap.exists) throw new BackendError("NOT_FOUND", `Seed video ${seedId} does not exist.`);
++        const seed = seedSnap.data()!;
++        if (seed.partyId !== host.partyId || seed.channelId !== host.channelId) {
++          throw new BackendError("FORBIDDEN", "Seed video is outside the registered party and channel.");
++        }
++        if (seed.status === "deleted") return { already: true as const, jobId: String(seed.jobId), previews: seed.previewPaths };
++        const jobId = String(seed.jobId);
++        const jobSnap = await transaction.get(jobRef(db, host.partyId, jobId));
++        const job = jobSnap.exists ? jobSnap.data()! : undefined;
++        const staged = ((job?.stagedOutputs ?? {}) as Record<string, { objectPath?: unknown }>) ?? {};
++        const previews = Array.isArray(seed.previewPaths) ? (seed.previewPaths as unknown[]) : [];
++        transaction.update(ref, {
++          status: "deleted",
++          deletedAt: FieldValue.serverTimestamp(),
++          updatedAt: FieldValue.serverTimestamp(),
++        });
++        if (jobSnap.exists) {
++          // Tombstone the job so a deletion/withdrawal racing the worker can
++          // never republish it (publish.ts rechecks this flag
++          // transactionally) and so no preview is recreated afterwards.
++          transaction.update(jobRef(db, host.partyId, jobId), {
++            hostDeleted: true,
++            deletedSeedId: seedId,
++            timestamp: FieldValue.serverTimestamp(),
++          });
++        }
++        // Revoke an affected current manifest whose job matches this seed.
++        return { already: false as const, jobId, previews, staged, seed };
++      });
++      if (outcome.already) {
++        deletedSeedIds.push(seedId);
++        for (const path of (outcome.previews ?? []) as unknown[]) {
++          if (typeof path === "string" && path.startsWith("parties/")) doomedObjects.add(path);
++        }
++        continue;
++      }
++      deletedSeedIds.push(seedId);
++      doomedJobs.push(outcome.jobId);
++      for (const preview of (outcome.previews ?? []) as unknown[]) {
++        if (typeof preview === "string" && preview.startsWith("parties/")) doomedObjects.add(preview);
++      }
++      for (const clip of Object.values((outcome as { staged: Record<string, { objectPath?: unknown }> }).staged ?? {})) {
++        if (clip && typeof clip.objectPath === "string" && clip.objectPath.startsWith("parties/")) {
++          doomedObjects.add(clip.objectPath);
++        }
++      }
++      const jobSnap = await jobRef(db, host.partyId, outcome.jobId).get().catch(() => undefined);
++      const job = jobSnap?.exists ? jobSnap.data()! : undefined;
++      for (const key of ["deliveryPaths", "generatedPaths"] as const) {
++        const list = job?.[key];
++        if (Array.isArray(list)) {
++          for (const item of list) if (typeof item === "string" && item.startsWith("parties/")) doomedObjects.add(item);
++        }
++      }
++    }
++    // Revoke affected manifests after the tombstones are durable.
++    if (doomedJobs.length > 0) {
++      const currentRef = db.doc(`parties/${host.partyId}/manifests/current_${host.channelId}`);
++      const current = await currentRef.get().catch(() => undefined);
++      if (current?.exists) {
++        const manifest = current.data() as Record<string, unknown>;
++        if (typeof manifest.jobId === "string" && doomedJobs.includes(manifest.jobId)) {
++          const clips = manifest.cameraClips;
++          if (Array.isArray(clips)) {
++            for (const clip of clips) {
++              if (clip && typeof clip === "object" && typeof (clip as Record<string, unknown>).objectPath === "string") {
++                const path = (clip as Record<string, unknown>).objectPath as string;
++                if (path.startsWith("parties/")) doomedObjects.add(path);
++              }
++            }
++          }
++          await currentRef.delete().catch(() => undefined);
++          revokedManifest = true;
++        }
++      }
++    }
++    const deletedObjects: string[] = [];
++    for (const path of doomedObjects) {
++      try {
++        await deleteObject(bucket.file(path));
++        deletedObjects.push(path);
++      } catch {
++        // Left for the retention sweeper; never counted as deleted.
++      }
++    }
++    deletedObjects.sort();
++    // Accounting records (costLogs / usage ledger rows) are intentionally
++    // never deleted here.
++    return { deletedSeedIds, deletedObjects, revokedManifest };
++  }
++
++  return { listHostVideos, generateHostVideo, getHostVideoPreview, deleteHostVideo };
++}
++
++/** Publish-gate helper: a tombstoned host job must never publish or re-preview. */
++export function isHostDeletedJob(job: FirebaseFirestore.DocumentData): boolean {
++  return (job as Record<string, unknown>).hostDeleted === true;
++}
++
++export { seedIdForHostJob };
+diff --git a/backend/functions/test/host_admin_e2e.test.ts b/backend/functions/test/host_admin_e2e.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..d8a031c8687c8841f3fc67dd0493453890821e84
+--- /dev/null
++++ b/backend/functions/test/host_admin_e2e.test.ts
+@@ -0,0 +1,136 @@
++import assert from "node:assert/strict";
++import { resolve } from "node:path";
++import test from "node:test";
++import type { Bucket } from "@google-cloud/storage";
++import type { Firestore } from "firebase-admin/firestore";
++import { BackendError } from "../src/contracts";
++import { createRuntimeServices } from "../src/runtime";
++import { FakeVideoGenerationPort } from "../src/providers/fake";
++import {
++  HAS_FIRESTORE_EMULATOR,
++  clearParty,
++  createEmulatorContext,
++  disposeEmulatorContext,
++  randomPartyId,
++  seedParty,
++} from "./support/emulators";
++
++const ASSET_FIXTURE_DIR = resolve(__dirname, "../../../apps/tv_app/assets");
++
++function servicesFor(db: Firestore, bucket: Bucket) {
++  return createRuntimeServices({
++    db,
++    bucket,
++    generationEnabled: true,
++    provider: new FakeVideoGenerationPort(ASSET_FIXTURE_DIR),
++    fixtureDirectory: ASSET_FIXTURE_DIR,
++    enqueueGeneration: async () => undefined,
++    pollIntervalMs: 1,
++    sleep: async () => undefined,
++    signReadUrl: async (file) => `https://signed.invalid/${encodeURIComponent(file.name)}`,
++  });
++}
++
++test("exported host callables are wired through the runtime composition", async () => {
++  const handlers = await import("../src/index");
++  for (const name of ["createHostInvite", "joinHost", "listHostVideos", "generateHostVideo", "getHostVideoPreview", "deleteHostVideo"]) {
++    assert.ok((handlers as Record<string, unknown>)[name] !== undefined, `${name} must be an exported callable`);
++  }
++  const { createRuntimeServices: compose } = await import("../src/runtime");
++  assert.equal(typeof compose, "function");
++});
++
++test("host admin end-to-end: invite, roles, fixture-backed generation, preview survival, deletion, denials", { skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST }, async () => {
++  const { app, db, bucket } = await createEmulatorContext();
++  const partyId = randomPartyId();
++  const channelId = "main";
++  try {
++    await seedParty(db, partyId, "tv-1", channelId);
++    await db.doc(`parties/${partyId}/devices/tv-1`).update({ role: "tv" });
++    await seedParty(db, partyId, "p-guest-1", channelId);
++    const services = servicesFor(db, bucket);
++
++    // Only the registered TV mints the invite; the token hash is stored.
++    const invite = await services.createHostInvite({ partyId, deviceId: "tv-1", channelId });
++    assert.ok(invite.inviteToken.startsWith("hi-"));
++    // Phone redeems for a separate identity with the server-assigned host role.
++    const joined = await services.joinHost({ partyId, deviceId: "p-admin-1", channelId, inviteToken: invite.inviteToken });
++    assert.equal(joined.role, "host");
++    assert.equal((await db.doc(`parties/${partyId}/devices/p-admin-1`).get()).data()?.role, "host");
++    assert.equal((await db.doc(`parties/${partyId}/devices/tv-1`).get()).data()?.role, "tv");
++
++    // Seed catalog starts empty, then queues fixed-preset generation.
++    assert.deepEqual((await services.listHostVideos({ partyId, deviceId: "p-admin-1", channelId })).videos, []);
++    const generated = await services.generateHostVideo({ partyId, deviceId: "p-admin-1", channelId, seedId: "catalog-1", idempotencyKey: "idem-catalog-1" });
++    assert.equal(generated.created, true);
++    // Real runtime generation with the fixture-backed provider and emulator storage.
++    const run = await services.runGeneration({ partyId, deviceId: "p-admin-1", channelId, jobId: generated.jobId, idempotencyKey: "idem-catalog-1" });
++    assert.equal(run.state, "ready");
++    const manifest = (await db.doc(`parties/${partyId}/manifests/current_${channelId}`).get()).data()!;
++    assert.equal(manifest.cameraClips.length, 4);
++    const preview = await services.getHostVideoPreview({ partyId, deviceId: "p-admin-1", channelId, seedId: "catalog-1" });
++    assert.equal(preview.clips.length, 4);
++
++    // Delivery ACK purges delivery bytes; preview bytes survive.
++    const clipHashes = Object.fromEntries(
++      (manifest.cameraClips as Array<{ cameraId: string; sha256: string }>).map((clip) => [clip.cameraId, clip.sha256]),
++    );
++    await services.acknowledgeDelivery({ partyId, deviceId: "p-admin-1", channelId, manifestVersion: manifest.version, clipHashes });
++    const seed = (await db.doc(`parties/${partyId}/seedVideos/catalog-1`).get()).data()!;
++    for (const path of seed.previewPaths as string[]) {
++      const [bytes] = await bucket.file(path).download();
++      assert.ok(bytes.byteLength > 0, "preview bytes must survive the delivery ACK");
++    }
++
++    // Deletion outcomes: seeds + objects removed, manifest revoked, accounting kept.
++    const deleted = await services.deleteHostVideo({ partyId, deviceId: "p-admin-1", channelId, seedIds: ["catalog-1"] });
++    assert.deepEqual(deleted.deletedSeedIds, ["catalog-1"]);
++    assert.equal(deleted.revokedManifest, true);
++    assert.ok((await db.collection(`parties/${partyId}/costLogs`).get()).docs.length >= 4);
++    assert.deepEqual((await services.listHostVideos({ partyId, deviceId: "p-admin-1", channelId })).videos[0].status, "deleted");
++
++    // Guest and cross-party callers are denied on every admin operation.
++    await assert.rejects(services.listHostVideos({ partyId, deviceId: "p-guest-1", channelId }),
++      (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN");
++    await assert.rejects(services.generateHostVideo({ partyId, deviceId: "p-guest-1", channelId, seedId: "x", idempotencyKey: "x" }),
++      (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN");
++    const foreign = randomPartyId();
++    await seedParty(db, foreign, "tv-9", channelId);
++    await db.doc(`parties/${foreign}/devices/tv-9`).update({ role: "tv" });
++    const foreignInvite = await services.createHostInvite({ partyId: foreign, deviceId: "tv-9", channelId });
++    const foreignHost = await services.joinHost({ partyId: foreign, deviceId: "p-foreign", channelId, inviteToken: foreignInvite.inviteToken });
++    assert.equal(foreignHost.role, "host");
++    await assert.rejects(services.deleteHostVideo({ partyId, deviceId: "p-foreign", channelId, seedIds: ["catalog-1"] }),
++      (e: unknown) => e instanceof BackendError && (e.errorCode === "FORBIDDEN" || e.errorCode === "NOT_FOUND"));
++    await db.recursiveDelete(db.doc(`parties/${foreign}`)).catch(() => undefined);
++  } finally {
++    await clearParty(db, bucket, partyId);
++    await disposeEmulatorContext(app);
++  }
++});
++
++test("deletion racing the worker blocks publication through the real pipeline", { skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST }, async () => {
++  const { app, db, bucket } = await createEmulatorContext();
++  const partyId = randomPartyId();
++  try {
++    await seedParty(db, partyId, "tv-1", "main");
++    await db.doc(`parties/${partyId}/devices/tv-1`).update({ role: "tv" });
++    const services = servicesFor(db, bucket);
++    const invite = await services.createHostInvite({ partyId, deviceId: "tv-1", channelId: "main" });
++    await services.joinHost({ partyId, deviceId: "p-admin-1", channelId: "main", inviteToken: invite.inviteToken });
++    const generated = await services.generateHostVideo({ partyId, deviceId: "p-admin-1", channelId: "main", seedId: "race-1", idempotencyKey: "idem-race-1" });
++    // Delete wins the race before the worker runs: the tombstone is durable.
++    const deleted = await services.deleteHostVideo({ partyId, deviceId: "p-admin-1", channelId: "main", seedIds: ["race-1"] });
++    assert.deepEqual(deleted.deletedSeedIds, ["race-1"]);
++    await assert.rejects(
++      services.runGeneration({ partyId, deviceId: "p-admin-1", channelId: "main", jobId: generated.jobId, idempotencyKey: "idem-race-1" }),
++      (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN",
++    );
++    assert.equal((await db.doc(`parties/${partyId}/manifests/current_main`).get()).exists, false);
++    await assert.rejects(services.getHostVideoPreview({ partyId, deviceId: "p-admin-1", channelId: "main", seedId: "race-1" }),
++      (e: unknown) => e instanceof BackendError && e.errorCode === "NOT_FOUND");
++  } finally {
++    await clearParty(db, bucket, partyId);
++    await disposeEmulatorContext(app);
++  }
++});
+diff --git a/backend/functions/test/host_join.test.ts b/backend/functions/test/host_join.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..4e13d467d0a620318fa77b709a0d1de0fc5fbf42
+--- /dev/null
++++ b/backend/functions/test/host_join.test.ts
+@@ -0,0 +1,154 @@
++import assert from "node:assert/strict";
++import test from "node:test";
++import { readFile } from "node:fs/promises";
++import { resolve } from "node:path";
++import { Timestamp } from "firebase-admin/firestore";
++import { BackendError } from "../src/contracts";
++import { createHostJoinService, hashHostInviteToken } from "../src/host_join";
++import { createJoinPartyService } from "../src/join_party";
++import {
++  HAS_FIRESTORE_EMULATOR,
++  clearParty,
++  createEmulatorContext,
++  disposeEmulatorContext,
++  randomPartyId,
++  seedParty,
++} from "./support/emulators";
++
++async function seedTv(db: FirebaseFirestore.Firestore, partyId: string, deviceId: string, channelId: string): Promise<void> {
++  await seedParty(db, partyId, deviceId, channelId);
++  await db.doc(`parties/${partyId}/devices/${deviceId}`).update({ role: "tv" });
++}
++
++test("join_roles fixture matches the enforced guest/host role boundary", async () => {
++  const content = await readFile(resolve(__dirname, "../../../test/fixtures/join_roles_v1.json"), "utf8");
++  const roles = JSON.parse(content) as {
++    callables: string[];
++    guestJoin: { request: Record<string, unknown>; response: Record<string, unknown> };
++    hostJoin: { request: Record<string, unknown>; response: Record<string, unknown> };
++  };
++  assert.deepEqual(roles.callables, ["createHostInvite", "joinHost", "listHostVideos", "generateHostVideo", "getHostVideoPreview", "deleteHostVideo"]);
++  // The guest route and the host route produce disjoint server-assigned roles.
++  assert.equal(roles.guestJoin.response.role, "guest");
++  assert.equal(roles.hostJoin.response.role, "host");
++  assert.notEqual(roles.guestJoin.response.role, roles.hostJoin.response.role);
++  // The guest fixture carries a six-digit PIN (redeemed via joinParty); the
++  // host fixture carries a server-minted capability (never a PIN shape).
++  assert.match(String((roles.guestJoin.request as Record<string, unknown>).joinPin), /^[0-9]{6}$/);
++  assert.ok(String((roles.hostJoin.request as Record<string, unknown>).inviteToken).length > 0);
++  // A host token is never a bare guest PIN: PIN-shaped strings are rejected
++  // as invite tokens by the parser (covered behaviorally above).
++  assert.ok(!/^[0-9]{6}$/.test(String((roles.hostJoin.request as Record<string, unknown>).inviteToken)));
++});
++
++test("only a registered TV may mint a host invite; invites bind party/channel/expiry", { skip: !HAS_FIRESTORE_EMULATOR }, async () => {
++  const { app, db, bucket } = await createEmulatorContext();
++  const partyId = randomPartyId();
++  try {
++    await seedTv(db, partyId, "tv-1", "main");
++    await seedParty(db, partyId, "p-guest-1", "main");
++    const services = createHostJoinService({ db });
++    const invite = await services.createHostInvite({ partyId, deviceId: "tv-1", channelId: "main" });
++    assert.equal(invite.partyId, partyId);
++    assert.equal(invite.channelId, "main");
++    assert.ok(invite.inviteToken.startsWith("hi-"));
++    assert.ok(Date.parse(invite.expiresAt) > Date.now());
++    // Only the token hash is stored, bound to party/channel/expiry.
++    const tokenHash = hashHostInviteToken(invite.inviteToken);
++    const stored = (await db.doc(`parties/${partyId}/hostInvites/${tokenHash.slice(0, 32)}`).get()).data()!;
++    assert.equal(stored.tokenHash, tokenHash);
++    assert.equal(stored.partyId, partyId);
++    assert.equal(stored.channelId, "main");
++    assert.equal(stored.status, "pending");
++    assert.ok(!("inviteToken" in stored) && !JSON.stringify(stored).includes(invite.inviteToken));
++    // Guests, unknown devices, and wrong channels cannot mint invites.
++    await assert.rejects(services.createHostInvite({ partyId, deviceId: "p-guest-1", channelId: "main" }),
++      (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN");
++    await assert.rejects(services.createHostInvite({ partyId, deviceId: "nope", channelId: "main" }),
++      (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN");
++    await assert.rejects(services.createHostInvite({ partyId, deviceId: "tv-1", channelId: "other" }),
++      (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN");
++  } finally {
++    await clearParty(db, bucket, partyId);
++    await disposeEmulatorContext(app);
++  }
++});
++
++test("host redemption is transactional: idempotent retry, replay/expiry/PIN/role forgery denied", { skip: !HAS_FIRESTORE_EMULATOR }, async () => {
++  const { app, db } = await createEmulatorContext();
++  const partyId = randomPartyId();
++  try {
++    await seedTv(db, partyId, "tv-1", "main");
++    const services = createHostJoinService({ db });
++    const invite = await services.createHostInvite({ partyId, deviceId: "tv-1", channelId: "main" });
++
++    const joined = await services.joinHost({ partyId, deviceId: "p-host-1", channelId: "main", inviteToken: invite.inviteToken });
++    assert.deepEqual(joined, { partyId, deviceId: "p-host-1", channelId: "main", role: "host", status: "active", created: true });
++    const device = (await db.doc(`parties/${partyId}/devices/p-host-1`).get()).data()!;
++    assert.equal(device.role, "host");
++    assert.equal(device.status, "active");
++
++    // Same-device redemption retries are idempotent.
++    const retried = await services.joinHost({ partyId, deviceId: "p-host-1", channelId: "main", inviteToken: invite.inviteToken });
++    assert.equal(retried.created, false);
++    assert.equal(retried.role, "host");
++
++    // Other-device replay of the same token cannot grant host access.
++    await assert.rejects(services.joinHost({ partyId, deviceId: "p-host-2", channelId: "main", inviteToken: invite.inviteToken }),
++      (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN");
++    assert.equal((await db.doc(`parties/${partyId}/devices/p-host-2`).get()).exists, false);
++
++    // Guest PIN reuse cannot grant host access (shape-rejected, never redeemed).
++    await assert.rejects(services.joinHost({ partyId, deviceId: "p-host-3", channelId: "main", inviteToken: "004201" }),
++      (e: unknown) => e instanceof BackendError);
++    assert.equal((await db.doc(`parties/${partyId}/devices/p-host-3`).get()).exists, false);
++
++    // Client-only role changes cannot grant host access: a forged role field
++    // is ignored and a guest-PIN registration stays a guest.
++    const joinParty = createJoinPartyService({ db });
++    const guest = await joinParty.joinParty({ partyId, deviceId: "p-guest-9", channelId: "main", role: "host" } as unknown as Record<string, unknown>);
++    assert.equal(guest.role, "guest");
++    assert.equal((await db.doc(`parties/${partyId}/devices/p-guest-9`).get()).data()?.role, "guest");
++    await assert.rejects(services.joinHost({ partyId, deviceId: "p-guest-9", channelId: "main", inviteToken: invite.inviteToken }),
++      (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN");
++
++    // Expired invites are refused.
++    const invite2 = await services.createHostInvite({ partyId, deviceId: "tv-1", channelId: "main" });
++    const tokenHash2 = hashHostInviteToken(invite2.inviteToken);
++    await db.doc(`parties/${partyId}/hostInvites/${tokenHash2.slice(0, 32)}`).update({ expiresAt: Timestamp.fromDate(new Date(Date.now() - 1000)) });
++    await assert.rejects(services.joinHost({ partyId, deviceId: "p-host-4", channelId: "main", inviteToken: invite2.inviteToken }),
++      (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN");
++
++    // Cross-party token reuse is refused.
++    const otherParty = randomPartyId();
++    await seedTv(db, otherParty, "tv-9", "main");
++    await assert.rejects(services.joinHost({ partyId: otherParty, deviceId: "p-host-5", channelId: "main", inviteToken: invite.inviteToken }),
++      (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN");
++    await db.recursiveDelete(db.doc(`parties/${otherParty}`)).catch(() => undefined);
++  } finally {
++    await db.recursiveDelete(db.doc(`parties/${partyId}`)).catch(() => undefined);
++    await disposeEmulatorContext(app);
++  }
++});
++
++test("legacy joinParty remains guest-only and never upgrades host devices", { skip: !HAS_FIRESTORE_EMULATOR }, async () => {
++  const { app, db } = await createEmulatorContext();
++  const partyId = randomPartyId();
++  try {
++    await seedTv(db, partyId, "tv-1", "main");
++    const hosts = createHostJoinService({ db });
++    const joinParty = createJoinPartyService({ db });
++    const invite = await hosts.createHostInvite({ partyId, deviceId: "tv-1", channelId: "main" });
++    await hosts.joinHost({ partyId, deviceId: "p-host-1", channelId: "main", inviteToken: invite.inviteToken });
++    // A host device rejoining through the legacy path is rejected, not downgraded.
++    await assert.rejects(joinParty.joinParty({ partyId, deviceId: "p-host-1", channelId: "main" }),
++      (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN");
++    assert.equal((await db.doc(`parties/${partyId}/devices/p-host-1`).get()).data()?.role, "host");
++    // Fresh legacy joins are still guests.
++    const guest = await joinParty.joinParty({ partyId, deviceId: "p-new-guest", channelId: "main" });
++    assert.equal(guest.role, "guest");
++  } finally {
++    await db.recursiveDelete(db.doc(`parties/${partyId}`)).catch(() => undefined);
++    await disposeEmulatorContext(app);
++  }
++});
+diff --git a/backend/functions/test/host_media.test.ts b/backend/functions/test/host_media.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..70cab38a9a04bc83b509ba8def735e1562d95bf4
+--- /dev/null
++++ b/backend/functions/test/host_media.test.ts
+@@ -0,0 +1,188 @@
++import assert from "node:assert/strict";
++import { resolve } from "node:path";
++import test from "node:test";
++import type { Bucket } from "@google-cloud/storage";
++import type { Firestore } from "firebase-admin/firestore";
++import { BackendError } from "../src/contracts";
++import { createRuntimeServices } from "../src/runtime";
++import { FakeVideoGenerationPort } from "../src/providers/fake";
++import {
++  HAS_FIRESTORE_EMULATOR,
++  clearParty,
++  createEmulatorContext,
++  disposeEmulatorContext,
++  randomPartyId,
++  seedParty,
++} from "./support/emulators";
++import { createHostJoinService } from "../src/host_join";
++
++const ASSET_FIXTURE_DIR = resolve(__dirname, "../../../apps/tv_app/assets");
++
++function servicesFor(db: Firestore, bucket: Bucket) {
++  return createRuntimeServices({
++    db,
++    bucket,
++    generationEnabled: true,
++    provider: new FakeVideoGenerationPort(ASSET_FIXTURE_DIR),
++    fixtureDirectory: ASSET_FIXTURE_DIR,
++    enqueueGeneration: async () => undefined,
++    pollIntervalMs: 1,
++    sleep: async () => undefined,
++    signReadUrl: async (file) => `https://signed.invalid/${encodeURIComponent(file.name)}`,
++  });
++}
++
++async function seedHostParty(db: Firestore, partyId: string, channelId = "main"): Promise<{ tv: string; host: string }> {
++  const tv = "tv-host-1";
++  const host = "p-host-1";
++  await seedParty(db, partyId, tv, channelId);
++  await db.doc(`parties/${partyId}/devices/${tv}`).update({ role: "tv" });
++  const hosts = createHostJoinService({ db });
++  const invite = await hosts.createHostInvite({ partyId, deviceId: tv, channelId });
++  await hosts.joinHost({ partyId, deviceId: host, channelId, inviteToken: invite.inviteToken });
++  return { tv, host };
++}
++
++test("host seed catalog: empty list, guest denial, and fixed-preset queue with idempotency", { skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST }, async () => {
++  const { app, db, bucket } = await createEmulatorContext();
++  const partyId = randomPartyId();
++  try {
++    const { host } = await seedHostParty(db, partyId);
++    await seedParty(db, partyId, "p-guest-1", "main");
++    const services = servicesFor(db, bucket);
++    const empty = await services.listHostVideos({ partyId, deviceId: host, channelId: "main" });
++    assert.deepEqual(empty.videos, []);
++    // Guests (and unregistered devices) are denied on every admin operation.
++    for (const call of [
++      () => services.listHostVideos({ partyId, deviceId: "p-guest-1", channelId: "main" }),
++      () => services.generateHostVideo({ partyId, deviceId: "p-guest-1", channelId: "main", seedId: "seed-1", idempotencyKey: "idem-1" }),
++      () => services.getHostVideoPreview({ partyId, deviceId: "p-guest-1", channelId: "main", seedId: "seed-1" }),
++      () => services.deleteHostVideo({ partyId, deviceId: "p-guest-1", channelId: "main", seedIds: ["seed-1"] }),
++      () => services.listHostVideos({ partyId, deviceId: "nobody", channelId: "main" }),
++    ]) {
++      await assert.rejects(call(), (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN");
++    }
++    // Generate uses the fixed-preset queue: same idempotency/budget shape as requestGeneration.
++    const created = await services.generateHostVideo({ partyId, deviceId: host, channelId: "main", seedId: "seed-1", idempotencyKey: "idem-1" });
++    assert.equal(created.seedId, "seed-1");
++    assert.equal(created.state, "queued");
++    assert.equal(created.created, true);
++    assert.ok(created.jobId.startsWith("hv-"));
++    const listed = await services.listHostVideos({ partyId, deviceId: host, channelId: "main" });
++    assert.equal(listed.videos.length, 1);
++    assert.equal(listed.videos[0].seedId, "seed-1");
++    assert.equal(listed.videos[0].status, "queued");
++    // Queue deduplication: the same request is idempotent, a second seed is budget-blocked.
++    const duplicate = await services.generateHostVideo({ partyId, deviceId: host, channelId: "main", seedId: "seed-1", idempotencyKey: "idem-1" });
++    assert.equal(duplicate.created, false);
++    assert.equal(duplicate.jobId, created.jobId);
++    await assert.rejects(
++      services.generateHostVideo({ partyId, deviceId: host, channelId: "main", seedId: "seed-2", idempotencyKey: "idem-2" }),
++      (e: unknown) => e instanceof BackendError && e.errorCode === "BUDGET_EXCEEDED",
++    );
++    // Rebinding a seed id to a different request is refused.
++    await assert.rejects(
++      services.generateHostVideo({ partyId, deviceId: host, channelId: "main", seedId: "seed-1", idempotencyKey: "idem-other" }),
++      (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN",
++    );
++    // Preview is not ready before the worker runs.
++    await assert.rejects(services.getHostVideoPreview({ partyId, deviceId: host, channelId: "main", seedId: "seed-1" }),
++      (e: unknown) => e instanceof BackendError && e.errorCode === "NOT_FOUND");
++    // Cross-party hosts cannot touch this party's catalog.
++    const otherParty = randomPartyId();
++    const other = await seedHostParty(db, otherParty);
++    await assert.rejects(services.getHostVideoPreview({ partyId, deviceId: other.host, channelId: "main", seedId: "seed-1" }),
++      (e: unknown) => e instanceof BackendError && (e.errorCode === "FORBIDDEN" || e.errorCode === "NOT_FOUND"));
++    await db.recursiveDelete(db.doc(`parties/${otherParty}`)).catch(() => undefined);
++  } finally {
++    await clearParty(db, bucket, partyId);
++    await disposeEmulatorContext(app);
++  }
++});
++
++test("host previews are separately referenced, TTL-limited, signed on demand, and survive ACK purge", { skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST }, async () => {
++  const { app, db, bucket } = await createEmulatorContext();
++  const partyId = randomPartyId();
++  try {
++    const { host } = await seedHostParty(db, partyId);
++    const services = servicesFor(db, bucket);
++    const created = await services.generateHostVideo({ partyId, deviceId: host, channelId: "main", seedId: "seed-1", idempotencyKey: "idem-1" });
++    const run = await services.runGeneration({ partyId, deviceId: host, channelId: "main", jobId: created.jobId, idempotencyKey: "idem-1" });
++    assert.equal(run.state, "ready");
++    const preview = await services.getHostVideoPreview({ partyId, deviceId: host, channelId: "main", seedId: "seed-1" });
++    assert.equal(preview.seedId, "seed-1");
++    assert.equal(preview.clips.length, 4);
++    assert.deepEqual(preview.clips.map((clip) => clip.cameraId).sort(), ["CAM-01", "CAM-02", "CAM-03", "CAM-04"]);
++    assert.ok(preview.clips.every((clip) => clip.url.startsWith("https://signed.invalid/")));
++    assert.ok(preview.clips.every((clip) => clip.url.includes("hostPreviews")));
++    // Preview objects are separately referenced from delivery objects.
++    const seed = (await db.doc(`parties/${partyId}/seedVideos/seed-1`).get()).data()!;
++    assert.equal(seed.status, "ready");
++    assert.ok((seed.previewPaths as string[]).every((path) => path.includes("/hostPreviews/seed-1/")));
++    assert.ok(!JSON.stringify(seed).includes("signed.invalid"), "signed preview URLs are never persisted");
++    const manifest = (await db.doc(`parties/${partyId}/manifests/current_main`).get()).data()!;
++    const deliveryPaths = (manifest.cameraClips as Array<{ objectPath: string }>).map((clip) => clip.objectPath);
++    assert.ok(deliveryPaths.every((path) => !path.includes("hostPreviews")));
++    for (const path of seed.previewPaths as string[]) {
++      assert.equal((await bucket.file(path).exists())[0], true);
++      const [previewBytes] = await bucket.file(path).download();
++      assert.ok(previewBytes.byteLength > 0);
++    }
++    // Delivery ACK purges delivery objects but preview bytes survive.
++    const clipHashes = Object.fromEntries(
++      (manifest.cameraClips as Array<{ cameraId: string; sha256: string }>).map((clip) => [clip.cameraId, clip.sha256]),
++    );
++    const ack = await services.acknowledgeDelivery({ partyId, deviceId: host, channelId: "main", manifestVersion: manifest.version, clipHashes });
++    assert.equal(ack.purged, true);
++    for (const path of deliveryPaths) assert.equal((await bucket.file(path).exists())[0], false);
++    for (const path of seed.previewPaths as string[]) assert.equal((await bucket.file(path).exists())[0], true);
++    const previewAfterAck = await services.getHostVideoPreview({ partyId, deviceId: host, channelId: "main", seedId: "seed-1" });
++    assert.equal(previewAfterAck.clips.length, 4);
++  } finally {
++    await clearParty(db, bucket, partyId);
++    await disposeEmulatorContext(app);
++  }
++});
++
++test("host deletion removes seeds and objects, revokes manifests, preserves accounting, and blocks races", { skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST }, async () => {
++  const { app, db, bucket } = await createEmulatorContext();
++  const partyId = randomPartyId();
++  try {
++    const { host } = await seedHostParty(db, partyId);
++    const services = servicesFor(db, bucket);
++    const created = await services.generateHostVideo({ partyId, deviceId: host, channelId: "main", seedId: "seed-1", idempotencyKey: "idem-1" });
++    await services.runGeneration({ partyId, deviceId: host, channelId: "main", jobId: created.jobId, idempotencyKey: "idem-1" });
++    await services.getHostVideoPreview({ partyId, deviceId: host, channelId: "main", seedId: "seed-1" });
++    const seedBefore = (await db.doc(`parties/${partyId}/seedVideos/seed-1`).get()).data()!;
++    const previewPaths = [...(seedBefore.previewPaths as string[])];
++    const manifestBefore = (await db.doc(`parties/${partyId}/manifests/current_main`).get()).data()!;
++    const deliveryPaths = (manifestBefore.cameraClips as Array<{ objectPath: string }>).map((clip) => clip.objectPath);
++
++    const deleted = await services.deleteHostVideo({ partyId, deviceId: host, channelId: "main", seedIds: ["seed-1"] });
++    assert.deepEqual(deleted.deletedSeedIds, ["seed-1"]);
++    assert.equal(deleted.revokedManifest, true);
++    for (const path of [...previewPaths, ...deliveryPaths]) assert.ok(deleted.deletedObjects.includes(path), `${path} must be reported deleted`);
++    assert.equal((await db.doc(`parties/${partyId}/seedVideos/seed-1`).get()).data()?.status, "deleted");
++    assert.equal((await db.doc(`parties/${partyId}/manifests/current_main`).get()).exists, false);
++    for (const path of [...previewPaths, ...deliveryPaths]) assert.equal((await bucket.file(path).exists())[0], false);
++    // Accounting records are preserved.
++    assert.ok((await db.collection(`parties/${partyId}/costLogs`).get()).docs.length >= 4, "cost logs must survive seed deletion");
++    // A deleted seed never recreates previews and its job never republishes.
++    await assert.rejects(services.getHostVideoPreview({ partyId, deviceId: host, channelId: "main", seedId: "seed-1" }),
++      (e: unknown) => e instanceof BackendError && e.errorCode === "NOT_FOUND");
++    await assert.rejects(services.runGeneration({ partyId, deviceId: host, channelId: "main", jobId: created.jobId, idempotencyKey: "idem-1" }).then(async (run) => {
++      if (run.state === "ready") {
++        const { publishManifest } = await import("../src/publish");
++        const { FirestoreGenerationStore } = await import("../src/generation_store");
++        await publishManifest(new FirestoreGenerationStore({ db, bucket }), partyId, created.jobId, "idem-1");
++      }
++      return run;
++    }), (e: unknown) => e instanceof BackendError);
++    // Deleting an unknown seed is NOT_FOUND; cross-party deletion is refused.
++    await assert.rejects(services.deleteHostVideo({ partyId, deviceId: host, channelId: "main", seedIds: ["nope"] }),
++      (e: unknown) => e instanceof BackendError && e.errorCode === "NOT_FOUND");
++  } finally {
++    await clearParty(db, bucket, partyId);
++    await disposeEmulatorContext(app);
++  }
++});
+diff --git a/test/fixtures/cctv_counts_v1.json b/test/fixtures/cctv_counts_v1.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..005c5edbb1bb86b089a26408b2e616730ec44990
+--- /dev/null
++++ b/test/fixtures/cctv_counts_v1.json
+@@ -0,0 +1 @@
++{"cameraIds":["CAM-01","CAM-02","CAM-03","CAM-04"],"counts":[1,2,4],"defaultCount":4,"invalid":{"duplicateCamera":{"cameraClips":[{"cameraId":"CAM-01","durationMs":2000,"expiresAt":"2026-11-29T15:00:00.000Z","objectPath":"parties/pilot/channels/main/delivery/1/CAM-01.mp4","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sizeBytes":12345},{"cameraId":"CAM-01","durationMs":2000,"expiresAt":"2026-11-29T15:00:00.000Z","objectPath":"parties/pilot/channels/main/delivery/1/CAM-01.mp4","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sizeBytes":12345}]},"gapCount2":{"cameraClips":[{"cameraId":"CAM-01","durationMs":2000,"expiresAt":"2026-11-29T15:00:00.000Z","objectPath":"parties/pilot/channels/main/delivery/1/CAM-01.mp4","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sizeBytes":12345},{"cameraId":"CAM-03","durationMs":2000,"expiresAt":"2026-11-29T15:00:00.000Z","objectPath":"parties/pilot/channels/main/delivery/1/CAM-03.mp4","sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","sizeBytes":12347}]},"threeClips":{"cameraClips":[{"cameraId":"CAM-01","durationMs":2000,"expiresAt":"2026-11-29T15:00:00.000Z","objectPath":"parties/pilot/channels/main/delivery/1/CAM-01.mp4","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sizeBytes":12345},{"cameraId":"CAM-02","durationMs":2000,"expiresAt":"2026-11-29T15:00:00.000Z","objectPath":"parties/pilot/channels/main/delivery/1/CAM-02.mp4","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","sizeBytes":12346},{"cameraId":"CAM-03","durationMs":2000,"expiresAt":"2026-11-29T15:00:00.000Z","objectPath":"parties/pilot/channels/main/delivery/1/CAM-03.mp4","sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","sizeBytes":12347}]},"unknownCamera":{"cameraClips":[{"cameraId":"CAM-05","durationMs":2000,"expiresAt":"2026-11-29T15:00:00.000Z","objectPath":"parties/pilot/channels/main/delivery/1/CAM-05.mp4","sha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","sizeBytes":12349}]}},"manifests":{"1":{"cameraClips":[{"cameraId":"CAM-01","durationMs":2000,"expiresAt":"2026-11-29T15:00:00.000Z","objectPath":"parties/pilot/channels/main/delivery/1/CAM-01.mp4","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sizeBytes":12345}],"channelId":"main","expiresAt":"2026-11-29T15:00:00.000Z","jobId":"job-1","partyId":"pilot","schemaVersion":1,"version":1},"2":{"cameraClips":[{"cameraId":"CAM-01","durationMs":2000,"expiresAt":"2026-11-29T15:00:00.000Z","objectPath":"parties/pilot/channels/main/delivery/1/CAM-01.mp4","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sizeBytes":12345},{"cameraId":"CAM-02","durationMs":2000,"expiresAt":"2026-11-29T15:00:00.000Z","objectPath":"parties/pilot/channels/main/delivery/1/CAM-02.mp4","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","sizeBytes":12346}],"channelId":"main","expiresAt":"2026-11-29T15:00:00.000Z","jobId":"job-1","partyId":"pilot","schemaVersion":1,"version":1},"4":{"cameraClips":[{"cameraId":"CAM-01","durationMs":2000,"expiresAt":"2026-11-29T15:00:00.000Z","objectPath":"parties/pilot/channels/main/delivery/1/CAM-01.mp4","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sizeBytes":12345},{"cameraId":"CAM-02","durationMs":2000,"expiresAt":"2026-11-29T15:00:00.000Z","objectPath":"parties/pilot/channels/main/delivery/1/CAM-02.mp4","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","sizeBytes":12346},{"cameraId":"CAM-03","durationMs":2000,"expiresAt":"2026-11-29T15:00:00.000Z","objectPath":"parties/pilot/channels/main/delivery/1/CAM-03.mp4","sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","sizeBytes":12347},{"cameraId":"CAM-04","durationMs":2000,"expiresAt":"2026-11-29T15:00:00.000Z","objectPath":"parties/pilot/channels/main/delivery/1/CAM-04.mp4","sha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","sizeBytes":12348}],"channelId":"main","expiresAt":"2026-11-29T15:00:00.000Z","jobId":"job-1","partyId":"pilot","schemaVersion":1,"version":1}},"notes":"Supported TV layouts are 1, 2, or 4 cameras; the camera set must equal the first-N canonical slots. Four is the default when cameraCount is absent/invalid/unreadable. Generation presets keep producing 4 clips; cameraCount is a display cap only."}
+\ No newline at end of file
+diff --git a/test/fixtures/join_roles_v1.json b/test/fixtures/join_roles_v1.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..3bca1239c6de0f0be72e34c99d7783bd05f52ccf
+--- /dev/null
++++ b/test/fixtures/join_roles_v1.json
+@@ -0,0 +1 @@
++{"callables":["createHostInvite","joinHost","listHostVideos","generateHostVideo","getHostVideoPreview","deleteHostVideo"],"createHostInvite":{"request":{"channelId":"main","deviceId":"tv-pilot","partyId":"pilot"},"response":{"channelId":"main","expiresAt":"<iso8601>","inviteToken":"<server-minted hi-... capability>","partyId":"pilot"}},"guestJoin":{"request":{"channelId":"main","deviceId":"p-guest-1","joinPin":"004201","partyId":"pilot"},"response":{"channelId":"main","created":true,"deviceId":"p-guest-1","partyId":"pilot","role":"guest","status":"active"}},"hostJoin":{"request":{"channelId":"main","deviceId":"p-host-1","inviteToken":"<server-minted hi-... capability>","partyId":"pilot"},"response":{"channelId":"main","created":true,"deviceId":"p-host-1","partyId":"pilot","role":"host","status":"active"}},"notes":"Only a registered TV may mint a host invite (short-lived, token hash stored, party/channel/expiry bound). Redemption is transactional for a separate phone identity with the server-assigned host role; same-device retries are idempotent, other-device replay, expiry, guest PIN reuse, and client-only role changes never grant host. Legacy joinParty remains guest-only."}
+\ No newline at end of file

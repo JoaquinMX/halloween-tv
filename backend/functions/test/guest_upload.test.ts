@@ -598,3 +598,44 @@ test("withdrawal revokes delivery: absent everywhere and no new URLs issuable", 
     await disposeEmulatorContext(app);
   }
 });
+
+test("withdrawal deletes retained host previews and fails the bound seed closed", {
+  skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
+}, async () => {
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  try {
+    await seedParty(db, partyId, "p-guest-1", "main");
+    const services = servicesFor(db, bucket);
+    const requested = await services.requestGuestUpload({
+      partyId, deviceId: "p-guest-1", channelId: "main", consent: CONSENT, contentType: "image/jpeg",
+    });
+    await bucket.file(requested.objectPath).save(await photoBytes(), { contentType: "image/jpeg" });
+    await services.completeGuestUpload({ partyId, deviceId: "p-guest-1", channelId: "main", submissionId: requested.submissionId });
+    // A host seed bound to this submission with retained preview copies.
+    const jobId = "hv-seed-bound";
+    const stagedPath = `parties/${partyId}/channels/main/delivery/9/CAM-01.mp4`;
+    const previewPath = `parties/${partyId}/hostPreviews/seed-bound/CAM-01.mp4`;
+    await bucket.file(stagedPath).save(Buffer.from("staged"));
+    await bucket.file(previewPath).save(Buffer.from("preview"));
+    await db.doc(`parties/${partyId}/jobs/${jobId}`).set({
+      jobId, partyId, deviceId: "p-guest-1", channelId: "main", state: "running",
+      manifestVersion: 9, idempotencyKey: "idem-bound",
+      guestMedia: { submissionId: requested.submissionId },
+      stagedOutputs: { "CAM-01": { cameraId: "CAM-01", objectPath: stagedPath, sha256: "a".repeat(64) } },
+    });
+    await db.doc(`parties/${partyId}/seedVideos/seed-bound`).set({
+      seedId: "seed-bound", partyId, deviceId: "p-guest-1", channelId: "main",
+      jobId, status: "running", previewPaths: [previewPath],
+    });
+    const withdrawn = await services.withdrawGuestMedia({ partyId, deviceId: "p-guest-1", channelId: "main", submissionId: requested.submissionId });
+    assert.ok(withdrawn.deletedObjects.includes(previewPath), "retained host preview must be deleted at withdrawal");
+    assert.ok(withdrawn.deletedObjects.includes(stagedPath), "staged host derivative must be deleted at withdrawal");
+    assert.equal((await bucket.file(previewPath).exists())[0], false);
+    assert.equal((await db.doc(`parties/${partyId}/seedVideos/seed-bound`).get()).data()?.status, "failed");
+    assert.equal((await db.doc(`parties/${partyId}/jobs/${jobId}`).get()).data()?.hostDeleted, true);
+  } finally {
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+  }
+});

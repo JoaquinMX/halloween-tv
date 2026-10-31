@@ -203,8 +203,7 @@ List<int> _bytesFor(ClipDescriptor clip) {
   return <int>[firstByte, firstByte + 10, firstByte + 20];
 }
 
-PlaybackManifest _manifest({int version = 1, List<ClipDescriptor>? clips}) {
-  final List<ClipDescriptor> selected =
+PlaybackManifest _manifest({int version = 1, List<ClipDescriptor>? clips}) {  final List<ClipDescriptor> selected =
       clips ??
       <ClipDescriptor>[
         for (var i = 1; i <= 4; i++)
@@ -606,6 +605,111 @@ void main() {
       expect(invalid.manifest?.version, 1);
       expect(indexes.indexes.values.single.committedVersion, 1);
       expect(ack.records.map((record) => record.version), <int>[1]);
+    },
+  );
+
+  test(
+    '1 and 2-camera manifests prepare, ACK the complete set, and restore offline',
+    () async {
+      for (final int count in <int>[1, 2]) {
+        final _CacheStore cache = _CacheStore();
+        final _IndexStore indexes = _IndexStore();
+        final _Downloader downloader = _Downloader();
+        final _Acknowledger ack = _Acknowledger();
+        final List<ClipDescriptor> clips = _manifest().clips
+            .take(count)
+            .toList();
+        final PreparePlayback service = _useCase(
+          cache: cache,
+          index: indexes,
+          downloader: downloader,
+          acknowledger: ack,
+        );
+        addTearDown(service.dispose);
+        final PlaybackManifest manifest = _manifest(
+          version: 1,
+          clips: clips,
+        );
+        final PlaybackSyncSnapshot prepared = await service.prepareManifest(
+          manifest,
+        );
+        expect(prepared.state, PlaybackSyncState.ready);
+        expect(prepared.mediaByClipId, hasLength(count));
+        expect(indexes.indexes.values.single.committedVersion, 1);
+        // The ACK covers the complete received manifest (first-N prefix).
+        expect(ack.records.single.hashes, hasLength(count));
+        expect(
+          ack.records.single.hashes,
+          <String, String>{
+            for (final ClipDescriptor clip in clips)
+              clip.cameraId: clip.sha256,
+          },
+        );
+        expect(
+          ack.records.single.hashes.keys.toSet(),
+          expectedCctvCameraIds(count).toSet(),
+        );
+        // Durable-cache restoration serves the same count without network.
+        final _Downloader offlineDownloader = _Downloader();
+        final PreparePlayback offline = _useCase(
+          cache: cache,
+          index: indexes,
+          downloader: offlineDownloader,
+          acknowledger: _Acknowledger(),
+        );
+        addTearDown(offline.dispose);
+        final PlaybackSyncSnapshot cached = await offline.bootOffline(
+          partyId: 'party-1',
+          channelId: 'cctv',
+        );
+        expect(cached.state, PlaybackSyncState.usingCache);
+        expect(cached.mediaByClipId, hasLength(count));
+        expect(offlineDownloader.downloadCount, 0);
+      }
+    },
+  );
+
+  test(
+    'unsupported counts and gapped camera sets are fatal without ACK',
+    () async {
+      for (final List<ClipDescriptor> clips in <List<ClipDescriptor>>[
+        // 3 clips: unsupported count.
+        _manifest().clips.take(3).toList(),
+        // Gap: {CAM-01, CAM-03}.
+        <ClipDescriptor>[_manifest().clips[0], _manifest().clips[2]],
+        // Unknown camera at a supported count.
+        <ClipDescriptor>[
+          _manifest().clips[0],
+          ClipDescriptor(
+            id: 'bad-cam',
+            cameraId: 'CAM-05',
+            storageObjectId: 'v1-camera-9.mp4',
+            sha256: sha256Hex(<int>[9, 9, 9]),
+            sizeBytes: 3,
+            duration: const Duration(seconds: 5),
+            mimeType: 'video/mp4',
+          ),
+        ],
+      ]) {
+        final _CacheStore cache = _CacheStore();
+        final _IndexStore indexes = _IndexStore();
+        final _Downloader downloader = _Downloader();
+        final _Acknowledger ack = _Acknowledger();
+        final PreparePlayback service = _useCase(
+          cache: cache,
+          index: indexes,
+          downloader: downloader,
+          acknowledger: ack,
+        );
+        addTearDown(service.dispose);
+        final PlaybackSyncSnapshot invalid = await service.prepareManifest(
+          _manifest(version: 1, clips: clips),
+        );
+        expect(invalid.state, PlaybackSyncState.errorFatal);
+        expect(indexes.indexes, isEmpty);
+        expect(ack.records, isEmpty);
+        expect(downloader.downloadCount, 0);
+      }
     },
   );
 }

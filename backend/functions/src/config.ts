@@ -15,6 +15,33 @@ export const GENERATION_WORKER_MEMORY = "1GiB" as const;
 export const DELIVERY_URL_TTL_SECONDS = 15 * 60;
 export const MEDIA_RETENTION_MS = 24 * 60 * 60 * 1000;
 export const REQUIRED_CAMERA_IDS = ["CAM-01", "CAM-02", "CAM-03", "CAM-04"] as const;
+/**
+ * Supported manifest clip counts (configurable 1/2/4-camera TV layouts).
+ * Generation presets keep producing 4 clips; this is a display/contract CAP:
+ * validators accept exactly these counts and require the camera set to equal
+ * the first N canonical slots. Absent/invalid/unreadable cameraCount
+ * settings default to 4 (see partition p2/p3 SettingsPort handling).
+ */
+export const SUPPORTED_CAMERA_COUNTS = [1, 2, 4] as const;
+export type SupportedCameraCount = (typeof SUPPORTED_CAMERA_COUNTS)[number];
+
+/** First-N canonical camera ids for a supported count, in wall order. */
+export function expectedCameraIds(count: number): readonly string[] {
+  if (!(SUPPORTED_CAMERA_COUNTS as readonly number[]).includes(count)) {
+    throw new Error(`Unsupported camera count ${count}; expected one of ${SUPPORTED_CAMERA_COUNTS.join(", ")}.`);
+  }
+  return REQUIRED_CAMERA_IDS.slice(0, count);
+}
+
+/** Short-lived host-invite capability lifetime (TV-minted, phone-redeemed). */
+export const HOST_INVITE_TTL_MS = 5 * 60 * 1000;
+/** TTL for separately referenced host preview objects (seed catalog). */
+export const HOST_PREVIEW_TTL_MS = 24 * 60 * 60 * 1000;
+
+/** Preview object path: separately referenced from delivery objects so an ACK purge never removes previews. */
+export function hostPreviewObjectPath(partyId: string, seedId: string, cameraId: string): string {
+  return `parties/${partyId}/hostPreviews/${seedId}/${cameraId}.mp4`;
+}
 
 /** Generation is inert unless an operator explicitly opts in. */
 export function isGenerationEnabled(environment: NodeJS.ProcessEnv = process.env): boolean {

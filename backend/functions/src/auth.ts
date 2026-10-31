@@ -11,6 +11,35 @@ export interface RegisteredContext extends Identity {
  * Anonymous identity is the registered party/device pair. Firebase Auth UIDs and
  * email claims are intentionally neither required nor used for authorization.
  */
+
+/**
+ * Host administration gate. The host role is assigned server-side only
+ * (transactional invite redemption in host_join.ts); a client-supplied role
+ * string is never trusted. Every administrative operation revalidates the
+ * registered host role and party/channel scope through this helper.
+ */
+export async function assertRegisteredHostDevice(
+  db: Firestore,
+  identity: Identity,
+): Promise<RegisteredContext> {
+  const registered = await assertRegisteredPartyDevice(db, identity);
+  if (registered.device.role !== "host") {
+    throw new BackendError("FORBIDDEN", "Host administration requires a registered host device.");
+  }
+  return registered;
+}
+
+/** TV-only gate for minting host invites: only a registered TV may invite. */
+export async function assertRegisteredTvDevice(
+  db: Firestore,
+  identity: Identity,
+): Promise<RegisteredContext> {
+  const registered = await assertRegisteredPartyDevice(db, identity);
+  if (registered.device.role !== "tv") {
+    throw new BackendError("FORBIDDEN", "Only a registered TV may mint a host invite.");
+  }
+  return registered;
+}
 export async function assertRegisteredPartyDevice(
   db: Firestore,
   identity: Identity,

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BackendError, parseAck, parseJoinPartyInput, parseRequestGeneration, requireIdentity } from "../src/contracts";
+import { BackendError, parseAck, parseJoinPartyInput, parseRequestGeneration, requireIdentity, validateCanonicalClips, parseCreateHostInviteInput, parseJoinHostInput, parseDeleteHostVideoInput } from "../src/contracts";
 import { buildCheapDemoRequest, validateCheapDemoControls, validateGuestImageReference } from "../src/video_generation_port";
 import { createVideoGenerationProviderFromEnvironment, FakeVideoGenerationPort } from "../src/providers/fake";
 import { AlibabaVideoGenerationPort } from "../src/providers/alibaba";
@@ -19,13 +19,62 @@ test("payload contracts reject missing identity, unsupported models, and noncano
   expectCode(() => parseRequestGeneration({
     partyId: "party", deviceId: "tv", channelId: "main", jobId: "job-1", idempotencyKey: "job-1", presetId: "premium",
   }), "INVALID_ARGUMENT");
+  // 1/2/4 first-N prefixes parse; anything else (gaps, unknown cameras,
+  // unsupported counts, extra keys) is rejected.
   expectCode(() => parseAck({
-    partyId: "party", deviceId: "tv", channelId: "main", manifestVersion: 1, clipHashes: { "CAM-01": "0".repeat(64) },
+    partyId: "party", deviceId: "tv", channelId: "main", manifestVersion: 1, clipHashes: { "CAM-01": "0".repeat(64), "CAM-02": "0".repeat(64), "CAM-03": "0".repeat(64) },
   }), "MANIFEST_MISMATCH");
+  expectCode(() => parseAck({
+    partyId: "party", deviceId: "tv", channelId: "main", manifestVersion: 1, clipHashes: { "CAM-01": "0".repeat(64), "CAM-03": "0".repeat(64) },
+  }), "MANIFEST_MISMATCH");
+  expectCode(() => parseAck({
+    partyId: "party", deviceId: "tv", channelId: "main", manifestVersion: 1, clipHashes: { "CAM-05": "0".repeat(64) },
+  }), "MANIFEST_MISMATCH");
+  expectCode(() => parseAck({
+    partyId: "party", deviceId: "tv", channelId: "main", manifestVersion: 1, clipHashes: { "CAM-01": "zzz" },
+  }), "MANIFEST_MISMATCH");
+  const ack1 = parseAck({
+    partyId: "party", deviceId: "tv", channelId: "main", manifestVersion: 1, clipHashes: { "CAM-01": "0".repeat(64) },
+  });
+  assert.deepEqual(Object.keys(ack1.clipHashes), ["CAM-01"]);
+  const ack2 = parseAck({
+    partyId: "party", deviceId: "tv", channelId: "main", manifestVersion: 1, clipHashes: { "CAM-02": "1".repeat(64), "CAM-01": "0".repeat(64) },
+  });
+  assert.deepEqual(Object.keys(ack2.clipHashes).sort(), ["CAM-01", "CAM-02"]);
+  const ack4 = parseAck({
+    partyId: "party", deviceId: "tv", channelId: "main", manifestVersion: 1,
+    clipHashes: { "CAM-01": "0".repeat(64), "CAM-02": "1".repeat(64), "CAM-03": "2".repeat(64), "CAM-04": "3".repeat(64) },
+  });
+  assert.deepEqual(Object.keys(ack4.clipHashes).sort(), ["CAM-01", "CAM-02", "CAM-03", "CAM-04"]);
   const parsed = parseRequestGeneration({
     partyId: "party", deviceId: "tv", channelId: "main", jobId: "job-1", idempotencyKey: "job-1", presetId: "cheap_demo",
   });
   assert.equal(parsed.presetId, "cheap_demo");
+});
+
+test("manifest validators accept 1/2/4 first-N prefixes and reject gaps, duplicates, and unknown cameras", () => {
+  const clip = (cameraId: string, sha256 = "a".repeat(64)) => ({
+    cameraId, objectPath: `parties/pilot/channels/main/delivery/1/${cameraId}.mp4`,
+    sha256, sizeBytes: 12345, durationMs: 2000, expiresAt: "2026-11-29T15:00:00.000Z",
+  });
+  // Reordered valid clips remain accepted at every supported count.
+  validateCanonicalClips([clip("CAM-02"), clip("CAM-01")]);
+  validateCanonicalClips([clip("CAM-04"), clip("CAM-03"), clip("CAM-02"), clip("CAM-01")]);
+  validateCanonicalClips([clip("CAM-01")]);
+  for (const clips of [
+    [clip("CAM-01"), clip("CAM-02"), clip("CAM-03")],
+    [clip("CAM-01"), clip("CAM-03")],
+    [clip("CAM-02")],
+    [clip("CAM-01"), clip("CAM-01")],
+    [clip("CAM-05")],
+    [clip("CAM-01"), { ...clip("CAM-02"), sha256: "zzz" }],
+  ]) {
+    assert.throws(() => validateCanonicalClips(clips as never), (error: unknown) => error instanceof BackendError && error.errorCode === "MANIFEST_MISMATCH");
+  }
+  // Host invite parsers: guest PINs are never host tokens, roles are server-assigned.
+  assert.deepEqual(parseCreateHostInviteInput({ partyId: "p", deviceId: "tv", channelId: "main" }), { partyId: "p", deviceId: "tv", channelId: "main" });
+  assert.throws(() => parseJoinHostInput({ partyId: "p", deviceId: "x", channelId: "main", inviteToken: "004201" }), (e: unknown) => e instanceof BackendError && e.errorCode === "INVALID_ARGUMENT");
+  assert.throws(() => parseDeleteHostVideoInput({ partyId: "p", deviceId: "h", channelId: "main", seedIds: [] }), (e: unknown) => e instanceof BackendError && e.errorCode === "INVALID_ARGUMENT");
 });
 
 test("joinParty parser enforces identity, channel, and six-digit PIN shape", () => {

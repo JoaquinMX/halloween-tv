@@ -22,7 +22,9 @@ import {
   DELIVERY_URL_TTL_SECONDS,
   MEDIA_RETENTION_MS,
   REQUIRED_CAMERA_IDS,
+  SUPPORTED_CAMERA_COUNTS,
   SCHEMA_VERSION,
+  expectedCameraIds,
 } from "./config";
 import { assertRegisteredPartyDevice } from "./auth";
 
@@ -144,6 +146,14 @@ function serializeManifest(manifest: DeliveryManifest): SerializedDeliveryManife
 function canonicalClipsMatch(manifest: DeliveryManifest, ack: AckInput): void {
   if (manifest.version !== ack.manifestVersion || manifest.partyId !== ack.partyId || manifest.channelId !== ack.channelId) {
     throw new BackendError("MANIFEST_MISMATCH", "ACK does not match the current party, channel, and manifest version.");
+  }
+  // Exact match: same clip count, same first-N camera set, same hashes.
+  // Extra hashes beyond the manifest's prefix are rejected here (parseAck
+  // only checks the shape is a supported prefix, not that it is THIS prefix).
+  const manifestCameras = manifest.cameraClips.map((clip) => clip.cameraId).sort();
+  const ackCameras = Object.keys(ack.clipHashes).sort();
+  if (manifestCameras.length !== ackCameras.length || manifestCameras.join(",") !== ackCameras.join(",")) {
+    throw new BackendError("MANIFEST_MISMATCH", "ACK hash set does not match the canonical manifest cameras.");
   }
   for (const clip of manifest.cameraClips) {
     if (ack.clipHashes[clip.cameraId] !== clip.sha256) {
@@ -309,17 +319,18 @@ export function createDeliveryServices(options: DeliveryServiceOptions): Deliver
     const job = jobDocument.data();
     if (job.state !== "running") throw new BackendError("MANIFEST_MISMATCH", "Only a running job can stage generated media.");
     const { partyId, channelId } = job as { partyId: string; channelId: string };
-    if (!Array.isArray(inputs) || inputs.length !== REQUIRED_CAMERA_IDS.length) {
-      throw new BackendError("MANIFEST_MISMATCH", "Staging requires the four canonical camera clips.");
+    if (!Array.isArray(inputs) || !(SUPPORTED_CAMERA_COUNTS as readonly number[]).includes(inputs.length)) {
+      throw new BackendError("MANIFEST_MISMATCH", "Staging requires 1, 2, or 4 canonical camera clips.");
     }
+    const expectedStaging = [...expectedCameraIds(inputs.length)];
     const byCamera = new Map(inputs.map((clip) => [clip.cameraId, clip]));
-    if (byCamera.size !== inputs.length || REQUIRED_CAMERA_IDS.some((id) => !byCamera.has(id))) {
+    if (byCamera.size !== inputs.length || expectedStaging.some((id) => !byCamera.has(id))) {
       throw new BackendError("MANIFEST_MISMATCH", "Staging camera set is invalid.");
     }
     const version = Number(job.manifestVersion ?? 0) + 1;
     const expiresAt = new Date(now().getTime() + MEDIA_RETENTION_MS).toISOString();
     const canonical: CanonicalClip[] = [];
-    for (const cameraId of REQUIRED_CAMERA_IDS) {
+    for (const cameraId of expectedStaging as CanonicalClip["cameraId"][]) {
       const input = byCamera.get(cameraId)!;
       const generatedPrefix = `parties/${partyId}/generated/${validJobId}/`;
       if (!input.sourcePath.startsWith(generatedPrefix) || input.sourcePath.includes("..") || input.sourcePath.includes("\\")) {
@@ -488,7 +499,7 @@ export function createDeliveryServices(options: DeliveryServiceOptions): Deliver
 }
 
 interface AcceptedAckClip {
-  cameraId: (typeof REQUIRED_CAMERA_IDS)[number];
+  cameraId: string;
   objectPath: string;
   sha256: string;
 }
@@ -505,29 +516,36 @@ function validateAcceptedAck(
   idempotencyKey: string,
 ): ValidatedAcceptedAck {
   const mismatch = (): never => { throw new BackendError("MANIFEST_MISMATCH", "ACK conflicts with the previously accepted delivery ACK."); };
+  // Accepted-ACK replay validation supports the 1/2/4 prefixes: the stored
+  // clip set must exactly equal one first-N prefix, and the replayed hashes
+  // must equal the stored ones (extra hashes rejected).
+  const clipCount = Array.isArray(value?.clips) ? (value as Record<string, unknown>).clips as unknown[] : [];
+  if (!(SUPPORTED_CAMERA_COUNTS as readonly number[]).includes(clipCount.length)) return mismatch();
+  const expectedKeys = [...expectedCameraIds(clipCount.length)].sort().join(",");
   if (!value || value.ackId !== ackId || value.partyId !== ack.partyId || value.deviceId !== ack.deviceId ||
       value.channelId !== ack.channelId || value.manifestVersion !== ack.manifestVersion ||
       value.idempotencyKey !== idempotencyKey || !/^[a-f0-9]{64}$/.test(String(value.manifestHash ?? "")) ||
-      typeof value.jobId !== "string" || !Array.isArray(value.clips) || value.clips.length !== REQUIRED_CAMERA_IDS.length ||
+      typeof value.jobId !== "string" || !Array.isArray(value.clips) ||
       !value.clipHashes || typeof value.clipHashes !== "object" || Array.isArray(value.clipHashes) ||
-      Object.keys(value.clipHashes).sort().join(",") !== [...REQUIRED_CAMERA_IDS].sort().join(",") ||
+      Object.keys(value.clipHashes).sort().join(",") !== expectedKeys ||
+      Object.keys(ack.clipHashes).sort().join(",") !== expectedKeys ||
       !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value.jobId)) return mismatch();
-  for (const cameraId of REQUIRED_CAMERA_IDS) {
+  for (const cameraId of expectedCameraIds(clipCount.length)) {
     if ((value.clipHashes as Record<string, unknown>)[cameraId] !== ack.clipHashes[cameraId]) return mismatch();
   }
   const byCamera = new Map<string, AcceptedAckClip>();
   for (const raw of value.clips) {
     if (!raw || typeof raw !== "object") return mismatch();
     const clip = raw as Record<string, unknown>;
-    if (typeof clip.cameraId !== "string" || !REQUIRED_CAMERA_IDS.includes(clip.cameraId as AcceptedAckClip["cameraId"]) ||
+    if (typeof clip.cameraId !== "string" || !(expectedCameraIds(clipCount.length) as readonly string[]).includes(clip.cameraId) ||
         typeof clip.objectPath !== "string" || typeof clip.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(clip.sha256) ||
         byCamera.has(clip.cameraId)) return mismatch();
-    const cameraId = clip.cameraId as AcceptedAckClip["cameraId"];
+    const cameraId = clip.cameraId;
     if (clip.objectPath !== deliveryObjectPath(ack.partyId, ack.channelId, ack.manifestVersion, cameraId) ||
         clip.sha256 !== ack.clipHashes[cameraId]) return mismatch();
     byCamera.set(cameraId, { cameraId, objectPath: clip.objectPath, sha256: clip.sha256 });
   }
-  if (REQUIRED_CAMERA_IDS.some((cameraId) => !byCamera.has(cameraId))) return mismatch();
-  return { jobId: String(value.jobId), clips: REQUIRED_CAMERA_IDS.map((cameraId) => byCamera.get(cameraId)!) };
+  if ((expectedCameraIds(clipCount.length) as readonly string[]).some((cameraId) => !byCamera.has(cameraId))) return mismatch();
+  return { jobId: String(value.jobId), clips: [...expectedCameraIds(clipCount.length)].map((cameraId) => byCamera.get(cameraId)!) };
 }
 
