@@ -69,7 +69,12 @@ async function main(): Promise<void> {
       }
     }
     const issues = [...initialIssues, ...fieldIssues];
-    process.stdout.write(`${JSON.stringify({ mode: "read-only", target, projectId, jobCameraCount: details.length, issueCount: issues.length, issues, cameras: details })}\n`);
+    // Ledger-derived provider call count: only rows with a recorded (possibly
+    // real) credit value can imply a billable provider call. Synthetic-zero
+    // fake rows and fixture rows with null task IDs imply zero provider calls.
+    const providerApiCalls = details.filter((row) => row.creditStatus === "recorded_value_unverified").length;
+    const unknownCreditRows = details.filter((row) => row.creditStatus === "unknown").length;
+    process.stdout.write(`${JSON.stringify({ mode: "read-only", target, projectId, jobCameraCount: details.length, issueCount: issues.length, issues, providerApiCalls, unknownCreditRows, cameras: details })}\n`);
     if (issues.length) process.exitCode = 2;
   } finally {
     await deleteApp(app);

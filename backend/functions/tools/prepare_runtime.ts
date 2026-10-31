@@ -14,37 +14,43 @@
  * `new FakeVideoGenerationPort(<dir>)` by the composition root. Nothing here
  * assumes that the repository-relative `apps/tv_app/assets` path survives a
  * deployment.
+ *
+ * Cross-host behavior:
+ * - On linux-x64 the packaged binaries are EXECUTED: build-capability checks
+ *   (libx264, required filters, mp4 mux) and a normalization smoke test run
+ *   against them. The manifest records validationMode "executed" and
+ *   smokeTested true.
+ * - On any other host (e.g. darwin-arm64) the Linux binaries are NEVER
+ *   executed. Packaging is structural: pinned package versions, ELF64 LE
+ *   x86-64 headers, sizes, exec bits, and hashes are validated; fixture
+ *   bytes are validated plus profile-probed with the separately selected
+ *   NATIVE host ffprobe (never runtime/bin). The manifest records
+ *   validationMode "structural-only" and smokeTested false. smokeTested is
+ *   never true without execution.
  */
-import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { chmod, copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { REQUIRED_CAMERA_IDS } from "../src/config";
+import {
+  EXPECTED_NORMALIZATION,
+  FIXTURE_PROFILE,
+  PINNED_PACKAGES,
+  REQUIRED_FFMPEG_FILTERS,
+  RUNTIME_TARGET,
+  assertExecutableMode,
+  assertLinuxX64Executable,
+  fail,
+  installedPackageVersion,
+  sha256Hex,
+  validateFixtureBytes,
+  type PinnedEntry,
+  type ValidationMode,
+} from "./runtime_artifact";
 
-const TARGET = "linux-x64";
-const NORMALIZATION = {
-  codec: "h264",
-  pixelFormat: "yuv420p",
-  frameRate: "24/1",
-  width: 854,
-  height: 480,
-  durationMs: 2000,
-} as const;
-const FIXTURE_PROFILE = {
-  codec: "h264",
-  pixelFormat: "yuv420p",
-  frameRate: "24/1",
-  width: 960,
-  height: 540,
-  durationMs: 2000,
-} as const;
-const REQUIRED_FFMPEG_FILTERS = ["fps", "scale", "pad", "setsar", "tpad"];
-const PINNED_PACKAGES = {
-  ffmpeg: { packageName: "@ffmpeg-installer/linux-x64", binary: "ffmpeg", expectedVersion: "4.1.0" },
-  ffprobe: { packageName: "@ffprobe-installer/linux-x64", binary: "ffprobe", expectedVersion: "5.2.0" },
-} as const;
+const NORMALIZATION = EXPECTED_NORMALIZATION;
 
 const packageRoot = process.cwd();
 const runtimeRoot = join(packageRoot, "runtime");
@@ -53,10 +59,6 @@ const sourceAssets = resolve(packageRoot, "../../apps/tv_app/assets");
 type ProbeStream = { codec_name?: string; pix_fmt?: string; r_frame_rate?: string; width?: number; height?: number };
 type ProbeResult = { streams?: ProbeStream[]; format?: { duration?: string } };
 
-function fail(message: string): never {
-  throw new Error(message);
-}
-
 function run(command: string, args: string[], timeout = 120_000): { stdout: string; stderr: string } {
   const result = spawnSync(command, args, { encoding: "utf8", timeout, maxBuffer: 8 * 1024 * 1024 });
   if (result.error) fail(`${command} could not be executed: ${result.error.message}`);
@@ -64,18 +66,7 @@ function run(command: string, args: string[], timeout = 120_000): { stdout: stri
   return { stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
 }
 
-function assertLinuxX64Executable(path: string, label: string): Buffer {
-  if (!existsSync(path)) fail(`${label} binary is missing at ${path}.`);
-  const bytes = readFileSync(path);
-  const isElf = bytes[0] === 0x7f && bytes.toString("ascii", 1, 4) === "ELF";
-  const is64BitLittleEndian = bytes[4] === 2 && bytes[5] === 1;
-  const machine = bytes.length > 20 ? bytes.readUInt16LE(18) : 0;
-  if (!isElf || !is64BitLittleEndian || machine !== 62) {
-    fail(`${label} at ${path} is not a little-endian Linux x86_64 ELF executable (target ${TARGET}).`);
-  }
-  return bytes;
-}
-
+/** Probes media with an explicitly selected NATIVE host binary (never a packaged Linux binary on a foreign host). */
 function probeMedia(ffprobePath: string, path: string): ProbeResult {
   const { stdout } = run(ffprobePath, [
     "-v", "error", "-select_streams", "v:0", "-show_entries",
@@ -103,22 +94,13 @@ function assertProfile(metadata: ProbeResult, expected: Record<string, unknown>,
   }
 }
 
-/** Pinned installer packages drop the binary next to their package.json. */
-function installedBinary(entry: (typeof PINNED_PACKAGES)[keyof typeof PINNED_PACKAGES]): { path: string; version: string } {
-  let packageJsonPath: string;
-  try {
-    packageJsonPath = require.resolve(`${entry.packageName}/package.json`);
-  } catch {
-    fail(`Pinned package ${entry.packageName} is not installed; run npm install in backend/functions with Linux x64 packages included.`);
-  }
-  const directory = dirname(packageJsonPath);
-  const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8")) as { version?: string };
-  if (packageJson.version !== entry.expectedVersion) {
-    fail(`${entry.packageName} resolved to version ${String(packageJson.version)} but ${entry.expectedVersion} is pinned.`);
-  }
+/** Pinned installer packages drop the binary next to their package.json. Validates version + ELF structurally (no execution). */
+function installedBinary(entry: PinnedEntry): { path: string; version: string } {
+  const { directory, version } = installedPackageVersion(entry, packageRoot);
   const path = join(directory, entry.binary);
   if (!existsSync(path)) fail(`${entry.packageName} did not install its ${entry.binary} binary (expected ${path}).`);
-  return { path, version: entry.expectedVersion };
+  assertLinuxX64Executable(path, entry.binary === "ffmpeg" ? "FFmpeg" : "ffprobe");
+  return { path, version };
 }
 
 function verifyBuildCapabilities(ffmpegPath: string, ffprobePath: string): void {
@@ -177,14 +159,35 @@ async function loadFixtures(): Promise<Array<{
 }
 
 async function main(): Promise<void> {
-  if (process.platform !== "linux" || process.arch !== "x64") {
-    fail(`Runtime preparation must execute on ${TARGET} to run and capability-test the packaged binaries; this host is ${process.platform}-${process.arch}. Use the Linux CI job or a linux/amd64 container.`);
+  const executingHost = process.platform === "linux" && process.arch === "x64";
+  const validationMode: ValidationMode = executingHost ? "executed" : "structural-only";
+  if (!executingHost) {
+    process.stderr.write(
+      `Cross-host packaging on ${process.platform}-${process.arch}: structural-only validation; ` +
+        `Linux binaries are never executed on this host.\n`,
+    );
   }
   const ffmpeg = installedBinary(PINNED_PACKAGES.ffmpeg);
   const ffprobe = installedBinary(PINNED_PACKAGES.ffprobe);
-  const ffmpegBytes = assertLinuxX64Executable(ffmpeg.path, "FFmpeg");
-  const ffprobeBytes = assertLinuxX64Executable(ffprobe.path, "ffprobe");
-  verifyBuildCapabilities(ffmpeg.path, ffprobe.path);
+  const ffmpegBytes = readFileSync(ffmpeg.path);
+  const ffprobeBytes = readFileSync(ffprobe.path);
+  assertExecutableMode(ffmpeg.path, "FFmpeg");
+  assertExecutableMode(ffprobe.path, "ffprobe");
+
+  // Native host probe binary for fixture media checks. This is the operator's
+  // own toolchain (FFPROBE_NATIVE_PATH, else PATH `ffprobe`), never a
+  // runtime/bin file and never FFPROBE_PATH (which points at the packaged
+  // Linux binary in deployment environments), so Linux binaries stay
+  // unexecuted on foreign hosts.
+  const nativeFfprobe = process.env.FFPROBE_NATIVE_PATH ?? "ffprobe";
+  const packagedFfprobeForProbe = executingHost ? ffprobe.path : undefined;
+  if (!executingHost && (nativeFfprobe.endsWith("runtime/bin/ffprobe") || nativeFfprobe.endsWith("runtime/bin/ffmpeg"))) {
+    fail("Cross-host packaging refuses a runtime/bin probe binary; select a native host ffprobe via FFPROBE_NATIVE_PATH.");
+  }
+
+  if (executingHost) {
+    verifyBuildCapabilities(ffmpeg.path, ffprobe.path);
+  }
 
   const fixtures = await loadFixtures();
   const fixtureDirectory = join(runtimeRoot, "fixtures");
@@ -199,21 +202,36 @@ async function main(): Promise<void> {
   await copyFile(ffprobe.path, ffprobeTarget);
   await chmod(ffmpegTarget, 0o755);
   await chmod(ffprobeTarget, 0o755);
-  assertLinuxX64Executable(ffmpegTarget, "Packaged FFmpeg");
-  assertLinuxX64Executable(ffprobeTarget, "Packaged ffprobe");
+  // Structural re-validation of the COPIED bytes (read-only, no execution).
+  const packagedFfmpegBytes = assertLinuxX64Executable(ffmpegTarget, "Packaged FFmpeg");
+  const packagedFfprobeBytes = assertLinuxX64Executable(ffprobeTarget, "Packaged ffprobe");
+  assertExecutableMode(ffmpegTarget, "Packaged FFmpeg");
+  assertExecutableMode(ffprobeTarget, "Packaged ffprobe");
 
   const preparedFixtures: Array<Record<string, unknown>> = [];
   for (const fixture of fixtures) {
     const bytes = await readFile(fixture.path);
-    const digest = createHash("sha256").update(bytes).digest("hex");
-    if (bytes.byteLength !== fixture.sizeBytes || digest !== fixture.sha256) {
-      fail(`Repository fixture bytes do not match fixture_manifest.json for ${fixture.cameraId}.`);
+    validateFixtureBytes(bytes, fixture);
+    const probePath = packagedFfprobeForProbe ?? nativeFfprobe;
+    try {
+      assertProfile(probeMedia(probePath, fixture.path), FIXTURE_PROFILE, `Repository fixture ${fixture.cameraId}`, fixture.path);
+    } catch (error) {
+      if (!executingHost) {
+        fail(
+          `Repository fixture ${fixture.cameraId} failed the native-host profile probe ` +
+            `(${nativeFfprobe}): ${error instanceof Error ? error.message : String(error)}. ` +
+            `Install a working native ffprobe or set FFPROBE_NATIVE_PATH.`,
+        );
+      }
+      throw error;
     }
-    assertProfile(probeMedia(ffprobeTarget, fixture.path), FIXTURE_PROFILE, `Repository fixture ${fixture.cameraId}`, fixture.path);
     const target = join(fixtureDirectory, `cam${fixture.cameraId.slice(-2).toLowerCase()}.mp4`);
     await copyFile(fixture.path, target);
     await chmod(target, 0o644);
-    assertProfile(probeMedia(ffprobeTarget, target), FIXTURE_PROFILE, `Packaged fixture ${fixture.cameraId}`, target);
+    const copied = await readFile(target);
+    validateFixtureBytes(copied, fixture);
+    const copiedProbePath = packagedFfprobeForProbe ?? nativeFfprobe;
+    assertProfile(probeMedia(copiedProbePath, target), FIXTURE_PROFILE, `Packaged fixture ${fixture.cameraId}`, target);
     preparedFixtures.push({
       cameraId: fixture.cameraId,
       path: `runtime/fixtures/cam${fixture.cameraId.slice(-2).toLowerCase()}.mp4`,
@@ -224,22 +242,33 @@ async function main(): Promise<void> {
     });
   }
   await copyFile(join(sourceAssets, "fixture_manifest.json"), join(fixtureDirectory, "fixture_manifest.json"));
-  smokeNormalize(join(fixtureDirectory, "cam01.mp4"), ffmpegTarget, ffprobeTarget);
 
-  const runtimeBytes = ffmpegBytes.byteLength + ffprobeBytes.byteLength +
+  let smokeTested = false;
+  if (executingHost) {
+    smokeNormalize(join(fixtureDirectory, "cam01.mp4"), ffmpegTarget, ffprobeTarget);
+    smokeTested = true;
+  }
+
+  const runtimeBytes = packagedFfmpegBytes.byteLength + packagedFfprobeBytes.byteLength +
     preparedFixtures.reduce((total, fixture) => total + Number(fixture.sizeBytes), 0);
   const output = {
-    target: TARGET,
+    target: RUNTIME_TARGET,
     preparedBy: "tools/prepare_runtime.ts",
+    validationMode,
+    smokeTested,
+    structuralOnly: !executingHost,
+    hostPlatform: process.platform,
+    hostArch: process.arch,
+    nativeProbe: executingHost ? undefined : { ffprobe: nativeFfprobe, note: "repository + packaged fixture profiles probed with the native host ffprobe; packaged Linux binaries never executed" },
     binaries: {
       ffmpegPath: "runtime/bin/ffmpeg",
       ffprobePath: "runtime/bin/ffprobe",
       ffmpegVersion: ffmpeg.version,
       ffprobeVersion: ffprobe.version,
-      ffmpegBytes: ffmpegBytes.byteLength,
-      ffprobeBytes: ffprobeBytes.byteLength,
-      ffmpegSha256: createHash("sha256").update(ffmpegBytes).digest("hex"),
-      ffprobeSha256: createHash("sha256").update(ffprobeBytes).digest("hex"),
+      ffmpegBytes: packagedFfmpegBytes.byteLength,
+      ffprobeBytes: packagedFfprobeBytes.byteLength,
+      ffmpegSha256: sha256Hex(packagedFfmpegBytes),
+      ffprobeSha256: sha256Hex(packagedFfprobeBytes),
     },
     fixtureDirectory: "runtime/fixtures",
     licenses: {
@@ -249,7 +278,6 @@ async function main(): Promise<void> {
     },
     fixtures: preparedFixtures,
     normalization: NORMALIZATION,
-    smokeTested: true,
     runtimeBytes,
   };
   await writeFile(join(runtimeRoot, "runtime-manifest.json"), `${JSON.stringify(output, null, 2)}\n`, { mode: 0o644 });
