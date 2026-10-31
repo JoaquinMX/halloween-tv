@@ -38,9 +38,17 @@ function toDataUri(bytes: Uint8Array, contentType: "image/jpeg" | "image/png"): 
   return `data:${contentType};base64,${Buffer.from(bytes).toString("base64")}`;
 }
 
-/** Deterministic per-request seed from the immutable still idempotency key. */
+/** Deterministic per-request seed from the immutable still idempotency key.
+ * Verified live range (rollout-4 400 fix): the Token Plan image route expects
+ * a signed 32-bit seed in [0, 2147483647]. The raw 8-hex-word parse spans
+ * [0, 4294967295] (the failing live key yielded raw 3399556814, rejected as
+ * HTTP 400 InvalidParameter; a known-good key yielded 30102026), so the raw
+ * value is reduced modulo 2**31 into [0, 2147483647]. Deterministic (same key
+ * -> same seed); uniformity preserved as much as a modulo allows (each output
+ * has exactly two raw preimages). */
 export function cartoonStillSeed(idempotencyKey: string): number {
-  return Number.parseInt(createHash("sha256").update(idempotencyKey).digest("hex").slice(0, 8), 16);
+  const raw = Number.parseInt(createHash("sha256").update(idempotencyKey).digest("hex").slice(0, 8), 16);
+  return raw % 2147483648;
 }
 
 /**
@@ -183,8 +191,23 @@ export class AlibabaImageGenerationPort implements ImageGenerationPort {
     }
     const parsed = await response.json().catch(() => ({}) as Record<string, any>);
     if (!response.ok) {
+      const root = record(parsed);
+      const output = record(root?.output);
+      const providerError = record(root?.error);
+      const rawCode = typeof root?.code === "string" ? root.code
+        : typeof output?.code === "string" ? output.code
+        : typeof providerError?.code === "string" ? providerError.code
+        : sanitizeProviderReasonText(parsed.code || "PROVIDER_ERROR");
+      const rawMessage = typeof root?.message === "string" ? root.message
+        : typeof output?.message === "string" ? output.message
+        : typeof providerError?.message === "string" ? providerError.message
+        : "";
+      const code = sanitizeProviderReasonText(typeof rawCode === "string" ? rawCode : "PROVIDER_ERROR");
+      const detail = sanitizeProviderReasonText(rawMessage);
       throw new AlibabaSubmissionError(
-        `Alibaba image request failed (${sanitizeProviderReasonText(parsed.code || "PROVIDER_ERROR")}).`,
+        detail
+          ? `Alibaba image request failed (${code}: ${detail}).`
+          : `Alibaba image request failed (${code}).`,
         response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429 ? "non_billable" : "unknown",
         false,
       );
