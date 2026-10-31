@@ -136,6 +136,40 @@ const { buildCheapDemoRequest } = require("./lib/src/video_generation_port.js");
   return JSON.parse(result.stdout) as Array<{ cameraId: string; sha256: string; sizeBytes: number }>;
 }
 
+/** Minimum runGeneration worker memory for ffmpeg normalization headroom. */
+const WORKER_MEMORY_FLOOR_MIB = 512;
+
+function parseMemoryToMiB(raw: string): number {
+  const match = /^\s*(\d+(?:\.\d+)?)\s*(MiB|GiB)\s*$/i.exec(raw);
+  if (!match) {
+    throw new Error(`runGeneration memory=${JSON.stringify(raw)} is not a recognized Functions memory size (expected e.g. "512MiB" or "1GiB").`);
+  }
+  const value = Number(match[1]);
+  return match[2].toLowerCase() === "gib" ? value * 1024 : value;
+}
+
+/**
+ * Resolves the runGeneration worker memory from the compiled artifact. The
+ * production entry point declares it via the GENERATION_WORKER_MEMORY named
+ * constant (src/config.ts), so the compiled index.js references the constant
+ * rather than a literal; fall back to the compiled config module to read it.
+ */
+function resolveWorkerMemory(compiled: string, taskOptions: string, functionsRoot: string): { raw: string; mib: number } {
+  const literal = /memory:\s*["']([^"']+)["']/.exec(taskOptions)?.[1];
+  if (literal) return { raw: literal, mib: parseMemoryToMiB(literal) };
+  // Named-constant binding (memory: <scope>.GENERATION_WORKER_MEMORY). The
+  // pattern requires the memory: key so code comments that merely mention the
+  // constant name never satisfy the check when the declaration is stripped.
+  if (/memory\s*:\s*[^"'`{}\n]*GENERATION_WORKER_MEMORY/.test(taskOptions)) {
+    for (const candidate of [join(functionsRoot, "lib", "src", "config.js"), join(functionsRoot, "lib", "config.js")]) {
+      if (!existsSync(candidate)) continue;
+      const configured = /GENERATION_WORKER_MEMORY\s*=\s*["']([^"']+)["']/.exec(readFileSync(candidate, "utf8"))?.[1];
+      if (configured) return { raw: configured, mib: parseMemoryToMiB(configured) };
+    }
+  }
+  throw new Error("runGeneration does not declare memory; the task worker needs explicit memory headroom for ffmpeg normalization (GENERATION_WORKER_MEMORY, at least 512MiB).");
+}
+
 export async function runPreflight(): Promise<Record<string, unknown>> {
   const target = argument("target");
   if (target !== "cloud" && target !== "emulator") {
@@ -295,7 +329,7 @@ export async function runPreflight(): Promise<Record<string, unknown>> {
     });
     record(() => {
       const taskStart = compiled.indexOf("onTaskDispatched");
-      const options = taskStart >= 0 ? compiled.slice(taskStart, taskStart + 800) : "";
+      const options = taskStart >= 0 ? compiled.slice(taskStart, taskStart + 1600) : "";
       const declared = Number(/timeoutSeconds:\s*(\d+)/.exec(options)?.[1] ?? 0);
       const workerTimeout = integerSetting("GENERATION_WORKER_TIMEOUT_SECONDS", config);
       const providerTimeout = integerSetting("PROVIDER_POLL_TIMEOUT_SECONDS", config);
@@ -308,6 +342,10 @@ export async function runPreflight(): Promise<Record<string, unknown>> {
       }
       if (declared !== workerTimeout) {
         throw new Error(`runGeneration timeoutSeconds=${declared} does not match GENERATION_WORKER_TIMEOUT_SECONDS=${workerTimeout}.`);
+      }
+      const workerMemory = resolveWorkerMemory(compiled, options, functionsRoot);
+      if (workerMemory.mib < WORKER_MEMORY_FLOOR_MIB) {
+        throw new Error(`runGeneration memory=${workerMemory.raw} is below the ${WORKER_MEMORY_FLOOR_MIB}MiB floor required for ffmpeg normalization headroom; raise GENERATION_WORKER_MEMORY to at least 512MiB (1GiB configured).`);
       }
     });
   } else {
@@ -365,6 +403,16 @@ export async function runPreflight(): Promise<Record<string, unknown>> {
   if (allowGeneration) {
     warnings.push("Explicit fake-only rehearsal opt-in (--allow-generation with VIDEO_GENERATION_PROVIDER=fake); restore GENERATION_ENABLED=unset/false after the rehearsal window.");
   }
+  let workerMemory: { raw: string; mib: number } | undefined;
+  try {
+    if (compiledMainPath && existsSync(compiledMainPath)) {
+      const compiledText = readFileSync(compiledMainPath, "utf8");
+      const taskStart = compiledText.indexOf("onTaskDispatched");
+      workerMemory = resolveWorkerMemory(compiledText, taskStart >= 0 ? compiledText.slice(taskStart, taskStart + 1600) : "", functionsRoot);
+    }
+  } catch {
+    workerMemory = undefined;
+  }
   return {
     preflight: "passed",
     target,
@@ -384,6 +432,8 @@ export async function runPreflight(): Promise<Record<string, unknown>> {
     workerTimeoutSeconds: integerSetting("GENERATION_WORKER_TIMEOUT_SECONDS", config),
     providerPollTimeoutSeconds: integerSetting("PROVIDER_POLL_TIMEOUT_SECONDS", config),
     normalizationHeadroomSeconds: integerSetting("NORMALIZATION_HEADROOM_SECONDS", config),
+    workerMemory: workerMemory?.raw,
+    workerMemoryMiB: workerMemory?.mib,
     runtimeBytes,
     warnings,
   };

@@ -238,7 +238,7 @@ test("runtime preparation validates the Linux artifact without executing foreign
   }
 });
 
-type ArtifactOptions = { timeoutSeconds?: number; omitFixture?: string; stripFixtureBinding?: boolean; omitRuntime?: boolean };
+type ArtifactOptions = { timeoutSeconds?: number; memory?: string; omitMemory?: boolean; omitFixture?: string; stripFixtureBinding?: boolean; omitRuntime?: boolean };
 
 /**
  * Builds an isolated deployable artifact from the ACTUAL compiled production
@@ -272,6 +272,19 @@ function buildArtifact(options: ArtifactOptions = {}): { root: string; functions
     const indexPath = join(functions, "lib", "src", "index.js");
     const compiled = readFileSync(indexPath, "utf8").replace(/timeoutSeconds:\s*\d+/, `timeoutSeconds: ${options.timeoutSeconds}`);
     writeFileSync(indexPath, compiled);
+  }
+  if (options.omitMemory) {
+    // Drop the worker memory declaration the way a regressed build would: the
+    // task falls back to the 256MiB default and OOMs during normalization.
+    const indexPath = join(functions, "lib", "src", "index.js");
+    const compiled = readFileSync(indexPath, "utf8").replace(/\s*memory:\s*[^\n,]+,?/, "");
+    writeFileSync(indexPath, compiled);
+  } else if (options.memory !== undefined) {
+    // Retarget the GENERATION_WORKER_MEMORY constant the compiled worker reads.
+    const configPath = join(functions, "lib", "src", "config.js");
+    const source = readFileSync(configPath, "utf8");
+    assert.match(source, /GENERATION_WORKER_MEMORY/, "artifact config is missing the worker memory constant");
+    writeFileSync(configPath, source.replace(/GENERATION_WORKER_MEMORY\s*=\s*["'][^"']*["']/, `GENERATION_WORKER_MEMORY = ${JSON.stringify(options.memory)}`));
   }
   writeFileSync(join(functions, "package.json"), JSON.stringify({ name: "artifact", main: "lib/src/index.js", engines: { node: "22" } }, null, 2));
   writeFileSync(join(root, "firebase.json"), JSON.stringify({
@@ -481,6 +494,39 @@ test("preflight pins the storage trigger to the deploy bucket region", () => {
     assert.match(rejected.stderr, /Storage trigger region us-central1 does not match deploy bucket artifact-bucket-123456 location us-east1/);
   } finally {
     rmSync(mismatched.root, { recursive: true, force: true });
+  }
+});
+
+test("preflight enforces the generation worker memory floor for ffmpeg normalization", () => {
+  const complete = buildArtifact();
+  try {
+    const passed = runPreflightOn(complete);
+    assert.equal(passed.status, 0, passed.stderr);
+    const report = lastJson(passed.stdout);
+    assert.equal(report.preflight, "passed");
+    assert.equal(report.workerMemory, "1GiB");
+    assert.equal(report.workerMemoryMiB, 1024);
+  } finally {
+    rmSync(complete.root, { recursive: true, force: true });
+  }
+
+  const underFloor = buildArtifact({ memory: "256MiB" });
+  try {
+    const result = runPreflightOn(underFloor);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /below the 512MiB floor/);
+    assert.match(result.stderr, /ffmpeg normalization headroom/);
+  } finally {
+    rmSync(underFloor.root, { recursive: true, force: true });
+  }
+
+  const missing = buildArtifact({ omitMemory: true });
+  try {
+    const result = runPreflightOn(missing);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /does not declare memory/);
+  } finally {
+    rmSync(missing.root, { recursive: true, force: true });
   }
 });
 
