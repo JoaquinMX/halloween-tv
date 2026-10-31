@@ -1,7 +1,7 @@
 import { Bucket } from "@google-cloud/storage";
 import { FieldValue, Firestore, Timestamp } from "firebase-admin/firestore";
 import { assertRegisteredPartyDevice } from "./auth";
-import { BackendError, parseRequestGeneration, RequestGenerationInput, validateId } from "./contracts";
+import { BackendError, isSupportedConsent, parseRequestGeneration, RequestGenerationInput, validateId } from "./contracts";
 import { CAMEO_DEMO_PRESET, CHEAP_DEMO_PRESET, MEDIA_RETENTION_MS, REQUIRED_CAMERA_IDS } from "./config";
 import { assertGuestEligible, GuestMediaDoc } from "./guest_media";
 import { usageIntentDocument, usageLedgerPath } from "./usage";
@@ -172,6 +172,8 @@ export class FirestoreGenerationStore {
         );
         const current = guestSnap.exists ? (guestSnap.data() as GuestMediaDoc) : undefined;
         if (!current || current.status !== "eligible" ||
+            !current.consent || current.consent.accepted !== true ||
+            !isSupportedConsent(current.consent.textVersion, current.consent.purpose) ||
             current.sourceHash !== guest.sourceHash ||
             current.consentRevision !== guest.consentRevision ||
             current.deviceId !== input.deviceId || current.channelId !== input.channelId) {

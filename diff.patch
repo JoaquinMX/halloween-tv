@@ -1,876 +1,184 @@
-diff --git a/backend/functions/src/contracts.ts b/backend/functions/src/contracts.ts
-index 857c25989e3c84af0618808a47df18aeae824298..d07f5602d3e1b326a3cc3cbfa7d7965908fc839f 100644
---- a/backend/functions/src/contracts.ts
-+++ b/backend/functions/src/contracts.ts
-@@ -236,8 +236,9 @@ export function isErrorCode(value: unknown): value is ErrorCode {
- // expiry, with the host role assigned server-side only.
- //
- // Callable surface (all exported through index.ts + runtime.ts):
--//   createHostInvite  (TV-only)  -> { inviteToken, expiresAt }
-+//   createHostInvite  (TV-only)  -> { inviteToken, pairingCode, expiresAt }
- //   joinHost          (phone)     -> { role: "host" } (separate device identity)
-+//   revokeHostDevice  (TV-only)  -> { status: "revoked" } + audit record
- //   listHostVideos    (host-only) -> seed catalog entries
- //   generateHostVideo (host-only) -> fixed-preset queued generation + seed entry
- //   getHostVideoPreview (host-only) -> signed preview URLs (never persisted)
-@@ -254,11 +255,15 @@ export interface CreateHostInviteResult {
-   partyId: string;
-   channelId: string;
-   inviteToken: string;
-+  /** Server-minted 6-digit pairing code shown next to the HOST QR on the TV. */
-+  pairingCode: string;
-   expiresAt: string;
- }
- 
- export interface JoinHostInput extends Identity {
-   inviteToken: string;
-+  /** 6-digit pairing code displayed next to the HOST QR; required. */
-+  pairingCode: string;
- }
- 
- export interface JoinHostResult {
-@@ -346,7 +351,14 @@ export function parseJoinHostInput(value: unknown): JoinHostInput {
-   if (JOIN_PIN_RE.test(value.inviteToken)) {
-     throw new BackendError("INVALID_ARGUMENT", "inviteToken must be a host invite, not a guest PIN.");
+diff --git a/backend/functions/src/generation.ts b/backend/functions/src/generation.ts
+index 55cae29e0e8eaab756e5a744a4cbedd36fb37093..a44d5449f400f2c43c6356e6624363e999609387 100644
+--- a/backend/functions/src/generation.ts
++++ b/backend/functions/src/generation.ts
+@@ -238,6 +238,9 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
+     throw new BackendError("FORBIDDEN", "Guest consent was withdrawn; the bound generation job is discarded.");
    }
--  return { partyId, deviceId, channelId, inviteToken: value.inviteToken };
-+  // The pairing code is required and shape-checked here, but a missing or
-+  // wrong code is denied with the SAME generic FORBIDDEN message as an
-+  // unknown invite at redemption time, so callers cannot probe which half
-+  // of the credential failed (no oracle).
-+  if (typeof value.pairingCode !== "string" || !JOIN_PIN_RE.test(value.pairingCode)) {
-+    throw new BackendError("FORBIDDEN", "Host invite is invalid or expired.");
-+  }
-+  return { partyId, deviceId, channelId, inviteToken: value.inviteToken, pairingCode: value.pairingCode };
- }
  
- export function parseListHostVideosInput(value: unknown): ListHostVideosInput {
-@@ -411,3 +423,55 @@ export function parseDeleteHostVideoInput(value: unknown): DeleteHostVideoInput
-   }
-   return { ...identity, seedIds };
- }
-+
-+// ---------------------------------------------------------------------------
-+// Host pairing + capacity + revocation (cycle-12 fix-1, backend authoritative).
-+// ---------------------------------------------------------------------------
-+
-+/** Max active host devices per party: further redemption is denied until a host is revoked. */
-+export const HOST_MAX_DEVICES = 3;
-+
-+/** Pairing-code shape: exactly six ASCII digits (leading zeros significant). */
-+export const PAIRING_CODE_RE = /^[0-9]{6}$/;
-+
-+/**
-+ * Host-originated source consent: distinct textVersion/purpose pair for
-+ * host-submitted source media, namespaced away from the guest cameo pair
-+ * (`v1` / `guest_cameo`). Consent records carrying this pair include an
-+ * attestation copy (see guest_upload.ts) and are enforced in eligibility
-+ * for host submissions. The guest pair is unchanged.
-+ */
-+export const HOST_SOURCE_CONSENT_TEXT_VERSION = "host_source_v1";
-+export const HOST_SOURCE_CONSENT_PURPOSE = "host_source";
-+
-+/** Returns true for either supported consent pair (guest cameo or host source). */
-+export function isSupportedConsent(textVersion: unknown, purpose: unknown): boolean {
-+  return (
-+    (textVersion === "v1" && purpose === "guest_cameo") ||
-+    (textVersion === HOST_SOURCE_CONSENT_TEXT_VERSION && purpose === HOST_SOURCE_CONSENT_PURPOSE)
-+  );
-+}
-+
-+/** Returns true only for the host-originated source consent pair. */
-+export function isHostSourceConsent(textVersion: unknown, purpose: unknown): boolean {
-+  return textVersion === HOST_SOURCE_CONSENT_TEXT_VERSION && purpose === HOST_SOURCE_CONSENT_PURPOSE;
-+}
-+
-+export interface RevokeHostDeviceInput extends Identity {
-+  targetDeviceId: string;
-+}
-+
-+export interface RevokeHostDeviceResult {
-+  partyId: string;
-+  targetDeviceId: string;
-+  status: "revoked";
-+}
-+
-+export function parseRevokeHostDeviceInput(value: unknown): RevokeHostDeviceInput {
-+  const identity = requireIdentity(value);
-+  if (!identity.channelId) throw new BackendError("INVALID_ARGUMENT", "channelId is required.");
-+  if (!isRecord(value) || typeof value.targetDeviceId !== "string" || !value.targetDeviceId) {
-+    throw new BackendError("INVALID_ARGUMENT", "targetDeviceId is required.");
-+  }
-+  return { ...identity, targetDeviceId: validateId(value.targetDeviceId, "targetDeviceId") };
-+}
-diff --git a/backend/functions/src/delivery.ts b/backend/functions/src/delivery.ts
-index 340eb626d7270addfbec169086cdebcc4e110362..c669ae02aac9723bd1ff63c3669583cfd17ad152 100644
---- a/backend/functions/src/delivery.ts
-+++ b/backend/functions/src/delivery.ts
-@@ -25,6 +25,7 @@ import {
-   SUPPORTED_CAMERA_COUNTS,
-   SCHEMA_VERSION,
-   expectedCameraIds,
-+  hostPreviewObjectPath,
- } from "./config";
- import { assertRegisteredPartyDevice } from "./auth";
- 
-@@ -484,6 +485,68 @@ export function createDeliveryServices(options: DeliveryServiceOptions): Deliver
-       return validateAcceptedAck(acceptedAck, ack, ackId, idem);
-     });
-     const relatedJobRef = jobRef(db, ack.partyId, accepted.jobId);
-+    // Eager preview materialization (before purge): for every live seed
-+    // bound to this job, copy delivery bytes to the separately referenced
-+    // hostPreviews prefix so the ACK purge below never removes preview
-+    // bytes. The lazy transactionally-gated path in getHostVideoPreview
-+    // stays as the retry; failures here are best-effort (the lazy path
-+    // maps a purged source to a typed NOT_FOUND/CLIP_EXPIRED).
-+    try {
-+      const seeds = await db
-+        .collection(`parties/${ack.partyId}/seedVideos`)
-+        .where("jobId", "==", accepted.jobId)
-+        .get();
-+      const liveSeeds = seeds.docs.filter((seedDoc) => {
-+        const seed = seedDoc.data() as Record<string, unknown>;
-+        if (seed.partyId !== ack.partyId || seed.channelId !== ack.channelId) return false;
-+        if (seed.status === "deleted" || seed.status === "failed" || seed.status === "expired") return false;
-+        const expiry = seed.expiresAt instanceof Timestamp
-+          ? seed.expiresAt.toDate().getTime()
-+          : Date.parse(String(seed.expiresAt));
-+        return !Number.isFinite(expiry) || expiry > now().getTime();
-+      });
-+      await Promise.all(
-+        liveSeeds.flatMap((seedDoc) => {
-+          const seed = seedDoc.data() as Record<string, unknown>;
-+          const seedId = String(seed.seedId ?? seedDoc.id);
-+          const previewExpiryRaw = seed.expiresAt instanceof Timestamp
-+            ? seed.expiresAt.toDate()
-+            : new Date(Date.parse(String(seed.expiresAt)));
-+          const previewExpiry = Number.isFinite(previewExpiryRaw.getTime())
-+            ? previewExpiryRaw
-+            : new Date(now().getTime() + MEDIA_RETENTION_MS);
-+          return accepted.clips.map(async (clip) => {
-+            const previewPath = hostPreviewObjectPath(ack.partyId, seedId, clip.cameraId);
-+            try {
-+              const preview = bucket.file(previewPath);
-+              const [exists] = await preview.exists().catch(() => [false] as unknown as [boolean]);
-+              if (!exists) {
-+                await bucket.file(clip.objectPath).copy(preview);
-+                await preview
-+                  .setMetadata({
-+                    contentType: "video/mp4",
-+                    customTime: previewExpiry.toISOString(),
-+                    metadata: {
-+                      expiresAt: previewExpiry.toISOString(),
-+                      partyId: ack.partyId,
-+                      seedId,
-+                      jobId: accepted.jobId,
-+                      cameraId: clip.cameraId,
-+                      purpose: "host-preview",
-+                      sha256: clip.sha256,
-+                    },
-+                  })
-+                  .catch(() => undefined);
-+              }
-+            } catch {
-+              // Best-effort: the lazy preview path reports typed outcomes.
-+            }
-+          });
-+        }),
-+      );
-+    } catch {
-+      // Eager materialization never blocks the ACK itself.
-+    }
-     // ACK is idempotent. Repeating it safely retries object deletion after partial failures.
-     await Promise.all(accepted.clips.map((clip) => deleteDeliveryObject(bucket.file(clip.objectPath))));
-     await db.runTransaction(async (transaction) => {
-diff --git a/backend/functions/src/guest_list.ts b/backend/functions/src/guest_list.ts
-index efe2517f2287658e93c92e8e64553ca3613bb2bd..625cbc3f43e41a6d4e9bf76f7513b429ee50d32d 100644
---- a/backend/functions/src/guest_list.ts
-+++ b/backend/functions/src/guest_list.ts
-@@ -33,6 +33,10 @@ export interface GuestListServiceOptions {
-  * any other registered device (guests) gets FORBIDDEN, so guest codes are
-  * only readable by the host TV plus the Firebase console. Callable only;
-  * direct Firestore list reads stay denied by firestore.rules.
-+ *
-+ * The listing contains ONLY active guest devices (`role === "guest"` AND
-+ * `status === "active"`): tv/host deviceIds are never returned, so the
-+ * panel cannot leak host device identities.
-  */
- export function createGuestListService(options: GuestListServiceOptions): {
-   listPartyDevices(value: unknown): Promise<GuestCodeListing>;
-@@ -66,6 +70,7 @@ export function createGuestListService(options: GuestListServiceOptions): {
-           }
-           return entry;
-         })
-+        .filter((entry) => entry.role === "guest" && entry.status === "active")
-         .filter((entry) => entry.deviceId !== registered.deviceId)
-         .sort((a, b) => (a.label ?? a.deviceId).localeCompare(b.label ?? b.deviceId) || a.deviceId.localeCompare(b.deviceId));
-       const listing: GuestCodeListing = {
-diff --git a/backend/functions/src/guest_upload.ts b/backend/functions/src/guest_upload.ts
-index 0dd1e05cee81ad531482d085cf1ae301a06ee9d4..faf0940c887369868cda81e2cdba0e50c5640064 100644
---- a/backend/functions/src/guest_upload.ts
-+++ b/backend/functions/src/guest_upload.ts
-@@ -10,7 +10,7 @@ import {
-   GUEST_MAX_IMAGE_BYTES,
-   GUEST_UPLOAD_TTL_MS,
- } from "./config";
--import { BackendError, requireIdentity, validateId } from "./contracts";
-+import { BackendError, isHostSourceConsent, isSupportedConsent, requireIdentity, validateId } from "./contracts";
- import {
-   consentRevisionFor,
-   GuestMediaDoc,
-@@ -128,7 +128,11 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
-     if (!isRecord(consent) || consent.accepted !== true) {
-       throw new BackendError("FORBIDDEN", "Affirmative guest consent is required before upload.");
-     }
--    if (consent.textVersion !== GUEST_CONSENT_TEXT_VERSION || consent.purpose !== GUEST_CONSENT_PURPOSE) {
-+    // Consent namespace: guest devices use v1/guest_cameo; host devices use
-+    // the distinct host_source_v1/host_source pair (with an attestation copy
-+    // stored below). Either pair is a supported consent version/purpose, but
-+    // the pairs never mix across roles.
-+    if (!isSupportedConsent(consent.textVersion, consent.purpose)) {
-       throw new BackendError("INVALID_ARGUMENT", "Guest consent version or purpose is unsupported.");
-     }
-     const contentType = value.contentType;
-@@ -136,13 +140,23 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
-         !(GUEST_ALLOWED_CONTENT_TYPES as readonly string[]).includes(contentType)) {
-       throw new BackendError("INVALID_ARGUMENT", "Only JPEG or PNG guest photos are supported.");
-     }
--    await assertRegisteredPartyDevice(db, identity);
-+    const registered = await assertRegisteredPartyDevice(db, identity);
-+    const callerRole = String(registered.device.role ?? "guest");
-+    const hostCaller = callerRole === "host";
-+    if (hostCaller !== isHostSourceConsent(consent.textVersion, consent.purpose)) {
-+      throw new BackendError("INVALID_ARGUMENT", "Consent version or purpose does not match the caller role.");
-+    }
-     const submissionId = newSubmissionId();
-     validateId(submissionId, "submissionId");
-     const objectPath = guestObjectPath(identity.partyId, identity.deviceId, submissionId);
-     const acceptedAt = now();
-     const acceptedAtIso = acceptedAt.toISOString();
--    const consentRevision = consentRevisionFor(acceptedAtIso);
-+    // Namespaced revision: host sources carry host_source_v1:…, guest
-+    // sources carry v1:… (via consentRevisionFor). The revision travels on
-+    // the job binding and is rechecked at eligibility time.
-+    const consentRevision = hostCaller
-+      ? `${String(consent.textVersion)}:${acceptedAtIso}`
-+      : consentRevisionFor(acceptedAtIso);
-     const expiresAt = new Date(acceptedAt.getTime() + GUEST_UPLOAD_TTL_MS);
-     // Immutable creation-based deletion deadline: completion may narrow the
-     // visible expiry but must never extend retention past creation + 24h.
-@@ -156,10 +170,20 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
-       status: "pending_upload",
-       consent: {
-         accepted: true,
--        textVersion: GUEST_CONSENT_TEXT_VERSION,
--        purpose: GUEST_CONSENT_PURPOSE,
-+        textVersion: String(consent.textVersion),
-+        purpose: String(consent.purpose),
-+        acceptedAt: acceptedAtIso,
-+        deviceId: identity.deviceId,
-+      },
-+      // Attestation copy: mirrors the consent text/purpose at acceptance so
-+      // later audits can distinguish host-originated sources from guest
-+      // cameo sources without re-reading the consent history.
-+      attestation: {
-+        textVersion: String(consent.textVersion),
-+        purpose: String(consent.purpose),
-         acceptedAt: acceptedAtIso,
-         deviceId: identity.deviceId,
-+        role: hostCaller ? "host" : "guest",
-       },
-       consentRevision,
-       objectPath,
-@@ -279,8 +303,8 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
-           throw new BackendError("CLIP_EXPIRED", "Guest upload capability has expired.");
-         }
-         if (!current.consent || current.consent.accepted !== true ||
--            current.consent.textVersion !== GUEST_CONSENT_TEXT_VERSION ||
--            current.consent.purpose !== GUEST_CONSENT_PURPOSE) {
-+            !isSupportedConsent(current.consent.textVersion, current.consent.purpose) ||
-+            current.consent.deviceId !== identity.deviceId) {
-           throw new BackendError("FORBIDDEN", "Guest consent is not recorded for this device.");
-         }
-         if (current.status === "eligible") {
-diff --git a/backend/functions/src/host_join.ts b/backend/functions/src/host_join.ts
-index fc7fe847c714fb0b46e9c35335c78fe54d3119f0..41e2fa3ad09c5ee78fdc1a0663e7b1d65b15d17c 100644
---- a/backend/functions/src/host_join.ts
-+++ b/backend/functions/src/host_join.ts
-@@ -1,11 +1,14 @@
--import { createHash, randomBytes } from "node:crypto";
-+import { createHash, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
++  // Worker-submission consent gate: delegates to the namespaced eligibility
++  // helper (guest v1/guest_cameo or host host_source_v1/host_source), so
++  // host-originated sources pass the same gate as guest sources.
+   async function recheckGuestConsent(
+     partyId: string,
+     jobId: string,
+diff --git a/backend/functions/src/generation_store.ts b/backend/functions/src/generation_store.ts
+index bdd956d95275f5f7d054c5e6e5e22a54287f4d7d..680cc4ade46f2c01e0091f3826658891c5a62c52 100644
+--- a/backend/functions/src/generation_store.ts
++++ b/backend/functions/src/generation_store.ts
+@@ -1,7 +1,7 @@
+ import { Bucket } from "@google-cloud/storage";
  import { FieldValue, Firestore, Timestamp } from "firebase-admin/firestore";
+ import { assertRegisteredPartyDevice } from "./auth";
+-import { BackendError, parseRequestGeneration, RequestGenerationInput, validateId } from "./contracts";
++import { BackendError, isSupportedConsent, parseRequestGeneration, RequestGenerationInput, validateId } from "./contracts";
+ import { CAMEO_DEMO_PRESET, CHEAP_DEMO_PRESET, MEDIA_RETENTION_MS, REQUIRED_CAMERA_IDS } from "./config";
+ import { assertGuestEligible, GuestMediaDoc } from "./guest_media";
+ import { usageIntentDocument, usageLedgerPath } from "./usage";
+@@ -172,6 +172,8 @@ export class FirestoreGenerationStore {
+         );
+         const current = guestSnap.exists ? (guestSnap.data() as GuestMediaDoc) : undefined;
+         if (!current || current.status !== "eligible" ||
++            !current.consent || current.consent.accepted !== true ||
++            !isSupportedConsent(current.consent.textVersion, current.consent.purpose) ||
+             current.sourceHash !== guest.sourceHash ||
+             current.consentRevision !== guest.consentRevision ||
+             current.deviceId !== input.deviceId || current.channelId !== input.channelId) {
+diff --git a/backend/functions/src/guest_media.ts b/backend/functions/src/guest_media.ts
+index fa2b1757adfeb1a831c53456d91725044ca27916..adfaf8daa67c959bb898315a4fe0e14174d9d8ff 100644
+--- a/backend/functions/src/guest_media.ts
++++ b/backend/functions/src/guest_media.ts
+@@ -1,7 +1,6 @@
+ import { Firestore } from "firebase-admin/firestore";
+-import { BackendError, Identity } from "./contracts";
++import { BackendError, Identity, isSupportedConsent } from "./contracts";
  import {
-   BackendError,
-   CreateHostInviteResult,
-+  HOST_MAX_DEVICES,
-   JoinHostResult,
-+  RevokeHostDeviceResult,
-   parseCreateHostInviteInput,
-   parseJoinHostInput,
-+  parseRevokeHostDeviceInput,
- } from "./contracts";
- import { HOST_INVITE_TTL_MS } from "./config";
- import { assertRegisteredTvDevice } from "./auth";
-@@ -19,25 +22,52 @@ function inviteTokenHash(token: string): string {
-   return createHash("sha256").update(token).digest("hex");
- }
+-  GUEST_CONSENT_PURPOSE,
+   GUEST_CONSENT_TEXT_VERSION,
+ } from "./config";
  
-+function pairingCodeHash(salt: string, code: string): string {
-+  return createHash("sha256").update(`${salt}:${code}`).digest("hex");
-+}
-+
-+/** Same generic message for every redemption failure: no oracle. */
-+const INVITE_DENIED_MESSAGE = "Host invite is invalid or expired.";
-+
- function inviteRef(db: Firestore, partyId: string, inviteId: string) {
-   return db.doc(`parties/${partyId}/hostInvites/${inviteId}`);
- }
- 
-+function safeEqualHex(a: string, b: string): boolean {
-+  const ba = Buffer.from(a, "hex");
-+  const bb = Buffer.from(b, "hex");
-+  if (ba.length !== bb.length) return false;
-+  try {
-+    return timingSafeEqual(ba, bb);
-+  } catch {
-+    return false;
-+  }
-+}
-+
- /**
-  * Host invite + redemption service.
-  *
-  * Only a registered TV may mint a short-lived host invite. The token is
-  * returned once and only its SHA-256 hash is stored, bound to
-- * party/channel/expiry. Redemption is transactional for a separate phone
-- * identity with the server-assigned host role: same-device redemption
-- * retries are idempotent, while other-device replay, expiry, guest PIN
-- * reuse, and client-only role changes can never grant host access. Legacy
-- * joinParty remains guest-only (see join_party.ts: non-guest device docs
-- * are rejected and the role is always written server-side).
-+ * party/channel/expiry. A server-minted 6-digit pairing code is returned
-+ * alongside the token (displayed next to the HOST QR on the TV) and only a
-+ * salted hash is stored with the same TTL. Redemption requires BOTH halves
-+ * and is transactional for a separate phone identity with the
-+ * server-assigned host role: same-device redemption retries are idempotent,
-+ * while other-device replay, expiry, guest PIN reuse, wrong/missing pairing
-+ * codes, over-capacity redemption, and client-only role changes can never
-+ * grant host access. Legacy joinParty remains guest-only (see join_party.ts:
-+ * non-guest device docs are rejected and the role is always written
-+ * server-side).
-+ *
-+ * Minting a new invite invalidates older pending invites for the same
-+ * party/channel (superseded). Invite docs carry `expiresAt` for the
-+ * Firestore TTL policy plus the retention-sweep expiry pass.
-  */
- export function createHostJoinService(options: HostJoinServiceOptions): {
-   createHostInvite(value: unknown): Promise<CreateHostInviteResult>;
-   joinHost(value: unknown): Promise<JoinHostResult>;
-+  revokeHostDevice(value: unknown): Promise<RevokeHostDeviceResult>;
- } {
-   const { db } = options;
-   const now = options.now ?? (() => new Date());
-@@ -48,11 +78,31 @@ export function createHostJoinService(options: HostJoinServiceOptions): {
-     const token = `hi-${randomBytes(24).toString("hex")}`;
-     const tokenHash = inviteTokenHash(token);
-     const inviteId = tokenHash.slice(0, 32);
-+    const pairingCode = String(randomInt(0, 1_000_000)).padStart(6, "0");
-+    const pairingSalt = randomBytes(16).toString("hex");
-     const createdAt = now();
-     const expiresAt = new Date(createdAt.getTime() + HOST_INVITE_TTL_MS);
-+    // Minting invalidates older pending invites for the same party/channel
-+    // so only the newest code on the TV screen can redeem.
-+    try {
-+      const pending = await db
-+        .collection(`parties/${tv.partyId}/hostInvites`)
-+        .where("channelId", "==", tv.channelId)
-+        .where("status", "==", "pending")
-+        .get();
-+      await Promise.all(
-+        pending.docs
-+          .filter((doc) => doc.id !== inviteId)
-+          .map((doc) => doc.ref.update({ status: "superseded", updatedAt: FieldValue.serverTimestamp() }).catch(() => undefined)),
-+      );
-+    } catch {
-+      // Best-effort: the new invite is still bound to its own expiry.
-+    }
-     await inviteRef(db, tv.partyId, inviteId).create({
-       inviteId,
-       tokenHash,
-+      pairingCodeHash: pairingCodeHash(pairingSalt, pairingCode),
-+      pairingSalt,
-       partyId: tv.partyId,
-       channelId: tv.channelId,
-       status: "pending",
-@@ -65,6 +115,7 @@ export function createHostJoinService(options: HostJoinServiceOptions): {
-       partyId: tv.partyId,
-       channelId: tv.channelId,
-       inviteToken: token,
-+      pairingCode,
-       expiresAt: expiresAt.toISOString(),
-     };
+@@ -97,8 +96,7 @@ export async function assertGuestEligible(
+   if (doc.status === "expired") throw new BackendError("CLIP_EXPIRED", "Guest media has expired.");
+   if (doc.status !== "eligible") throw new BackendError("FORBIDDEN", "Guest media is not eligible for generation.");
+   if (!doc.consent || doc.consent.accepted !== true ||
+-      doc.consent.textVersion !== GUEST_CONSENT_TEXT_VERSION ||
+-      doc.consent.purpose !== GUEST_CONSENT_PURPOSE ||
++      !isSupportedConsent(doc.consent.textVersion, doc.consent.purpose) ||
+       doc.consent.deviceId !== identity.deviceId) {
+     throw new BackendError("FORBIDDEN", "Guest consent is not recorded for this device.");
    }
-@@ -76,7 +127,7 @@ export function createHostJoinService(options: HostJoinServiceOptions): {
-     return db.runTransaction(async (transaction) => {
-       const inviteSnap = await transaction.get(inviteRef(db, input.partyId, inviteId));
-       if (!inviteSnap.exists) {
--        throw new BackendError("FORBIDDEN", "Host invite is invalid or expired.");
-+        throw new BackendError("FORBIDDEN", INVITE_DENIED_MESSAGE);
-       }
-       const invite = inviteSnap.data()!;
-       if (
-@@ -84,14 +135,29 @@ export function createHostJoinService(options: HostJoinServiceOptions): {
-         invite.partyId !== input.partyId ||
-         invite.channelId !== input.channelId
-       ) {
--        throw new BackendError("FORBIDDEN", "Host invite is invalid or expired.");
-+        throw new BackendError("FORBIDDEN", INVITE_DENIED_MESSAGE);
-+      }
-+      // Same-device redemption retries stay idempotent after the invite flips
-+      // to redeemed; any other non-pending state (superseded, expired) denies.
-+      if (invite.status !== "pending" && !(invite.status === "redeemed" && invite.usedByDevice === input.deviceId)) {
-+        throw new BackendError("FORBIDDEN", INVITE_DENIED_MESSAGE);
-       }
-       const expiresMs =
-         invite.expiresAt instanceof Timestamp
-           ? invite.expiresAt.toDate().getTime()
-           : Date.parse(String(invite.expiresAt));
-       if (!Number.isFinite(expiresMs) || expiresMs <= now().getTime()) {
--        throw new BackendError("FORBIDDEN", "Host invite is invalid or expired.");
-+        throw new BackendError("FORBIDDEN", INVITE_DENIED_MESSAGE);
-+      }
-+      // Pairing-code check: wrong or mismatched codes deny generically, with
-+      // the same error as an unknown invite (no oracle). The parser already
-+      // rejects malformed codes with the same code.
-+      if (
-+        typeof invite.pairingSalt !== "string" ||
-+        typeof invite.pairingCodeHash !== "string" ||
-+        !safeEqualHex(pairingCodeHash(invite.pairingSalt, input.pairingCode), invite.pairingCodeHash)
-+      ) {
-+        throw new BackendError("FORBIDDEN", INVITE_DENIED_MESSAGE);
-       }
-       // Cross-party / wrong-channel tokens never redeem: the invite doc lives
-       // under the party path and binds the channel explicitly.
-@@ -104,7 +170,7 @@ export function createHostJoinService(options: HostJoinServiceOptions): {
-         transaction.get(deviceRef),
-       ]);
-       if (!partySnap.exists || partySnap.data()?.status !== "active") {
--        throw new BackendError("FORBIDDEN", "Host invite is invalid or expired.");
-+        throw new BackendError("FORBIDDEN", INVITE_DENIED_MESSAGE);
-       }
-       if (
-         !channelSnap.exists ||
-@@ -112,7 +178,7 @@ export function createHostJoinService(options: HostJoinServiceOptions): {
-         channelSnap.data()?.status !== "active" ||
-         partySnap.data()?.activeChannelId !== input.channelId
-       ) {
--        throw new BackendError("FORBIDDEN", "Host invite is invalid or expired.");
-+        throw new BackendError("FORBIDDEN", INVITE_DENIED_MESSAGE);
-       }
-       // Other-device replay: an invite redeemed by one phone cannot admit
-       // another phone, even with the same token.
-@@ -120,7 +186,7 @@ export function createHostJoinService(options: HostJoinServiceOptions): {
-         typeof invite.usedByDevice === "string" &&
-         invite.usedByDevice !== input.deviceId
-       ) {
--        throw new BackendError("FORBIDDEN", "Host invite is invalid or expired.");
-+        throw new BackendError("FORBIDDEN", INVITE_DENIED_MESSAGE);
-       }
-       if (deviceSnap.exists) {
-         const device = deviceSnap.data()!;
-@@ -129,7 +195,7 @@ export function createHostJoinService(options: HostJoinServiceOptions): {
-           device.status !== "active" ||
-           (typeof device.deviceId === "string" && device.deviceId !== input.deviceId)
-         ) {
--          throw new BackendError("FORBIDDEN", "Host invite is invalid or expired.");
-+          throw new BackendError("FORBIDDEN", INVITE_DENIED_MESSAGE);
-         }
-         // A guest-PIN registration (role guest) or any non-host doc can never
-         // be upgraded by re-presenting the invite for a different device, and
-@@ -152,7 +218,16 @@ export function createHostJoinService(options: HostJoinServiceOptions): {
-             created: false,
-           };
-         }
--        throw new BackendError("FORBIDDEN", "Host invite is invalid or expired.");
-+        throw new BackendError("FORBIDDEN", INVITE_DENIED_MESSAGE);
-+      }
-+      // Capacity: at most HOST_MAX_DEVICES active host devices per party.
-+      // Redemption beyond that is denied until a host is revoked. The denial
-+      // reuses the generic invite message so capacity cannot be probed.
-+      const activeHosts = await transaction.get(
-+        partyRef.collection("devices").where("role", "==", "host").where("status", "==", "active").limit(HOST_MAX_DEVICES + 1),
-+      );
-+      if (activeHosts.size >= HOST_MAX_DEVICES) {
-+        throw new BackendError("FORBIDDEN", INVITE_DENIED_MESSAGE);
-       }
-       transaction.set(deviceRef, {
-         partyId: input.partyId,
-@@ -160,6 +235,8 @@ export function createHostJoinService(options: HostJoinServiceOptions): {
-         role: "host",
-         status: "active",
-         registeredAt: FieldValue.serverTimestamp(),
-+        redeemedFromInviteId: inviteId,
-+        redeemedAt: FieldValue.serverTimestamp(),
-       });
-       transaction.update(inviteRef(db, input.partyId, inviteId), {
-         status: "redeemed",
-@@ -177,7 +254,52 @@ export function createHostJoinService(options: HostJoinServiceOptions): {
-     });
+diff --git a/backend/functions/src/publish.ts b/backend/functions/src/publish.ts
+index 9fa9e9a8137b58158abeb9e1edb85688bf37aafb..44c99099bbbfd31c327d30c0086ec45eb70e370d 100644
+--- a/backend/functions/src/publish.ts
++++ b/backend/functions/src/publish.ts
+@@ -1,7 +1,7 @@
+ import { createHash } from "node:crypto";
+ import { FieldValue } from "firebase-admin/firestore";
+-import { BackendError, CanonicalClip, DeliveryManifest, validateCanonicalClips } from "./contracts";
+-import { GUEST_CONSENT_PURPOSE, GUEST_CONSENT_TEXT_VERSION, GUEST_PROVIDER_CAMERA_ID, SCHEMA_VERSION, REQUIRED_CAMERA_IDS } from "./config";
++import { BackendError, CanonicalClip, DeliveryManifest, isSupportedConsent, validateCanonicalClips } from "./contracts";
++import { GUEST_PROVIDER_CAMERA_ID, SCHEMA_VERSION, REQUIRED_CAMERA_IDS } from "./config";
+ import { FirestoreGenerationStore } from "./generation_store";
+ import { GuestMediaDoc } from "./guest_media";
+ import { usageLedgerPath } from "./usage";
+@@ -40,8 +40,7 @@ function assertGuestBinding(
    }
- 
--  return { createHostInvite, joinHost };
-+  /**
-+   * TV-only host revocation. Replays the TV-device auth used by
-+   * createHostInvite, then demotes the target host device doc and writes an
-+   * audit record. A revoked device fails the registered-host gate on its
-+   * next admin operation.
-+   */
-+  async function revokeHostDevice(value: unknown): Promise<RevokeHostDeviceResult> {
-+    const input = parseRevokeHostDeviceInput(value);
-+    const tv = await assertRegisteredTvDevice(db, input);
-+    if (input.targetDeviceId === tv.deviceId) {
-+      throw new BackendError("INVALID_ARGUMENT", "The TV device cannot revoke itself.");
-+    }
-+    const partyRef = db.doc(`parties/${tv.partyId}`);
-+    const targetRef = partyRef.collection("devices").doc(input.targetDeviceId);
-+    await db.runTransaction(async (transaction) => {
-+      const targetSnap = await transaction.get(targetRef);
-+      if (!targetSnap.exists) {
-+        throw new BackendError("NOT_FOUND", "Host device does not exist.");
-+      }
-+      const target = targetSnap.data()!;
-+      if (target.partyId !== tv.partyId || target.role !== "host") {
-+        throw new BackendError("FORBIDDEN", "Only an active host device for this party can be revoked.");
-+      }
-+      if (target.status !== "active") {
-+        throw new BackendError("FORBIDDEN", "Only an active host device for this party can be revoked.");
-+      }
-+      transaction.update(targetRef, {
-+        status: "revoked",
-+        revokedAt: FieldValue.serverTimestamp(),
-+        revokedByDevice: tv.deviceId,
-+        updatedAt: FieldValue.serverTimestamp(),
-+      });
-+      const auditRef = partyRef.collection("hostAudit").doc();
-+      transaction.create(auditRef, {
-+        action: "revoke",
-+        partyId: tv.partyId,
-+        channelId: tv.channelId,
-+        targetDeviceId: input.targetDeviceId,
-+        byDeviceId: tv.deviceId,
-+        createdAt: FieldValue.serverTimestamp(),
-+      });
-+    });
-+    return { partyId: tv.partyId, targetDeviceId: input.targetDeviceId, status: "revoked" };
-+  }
-+
-+  return { createHostInvite, joinHost, revokeHostDevice };
- }
- 
- /** Test/ops helper: hash an invite token to locate its stored invite doc. */
-diff --git a/backend/functions/src/host_media.ts b/backend/functions/src/host_media.ts
-index 6bc77f64026d905ecc3d5ae6ca9529f88d5a80a6..3e933f7ef9d7872b4dd6e843370da271d78b758e 100644
---- a/backend/functions/src/host_media.ts
-+++ b/backend/functions/src/host_media.ts
-@@ -47,9 +47,11 @@ export interface HostMediaServiceOptions {
-  *
-  * Previews are separately referenced (`hostPreviews/{seedId}/…`) from
-  * delivery objects (`channels/{channel}/delivery/…`) and are materialized
-- * before delivery objects can be ACK-purged (eagerly after the job is
-- * ready, retried lazily on list/preview reads), so an ACK purge of delivery
-- * bytes never removes preview bytes.
-+ * eagerly (inside acknowledgeDelivery for live-seed jobs, before any purge)
-+ * with the lazy transactionally-gated path in getHostVideoPreview kept as a
-+ * retry, so an ACK purge of delivery bytes never removes preview bytes and
-+ * an ACK-first-then-preview sequence yields a typed NOT_FOUND/CLIP_EXPIRED
-+ * outcome instead of a raw storage error.
-  */
- export function jobIdForHostSeed(seedId: string): string {
-   return `hv-${seedId}`;
-@@ -139,8 +141,15 @@ export function createHostMediaService(options: HostMediaServiceOptions): {
-       if (!exists) {
-         // Deleted seeds must never recreate previews: the caller checks the
-         // seed status inside a transaction first; this copy is the
--        // materialization step only for live seeds.
--        await bucket.file(clip.objectPath).copy(preview);
-+        // materialization step only for live seeds. A purged or missing
-+        // source maps to a typed outcome (never raw INTERNAL): the delivery
-+        // bytes are gone (ACK-purged before any preview was materialized).
-+        try {
-+          await bucket.file(clip.objectPath).copy(preview);
-+        } catch (error) {
-+          if (error instanceof BackendError) throw error;
-+          throw new BackendError("NOT_FOUND", "Seed video preview is not ready yet.");
-+        }
-         await preview
-           .setMetadata({
-             contentType: "video/mp4",
-@@ -285,30 +294,78 @@ export function createHostMediaService(options: HostMediaServiceOptions): {
-     }
+   if (guest.status !== "eligible") throw new BackendError("FORBIDDEN", "Guest consent is no longer eligible for publication.");
+   if (!guest.consent || guest.consent.accepted !== true ||
+-      guest.consent.textVersion !== GUEST_CONSENT_TEXT_VERSION ||
+-      guest.consent.purpose !== GUEST_CONSENT_PURPOSE) {
++      !isSupportedConsent(guest.consent.textVersion, guest.consent.purpose)) {
+     throw new BackendError("FORBIDDEN", "Guest consent is not recorded for publication.");
    }
- 
-+  /**
-+   * Transactional liveness gate: re-reads the seed AND the job's hostDeleted
-+   * flag inside a single transaction and rejects deleted/failed/expired
-+   * seeds (withdrawal fails the bound seed closed) before any copy. Returns
-+   * the live seed doc for the caller.
-+   */
-+  async function gateLiveSeed(
-+    partyId: string,
-+    channelId: string,
-+    seedId: string,
-+  ): Promise<FirebaseFirestore.DocumentData> {
-+    return db.runTransaction(async (transaction) => {
-+      const seedSnap = await transaction.get(seedRef(db, partyId, seedId));
-+      if (!seedSnap.exists) throw new BackendError("NOT_FOUND", "Seed video does not exist.");
-+      const seed = seedSnap.data()!;
-+      if (seed.partyId !== partyId || seed.channelId !== channelId) {
-+        throw new BackendError("FORBIDDEN", "Seed video is outside the registered party and channel.");
-+      }
-+      // Deleted, failed (incl. guest-withdrawn), or expired seeds never
-+      // copy again: no resurrection through the preview path.
-+      if (seed.status === "deleted") throw new BackendError("NOT_FOUND", "Seed video does not exist.");
-+      if (seed.status === "failed" || seed.status === "expired") {
-+        throw new BackendError("NOT_FOUND", "Seed video is no longer available.");
-+      }
-+      const expiryMs =
-+        seed.expiresAt instanceof Timestamp
-+          ? seed.expiresAt.toDate().getTime()
-+          : Date.parse(String(seed.expiresAt));
-+      if (Number.isFinite(expiryMs) && expiryMs <= now().getTime()) {
-+        throw new BackendError("CLIP_EXPIRED", "Seed video has expired.");
-+      }
-+      const jobSnap = await transaction.get(jobRef(db, partyId, String(seed.jobId)));
-+      if (!jobSnap.exists) throw new BackendError("NOT_FOUND", "Seed video does not exist.");
-+      if (jobSnap.data()?.hostDeleted === true) throw new BackendError("NOT_FOUND", "Seed video does not exist.");
-+      return seed;
-+    });
-+  }
-+
-   async function getHostVideoPreview(value: unknown): Promise<GetHostVideoPreviewResult> {
-     const input = parseGetHostVideoPreviewInput(value);
-     const host = await assertRegisteredHostDevice(db, input);
--    const ref = seedRef(db, host.partyId, input.seedId);
--    const seedSnap = await ref.get();
--    if (!seedSnap.exists) throw new BackendError("NOT_FOUND", "Seed video does not exist.");
--    const seed = seedSnap.data()!;
--    if (seed.partyId !== host.partyId || seed.channelId !== host.channelId) {
--      throw new BackendError("FORBIDDEN", "Seed video is outside the registered party and channel.");
--    }
--    // A deleted seed never recreates previews.
--    if (seed.status === "deleted") throw new BackendError("NOT_FOUND", "Seed video does not exist.");
--    const jobSnap = await jobRef(db, host.partyId, String(seed.jobId)).get();
--    if (!jobSnap.exists) throw new BackendError("NOT_FOUND", "Seed video does not exist.");
--    if (jobSnap.data()?.hostDeleted === true) throw new BackendError("NOT_FOUND", "Seed video does not exist.");
--    const clips = await deliveryClipsForJob(host.partyId, host.channelId, String(seed.jobId));
--    const previewExpiry = seed.expiresAt instanceof Timestamp
--      ? seed.expiresAt.toDate()
--      : new Date(Date.parse(String(seed.expiresAt)));
-+    // Gate 1 (transactional): re-read seed + job hostDeleted inside a
-+    // transaction; deleted/failed/withdrawn/expired seeds are denied here.
-+    const liveSeed = await gateLiveSeed(host.partyId, host.channelId, input.seedId);
-+    const clips = await deliveryClipsForJob(host.partyId, host.channelId, String(liveSeed.jobId));
-+    const previewExpiry = liveSeed.expiresAt instanceof Timestamp
-+      ? liveSeed.expiresAt.toDate()
-+      : new Date(Date.parse(String(liveSeed.expiresAt)));
-     const previewExpiresAt = Number.isFinite(previewExpiry.getTime())
-       ? previewExpiry
-       : new Date(now().getTime() + HOST_PREVIEW_TTL_MS);
-+    // Byte copy happens only after the gate commits.
-     const previewPaths = await ensurePreviewCopies(host.partyId, input.seedId, clips, previewExpiresAt);
--    await ref.update({ previewPaths, status: "ready", updatedAt: FieldValue.serverTimestamp() }).catch(() => undefined);
-+    // Gate 2 + commit in the SAME transaction: revalidate liveness and make
-+    // the status/previewPaths write part of that transaction, so a
-+    // delete/withdraw racing the copy cannot resurrect the seed.
-+    await db.runTransaction(async (transaction) => {
-+      const seedSnap = await transaction.get(seedRef(db, host.partyId, input.seedId));
-+      if (!seedSnap.exists) throw new BackendError("NOT_FOUND", "Seed video does not exist.");
-+      const seed = seedSnap.data()!;
-+      if (seed.partyId !== host.partyId || seed.channelId !== host.channelId) {
-+        throw new BackendError("FORBIDDEN", "Seed video is outside the registered party and channel.");
-+      }
-+      if (seed.status === "deleted") throw new BackendError("NOT_FOUND", "Seed video does not exist.");
-+      if (seed.status === "failed" || seed.status === "expired") {
-+        throw new BackendError("NOT_FOUND", "Seed video is no longer available.");
-+      }
-+      const jobSnap = await transaction.get(jobRef(db, host.partyId, String(seed.jobId)));
-+      if (!jobSnap.exists) throw new BackendError("NOT_FOUND", "Seed video does not exist.");
-+      if (jobSnap.data()?.hostDeleted === true) throw new BackendError("NOT_FOUND", "Seed video does not exist.");
-+      transaction.update(seedSnap.ref, { previewPaths, status: "ready", updatedAt: FieldValue.serverTimestamp() });
-+    });
-     const nowMs = now().getTime();
-     // Signed TTL is capped at the preview's own expiry (same pattern as delivery URLs).
-     const clipsOut = await Promise.all(
-diff --git a/backend/functions/src/index.ts b/backend/functions/src/index.ts
-index 05f94190ec9cc1978c186fa44b9fe13c365b165d..4533dac34c69bdcdec8e7839b4b75d2b7d0da3bb 100644
---- a/backend/functions/src/index.ts
-+++ b/backend/functions/src/index.ts
-@@ -143,6 +143,10 @@ export const createHostInvite = onCall({ maxInstances: 2 }, (request) =>
- export const joinHost = onCall({ maxInstances: 10 }, (request) =>
-   callable(() => getServices().joinHost(request.data)));
- 
-+/** Host TV callable; revokes a host device (demote + audit record). */
-+export const revokeHostDevice = onCall({ maxInstances: 2 }, (request) =>
-+  callable(() => getServices().revokeHostDevice(request.data)));
-+
- /** Host-only callable; lists the server-backed seed catalog. */
- export const listHostVideos = onCall({ maxInstances: 10 }, (request) =>
-   callable(() => getServices().listHostVideos(request.data)));
-diff --git a/backend/functions/src/retention.ts b/backend/functions/src/retention.ts
-index 0c5fc45e74d1ba47427468f4cc91aa3c80065a70..5573f0f25428e19eb6729e460998fc03f2e23819 100644
---- a/backend/functions/src/retention.ts
-+++ b/backend/functions/src/retention.ts
-@@ -82,6 +82,32 @@ export async function sweepExpiredMedia(
-     await Promise.all([...paths].map((path) => bucket.file(path).delete({ ignoreNotFound: true })));
-   }
- 
-+  // Host-invite expiry: docs carry `expiresAt` for the Firestore TTL policy
-+  // (console-configured TTL on expiresAt deletes the doc outright); this
-+  // sweep is the defense-in-depth pass that marks lapsed pending invites
-+  // expired so a stale invite can never redeem after its window, even where
-+  // no TTL policy is configured.
-+  try {
-+    const dueInvites = await db.collectionGroup("hostInvites")
-+      .where("expiresAt", "<=", Timestamp.fromDate(now))
-+      .get();
-+    for (const inviteDoc of dueInvites.docs) {
-+      await db.runTransaction(async (transaction) => {
-+        const current = await transaction.get(inviteDoc.ref);
-+        if (!current.exists) return;
-+        if (current.data()?.status === "pending") {
-+          transaction.update(inviteDoc.ref, {
-+            status: "expired",
-+            expiredAt: FieldValue.serverTimestamp(),
-+            updatedAt: FieldValue.serverTimestamp(),
-+          });
-+        }
-+      }).catch(() => undefined);
-+    }
-+  } catch {
-+    // Best-effort: redemption rechecks expiry transactionally regardless.
-+  }
-+
-   const references = new Set<string>();
-   const liveJobPairs = new Set<string>();
-   const [manifests, jobs, guestMedia, seedVideos] = await Promise.all([
-diff --git a/backend/functions/src/runtime.ts b/backend/functions/src/runtime.ts
-index 2942a22b8c0f1d0aaab20afae3bd23b76594356d..a6517fe942b993bc94b6eb74a9a4890f9190d7c4 100644
---- a/backend/functions/src/runtime.ts
-+++ b/backend/functions/src/runtime.ts
-@@ -45,6 +45,7 @@ export interface RuntimeServices {
-   joinParty: ReturnType<typeof createJoinPartyService>["joinParty"];
-   createHostInvite: ReturnType<typeof createHostJoinService>["createHostInvite"];
-   joinHost: ReturnType<typeof createHostJoinService>["joinHost"];
-+  revokeHostDevice: ReturnType<typeof createHostJoinService>["revokeHostDevice"];
-   listHostVideos: ReturnType<typeof createHostMediaService>["listHostVideos"];
-   generateHostVideo: ReturnType<typeof createHostMediaService>["generateHostVideo"];
-   getHostVideoPreview: ReturnType<typeof createHostMediaService>["getHostVideoPreview"];
-@@ -165,6 +166,7 @@ export function createRuntimeServices(options: RuntimeServiceOptions): RuntimeSe
-     joinParty: joinPartyService.joinParty,
-     createHostInvite: hostJoin.createHostInvite,
-     joinHost: hostJoin.joinHost,
-+    revokeHostDevice: hostJoin.revokeHostDevice,
-     listHostVideos: hostMedia.listHostVideos,
-     generateHostVideo: hostMedia.generateHostVideo,
-     getHostVideoPreview: hostMedia.getHostVideoPreview,
-diff --git a/backend/functions/test/contracts.test.ts b/backend/functions/test/contracts.test.ts
-index 52c904585669d70c4e371bf4c128e6ce91866320..d96420fe1e2d8154f007e4e62146883245d61f78 100644
---- a/backend/functions/test/contracts.test.ts
-+++ b/backend/functions/test/contracts.test.ts
-@@ -1,6 +1,6 @@
- import assert from "node:assert/strict";
+   if (guest.sourceHash !== binding.sourceHash || guest.consentRevision !== binding.consentRevision) {
+diff --git a/backend/functions/test/generation.test.ts b/backend/functions/test/generation.test.ts
+index 06dd525d710a21d1811af7378cbfdb07f2d2cd87..7cdf9f4e562b3e2baa5ececf3628042f53f41ca2 100644
+--- a/backend/functions/test/generation.test.ts
++++ b/backend/functions/test/generation.test.ts
+@@ -3,8 +3,8 @@ import { createHash } from "node:crypto";
+ import { resolve } from "node:path";
  import test from "node:test";
--import { BackendError, parseAck, parseJoinPartyInput, parseRequestGeneration, requireIdentity, validateCanonicalClips, parseCreateHostInviteInput, parseJoinHostInput, parseDeleteHostVideoInput } from "../src/contracts";
-+import { BackendError, HOST_MAX_DEVICES, HOST_SOURCE_CONSENT_PURPOSE, HOST_SOURCE_CONSENT_TEXT_VERSION, isHostSourceConsent, isSupportedConsent, parseAck, parseJoinPartyInput, parseRequestGeneration, requireIdentity, validateCanonicalClips, parseCreateHostInviteInput, parseJoinHostInput, parseDeleteHostVideoInput, parseRevokeHostDeviceInput } from "../src/contracts";
- import { buildCheapDemoRequest, validateCheapDemoControls, validateGuestImageReference } from "../src/video_generation_port";
- import { createVideoGenerationProviderFromEnvironment, FakeVideoGenerationPort } from "../src/providers/fake";
- import { AlibabaVideoGenerationPort } from "../src/providers/alibaba";
-@@ -73,10 +73,43 @@ test("manifest validators accept 1/2/4 first-N prefixes and reject gaps, duplica
-   }
-   // Host invite parsers: guest PINs are never host tokens, roles are server-assigned.
-   assert.deepEqual(parseCreateHostInviteInput({ partyId: "p", deviceId: "tv", channelId: "main" }), { partyId: "p", deviceId: "tv", channelId: "main" });
--  assert.throws(() => parseJoinHostInput({ partyId: "p", deviceId: "x", channelId: "main", inviteToken: "004201" }), (e: unknown) => e instanceof BackendError && e.errorCode === "INVALID_ARGUMENT");
-+  assert.throws(() => parseJoinHostInput({ partyId: "p", deviceId: "x", channelId: "main", inviteToken: "004201", pairingCode: "000000" }), (e: unknown) => e instanceof BackendError && e.errorCode === "INVALID_ARGUMENT");
-   assert.throws(() => parseDeleteHostVideoInput({ partyId: "p", deviceId: "h", channelId: "main", seedIds: [] }), (e: unknown) => e instanceof BackendError && e.errorCode === "INVALID_ARGUMENT");
- });
- 
-+test("host pairing code is required; wrong/missing codes deny generically (no oracle)", () => {
-+  const base = { partyId: "p", deviceId: "x", channelId: "main", inviteToken: "hi-abcdef" };
-+  // A correct-shaped pair parses through.
-+  assert.deepEqual(parseJoinHostInput({ ...base, pairingCode: "000000" }), { ...base, pairingCode: "000000" });
-+  // Missing or malformed codes deny with the SAME generic FORBIDDEN as an
-+  // unknown invite (never INVALID_ARGUMENT, which would be an oracle).
-+  for (const pairingCode of [undefined, "", "12345", "1234567", "abcdef", "12 456", 4201, null]) {
-+    assert.throws(() => parseJoinHostInput({ ...base, pairingCode }), (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN",
-+      `pairingCode ${String(pairingCode)} must deny generically`);
-+  }
-+});
-+
-+test("host capacity and revocation parsers enforce their wire shapes", () => {
-+  assert.equal(HOST_MAX_DEVICES, 3);
-+  assert.deepEqual(
-+    parseRevokeHostDeviceInput({ partyId: "p", deviceId: "tv-1", channelId: "main", targetDeviceId: "p-host-1" }),
-+    { partyId: "p", deviceId: "tv-1", channelId: "main", targetDeviceId: "p-host-1" },
-+  );
-+  expectCode(() => parseRevokeHostDeviceInput({ partyId: "p", deviceId: "tv-1", channelId: "main" }), "INVALID_ARGUMENT");
-+  expectCode(() => parseRevokeHostDeviceInput({ partyId: "p", deviceId: "tv-1", channelId: "main", targetDeviceId: "bad id!" }), "INVALID_ARGUMENT");
-+});
-+
-+test("host and guest consent namespaces stay distinct", () => {
-+  assert.equal(HOST_SOURCE_CONSENT_TEXT_VERSION, "host_source_v1");
-+  assert.equal(HOST_SOURCE_CONSENT_PURPOSE, "host_source");
-+  assert.ok(isSupportedConsent("v1", "guest_cameo"));
-+  assert.ok(isSupportedConsent(HOST_SOURCE_CONSENT_TEXT_VERSION, HOST_SOURCE_CONSENT_PURPOSE));
-+  assert.ok(!isSupportedConsent("v9", "guest_cameo"));
-+  assert.ok(!isSupportedConsent("v1", "host_source"));
-+  assert.ok(isHostSourceConsent(HOST_SOURCE_CONSENT_TEXT_VERSION, HOST_SOURCE_CONSENT_PURPOSE));
-+  assert.ok(!isHostSourceConsent("v1", "guest_cameo"));
-+});
-+
- test("joinParty parser enforces identity, channel, and six-digit PIN shape", () => {
-   expectCode(() => parseJoinPartyInput({}), "UNAUTHENTICATED");
-   expectCode(() => parseJoinPartyInput({ partyId: "party", channelId: "main" }), "UNAUTHENTICATED");
-diff --git a/backend/functions/test/guest_upload.test.ts b/backend/functions/test/guest_upload.test.ts
-index b4146c6cffb3bdd377a8b63852fe977de2451a43..e0fd902a8dedc6a232e808c465fc2f16538b424e 100644
---- a/backend/functions/test/guest_upload.test.ts
-+++ b/backend/functions/test/guest_upload.test.ts
-@@ -599,6 +599,69 @@ test("withdrawal revokes delivery: absent everywhere and no new URLs issuable",
+ import { createGenerationServices } from "../src/generation";
+-import { REQUIRED_CAMERA_IDS } from "../src/config";
+-import { BackendError } from "../src/contracts";
++import { GUEST_CONSENT_PURPOSE, GUEST_CONSENT_TEXT_VERSION, REQUIRED_CAMERA_IDS } from "../src/config";
++import { BackendError, HOST_SOURCE_CONSENT_PURPOSE, HOST_SOURCE_CONSENT_TEXT_VERSION } from "../src/contracts";
+ import { FakeVideoGenerationPort } from "../src/providers/fake";
+ import { ProviderResult, ProviderTaskStatus, VideoGenerationRequest } from "../src/video_generation_port";
+ import { reconcileUsage, usageLedgerId } from "../src/usage";
+@@ -442,3 +442,61 @@ test("lazy provider fallback threads fixtureDirectory through both construction
+     await disposeEmulatorContext(app);
    }
  });
- 
-+test("host-originated uploads use the namespaced host consent pair with an attestation copy", {
++
++test("requestGeneration gate accepts host-consented sources and rejects mismatched pairs", {
 +  skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
 +}, async () => {
 +  const { app, db, bucket } = await createEmulatorContext();
 +  const partyId = randomPartyId();
++  async function seedEligible(submissionId: string, deviceId: string, textVersion: string, purpose: string): Promise<void> {
++    await db.doc(`parties/${partyId}/guestMedia/${submissionId}`).set({
++      submissionId, partyId, deviceId, channelId: "main", status: "eligible",
++      consent: { accepted: true, textVersion, purpose, acceptedAt: new Date().toISOString(), deviceId },
++      consentRevision: `${textVersion}:${new Date().toISOString()}`,
++      objectPath: `parties/${partyId}/guests/${deviceId}/ingest/${submissionId}/photo.jpg`,
++      contentType: "image/jpeg", expiresAt: new Date(Date.now() + 3600_000).toISOString(),
++      sourceHash: "a".repeat(64), sourceSizeBytes: 100,
++    });
++  }
 +  try {
++    await seedParty(db, partyId, "tv-main", "main");
 +    await seedParty(db, partyId, "p-host-1", "main");
 +    await db.doc(`parties/${partyId}/devices/p-host-1`).update({ role: "host" });
-+    const services = servicesFor(db, bucket);
-+    const requested = await services.requestGuestUpload({
-+      partyId, deviceId: "p-host-1", channelId: "main",
-+      consent: { accepted: true, textVersion: "host_source_v1", purpose: "host_source" },
-+      contentType: "image/jpeg",
++    const services = createGenerationServices({ db, bucket, provider: new FakeVideoGenerationPort() });
++    // Guest pair still passes the request gate (byte-identical legacy behavior).
++    await seedEligible("gsub-guestpass000000000000001", "tv-main", GUEST_CONSENT_TEXT_VERSION, GUEST_CONSENT_PURPOSE);
++    const guestReq = await services.requestGeneration({
++      partyId, deviceId: "tv-main", channelId: "main", jobId: "job-guest-pass",
++      idempotencyKey: "idem-guest-pass", presetId: "cheap_demo", guestMediaId: "gsub-guestpass000000000000001",
 +    });
-+    assert.ok(requested.submissionId);
-+    const stored = (await db.doc(`parties/${partyId}/guestMedia/${requested.submissionId}`).get()).data()!;
-+    assert.equal(stored.consent.textVersion, "host_source_v1");
-+    assert.equal(stored.consent.purpose, "host_source");
-+    assert.equal(stored.attestation.textVersion, "host_source_v1");
-+    assert.equal(stored.attestation.purpose, "host_source");
-+    assert.equal(stored.attestation.role, "host");
-+    assert.ok(String(requested.consentRevision).startsWith("host_source_v1:"));
-+    await bucket.file(requested.objectPath).save(await photoBytes(), { contentType: "image/jpeg" });
-+    const completed = await services.completeGuestUpload({ partyId, deviceId: "p-host-1", channelId: "main", submissionId: requested.submissionId });
-+    assert.equal(completed.status, "eligible");
-+    assert.equal((await db.doc(`parties/${partyId}/guestMedia/${requested.submissionId}`).get()).data()?.status, "eligible");
++    assert.equal(guestReq.created, true);
++    await db.doc(`parties/${partyId}/jobs/job-guest-pass`).delete().catch(() => undefined);
++    await db.doc(`parties/${partyId}/generationBudget/active`).delete().catch(() => undefined);
++    // Host pair passes the request gate (same isSupportedConsent semantics).
++    await seedEligible("gsub-hostpass0000000000000001", "p-host-1", HOST_SOURCE_CONSENT_TEXT_VERSION, HOST_SOURCE_CONSENT_PURPOSE);
++    const hostReq = await services.requestGeneration({
++      partyId, deviceId: "p-host-1", channelId: "main", jobId: "job-host-pass",
++      idempotencyKey: "idem-host-pass", presetId: "cheap_demo", guestMediaId: "gsub-hostpass0000000000000001",
++    });
++    assert.equal(hostReq.created, true);
++    const binding = (await db.doc(`parties/${partyId}/jobs/job-host-pass`).get()).data()?.guestMedia as Record<string, unknown>;
++    assert.equal(binding.submissionId, "gsub-hostpass0000000000000001");
++    await db.doc(`parties/${partyId}/jobs/job-host-pass`).delete().catch(() => undefined);
++    await db.doc(`parties/${partyId}/generationBudget/active`).delete().catch(() => undefined);
++    // Mismatched pair fails the request gate.
++    await seedEligible("gsub-mixedfail000000000000001", "tv-main", GUEST_CONSENT_TEXT_VERSION, HOST_SOURCE_CONSENT_PURPOSE);
++    await assert.rejects(services.requestGeneration({
++      partyId, deviceId: "tv-main", channelId: "main", jobId: "job-mixed-fail",
++      idempotencyKey: "idem-mixed-fail", presetId: "cheap_demo", guestMediaId: "gsub-mixedfail000000000000001",
++    }), (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN");
++    // Unknown version fails the request gate.
++    await seedEligible("gsub-unknownfail0000000000001", "tv-main", "v9", GUEST_CONSENT_PURPOSE);
++    await assert.rejects(services.requestGeneration({
++      partyId, deviceId: "tv-main", channelId: "main", jobId: "job-unknown-fail",
++      idempotencyKey: "idem-unknown-fail", presetId: "cheap_demo", guestMediaId: "gsub-unknownfail0000000000001",
++    }), (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN");
 +  } finally {
 +    await clearParty(db, bucket, partyId);
 +    await disposeEmulatorContext(app);
 +  }
 +});
+diff --git a/backend/functions/test/guest_upload.test.ts b/backend/functions/test/guest_upload.test.ts
+index e0fd902a8dedc6a232e808c465fc2f16538b424e..1454476430a59b1ae8fb2181afeaa9d119c99ff8 100644
+--- a/backend/functions/test/guest_upload.test.ts
++++ b/backend/functions/test/guest_upload.test.ts
+@@ -5,8 +5,9 @@ import { resolve } from "node:path";
+ import test from "node:test";
+ import type { Bucket, File } from "@google-cloud/storage";
+ import type { Firestore } from "firebase-admin/firestore";
+-import { BackendError } from "../src/contracts";
++import { BackendError, HOST_SOURCE_CONSENT_PURPOSE, HOST_SOURCE_CONSENT_TEXT_VERSION } from "../src/contracts";
+ import { GUEST_CONSENT_PURPOSE, GUEST_CONSENT_TEXT_VERSION, GUEST_MAX_IMAGE_BYTES } from "../src/config";
++import { assertGuestEligible } from "../src/guest_media";
+ import { createRuntimeServices } from "../src/runtime";
+ import { FakeVideoGenerationPort } from "../src/providers/fake";
+ import { sweepExpiredMedia } from "../src/retention";
+@@ -702,3 +703,68 @@ test("withdrawal deletes retained host previews and fails the bound seed closed"
+     await disposeEmulatorContext(app);
+   }
+ });
 +
-+test("consent pairs never mix across roles", {
++test("eligibility gate accepts guest + host pairs, rejects mismatched/unknown pairs", {
 +  skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
 +}, async () => {
 +  const { app, db, bucket } = await createEmulatorContext();
@@ -880,760 +188,57 @@ index b4146c6cffb3bdd377a8b63852fe977de2451a43..e0fd902a8dedc6a232e808c465fc2f16
 +    await seedParty(db, partyId, "p-host-1", "main");
 +    await db.doc(`parties/${partyId}/devices/p-host-1`).update({ role: "host" });
 +    const services = servicesFor(db, bucket);
-+    // A guest device presenting the host pair is rejected, and vice versa.
-+    await assert.rejects(services.requestGuestUpload({
-+      partyId, deviceId: "p-guest-1", channelId: "main",
-+      consent: { accepted: true, textVersion: "host_source_v1", purpose: "host_source" },
-+      contentType: "image/jpeg",
-+    }), (e: unknown) => e instanceof BackendError && e.errorCode === "INVALID_ARGUMENT");
-+    await assert.rejects(services.requestGuestUpload({
-+      partyId, deviceId: "p-host-1", channelId: "main", consent: CONSENT, contentType: "image/jpeg",
-+    }), (e: unknown) => e instanceof BackendError && e.errorCode === "INVALID_ARGUMENT");
-+    // Unknown versions stay unsupported for both roles.
-+    await assert.rejects(services.requestGuestUpload({
++    const guestReq = await services.requestGuestUpload({
++      partyId, deviceId: "p-guest-1", channelId: "main", consent: CONSENT, contentType: "image/jpeg",
++    });
++    await bucket.file(guestReq.objectPath).save(await photoBytes(), { contentType: "image/jpeg" });
++    await services.completeGuestUpload({ partyId, deviceId: "p-guest-1", channelId: "main", submissionId: guestReq.submissionId });
++    const guestDoc = await assertGuestEligible(db, { partyId, deviceId: "p-guest-1", channelId: "main" }, guestReq.submissionId, Date.now());
++    assert.equal(guestDoc.consent.textVersion, GUEST_CONSENT_TEXT_VERSION);
++    assert.equal(guestDoc.consent.purpose, GUEST_CONSENT_PURPOSE);
++    const hostReq = await services.requestGuestUpload({
 +      partyId, deviceId: "p-host-1", channelId: "main",
-+      consent: { accepted: true, textVersion: "v9", purpose: "host_source" },
-+      contentType: "image/jpeg",
-+    }), (e: unknown) => e instanceof BackendError && e.errorCode === "INVALID_ARGUMENT");
-+  } finally {
-+    await clearParty(db, bucket, partyId);
-+    await disposeEmulatorContext(app);
-+  }
-+});
-+
- test("withdrawal deletes retained host previews and fails the bound seed closed", {
-   skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
- }, async () => {
-diff --git a/backend/functions/test/host_admin_e2e.test.ts b/backend/functions/test/host_admin_e2e.test.ts
-index d8a031c8687c8841f3fc67dd0493453890821e84..eb9257f5af4874169e77d158bd1cbe4034051934 100644
---- a/backend/functions/test/host_admin_e2e.test.ts
-+++ b/backend/functions/test/host_admin_e2e.test.ts
-@@ -33,7 +33,7 @@ function servicesFor(db: Firestore, bucket: Bucket) {
- 
- test("exported host callables are wired through the runtime composition", async () => {
-   const handlers = await import("../src/index");
--  for (const name of ["createHostInvite", "joinHost", "listHostVideos", "generateHostVideo", "getHostVideoPreview", "deleteHostVideo"]) {
-+  for (const name of ["createHostInvite", "joinHost", "revokeHostDevice", "listHostVideos", "generateHostVideo", "getHostVideoPreview", "deleteHostVideo"]) {
-     assert.ok((handlers as Record<string, unknown>)[name] !== undefined, `${name} must be an exported callable`);
-   }
-   const { createRuntimeServices: compose } = await import("../src/runtime");
-@@ -53,8 +53,9 @@ test("host admin end-to-end: invite, roles, fixture-backed generation, preview s
-     // Only the registered TV mints the invite; the token hash is stored.
-     const invite = await services.createHostInvite({ partyId, deviceId: "tv-1", channelId });
-     assert.ok(invite.inviteToken.startsWith("hi-"));
-+    assert.match(invite.pairingCode, /^[0-9]{6}$/);
-     // Phone redeems for a separate identity with the server-assigned host role.
--    const joined = await services.joinHost({ partyId, deviceId: "p-admin-1", channelId, inviteToken: invite.inviteToken });
-+    const joined = await services.joinHost({ partyId, deviceId: "p-admin-1", channelId, inviteToken: invite.inviteToken, pairingCode: invite.pairingCode });
-     assert.equal(joined.role, "host");
-     assert.equal((await db.doc(`parties/${partyId}/devices/p-admin-1`).get()).data()?.role, "host");
-     assert.equal((await db.doc(`parties/${partyId}/devices/tv-1`).get()).data()?.role, "tv");
-@@ -98,7 +99,7 @@ test("host admin end-to-end: invite, roles, fixture-backed generation, preview s
-     await seedParty(db, foreign, "tv-9", channelId);
-     await db.doc(`parties/${foreign}/devices/tv-9`).update({ role: "tv" });
-     const foreignInvite = await services.createHostInvite({ partyId: foreign, deviceId: "tv-9", channelId });
--    const foreignHost = await services.joinHost({ partyId: foreign, deviceId: "p-foreign", channelId, inviteToken: foreignInvite.inviteToken });
-+    const foreignHost = await services.joinHost({ partyId: foreign, deviceId: "p-foreign", channelId, inviteToken: foreignInvite.inviteToken, pairingCode: foreignInvite.pairingCode });
-     assert.equal(foreignHost.role, "host");
-     await assert.rejects(services.deleteHostVideo({ partyId, deviceId: "p-foreign", channelId, seedIds: ["catalog-1"] }),
-       (e: unknown) => e instanceof BackendError && (e.errorCode === "FORBIDDEN" || e.errorCode === "NOT_FOUND"));
-@@ -109,6 +110,33 @@ test("host admin end-to-end: invite, roles, fixture-backed generation, preview s
-   }
- });
- 
-+test("listPartyDevices returns only active guests: tv/host deviceIds are never leaked", { skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST }, async () => {
-+  const { app, db, bucket } = await createEmulatorContext();
-+  const partyId = randomPartyId();
-+  const channelId = "main";
-+  try {
-+    await seedParty(db, partyId, "tv-1", channelId);
-+    await db.doc(`parties/${partyId}/devices/tv-1`).update({ role: "tv" });
-+    const services = servicesFor(db, bucket);
-+    const invite = await services.createHostInvite({ partyId, deviceId: "tv-1", channelId });
-+    await services.joinHost({ partyId, deviceId: "p-admin-1", channelId, inviteToken: invite.inviteToken, pairingCode: invite.pairingCode });
-+    await db.doc(`parties/${partyId}/devices/p-guest-live`).set({ partyId, deviceId: "p-guest-live", role: "guest", status: "active" });
-+    await db.doc(`parties/${partyId}/devices/p-guest-dead`).set({ partyId, deviceId: "p-guest-dead", role: "guest", status: "disabled" });
-+    // A revoked host stays excluded too.
-+    await services.revokeHostDevice({ partyId, deviceId: "tv-1", channelId, targetDeviceId: "p-admin-1" });
-+
-+    const listing = await services.listPartyDevices({ partyId, deviceId: "tv-1", channelId });
-+    assert.deepEqual(listing.devices.map((entry) => entry.deviceId), ["p-guest-live"]);
-+    assert.ok(!listing.devices.some((entry) => entry.deviceId === "tv-1"), "tv deviceId must never be listed");
-+    assert.ok(!listing.devices.some((entry) => entry.deviceId === "p-admin-1"), "host deviceId must never be listed");
-+    assert.ok(!listing.devices.some((entry) => entry.deviceId === "p-guest-dead"), "inactive guests must be excluded");
-+    assert.ok(listing.devices.every((entry) => entry.role === "guest" && entry.status === "active"));
-+  } finally {
-+    await clearParty(db, bucket, partyId);
-+    await disposeEmulatorContext(app);
-+  }
-+});
-+
- test("deletion racing the worker blocks publication through the real pipeline", { skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST }, async () => {
-   const { app, db, bucket } = await createEmulatorContext();
-   const partyId = randomPartyId();
-@@ -117,7 +145,7 @@ test("deletion racing the worker blocks publication through the real pipeline",
-     await db.doc(`parties/${partyId}/devices/tv-1`).update({ role: "tv" });
-     const services = servicesFor(db, bucket);
-     const invite = await services.createHostInvite({ partyId, deviceId: "tv-1", channelId: "main" });
--    await services.joinHost({ partyId, deviceId: "p-admin-1", channelId: "main", inviteToken: invite.inviteToken });
-+    await services.joinHost({ partyId, deviceId: "p-admin-1", channelId: "main", inviteToken: invite.inviteToken, pairingCode: invite.pairingCode });
-     const generated = await services.generateHostVideo({ partyId, deviceId: "p-admin-1", channelId: "main", seedId: "race-1", idempotencyKey: "idem-race-1" });
-     // Delete wins the race before the worker runs: the tombstone is durable.
-     const deleted = await services.deleteHostVideo({ partyId, deviceId: "p-admin-1", channelId: "main", seedIds: ["race-1"] });
-diff --git a/backend/functions/test/host_join.test.ts b/backend/functions/test/host_join.test.ts
-index 4e13d467d0a620318fa77b709a0d1de0fc5fbf42..e5dd72acbb9a31695ec021b97103558f71fc7e6e 100644
---- a/backend/functions/test/host_join.test.ts
-+++ b/backend/functions/test/host_join.test.ts
-@@ -6,6 +6,7 @@ import { Timestamp } from "firebase-admin/firestore";
- import { BackendError } from "../src/contracts";
- import { createHostJoinService, hashHostInviteToken } from "../src/host_join";
- import { createJoinPartyService } from "../src/join_party";
-+import { assertRegisteredHostDevice } from "../src/auth";
- import {
-   HAS_FIRESTORE_EMULATOR,
-   clearParty,
-@@ -20,25 +21,51 @@ async function seedTv(db: FirebaseFirestore.Firestore, partyId: string, deviceId
-   await db.doc(`parties/${partyId}/devices/${deviceId}`).update({ role: "tv" });
- }
- 
--test("join_roles fixture matches the enforced guest/host role boundary", async () => {
-+test("join_roles fixture pins the guest/host role boundary (shape only; behaviour is covered by emulator tests)", async () => {
-   const content = await readFile(resolve(__dirname, "../../../test/fixtures/join_roles_v1.json"), "utf8");
-   const roles = JSON.parse(content) as {
-     callables: string[];
-     guestJoin: { request: Record<string, unknown>; response: Record<string, unknown> };
-     hostJoin: { request: Record<string, unknown>; response: Record<string, unknown> };
-+    createHostInvite: { response: Record<string, unknown> };
-   };
--  assert.deepEqual(roles.callables, ["createHostInvite", "joinHost", "listHostVideos", "generateHostVideo", "getHostVideoPreview", "deleteHostVideo"]);
--  // The guest route and the host route produce disjoint server-assigned roles.
--  assert.equal(roles.guestJoin.response.role, "guest");
--  assert.equal(roles.hostJoin.response.role, "host");
--  assert.notEqual(roles.guestJoin.response.role, roles.hostJoin.response.role);
--  // The guest fixture carries a six-digit PIN (redeemed via joinParty); the
--  // host fixture carries a server-minted capability (never a PIN shape).
--  assert.match(String((roles.guestJoin.request as Record<string, unknown>).joinPin), /^[0-9]{6}$/);
--  assert.ok(String((roles.hostJoin.request as Record<string, unknown>).inviteToken).length > 0);
--  // A host token is never a bare guest PIN: PIN-shaped strings are rejected
--  // as invite tokens by the parser (covered behaviorally above).
--  assert.ok(!/^[0-9]{6}$/.test(String((roles.hostJoin.request as Record<string, unknown>).inviteToken)));
-+  assert.deepEqual(roles.callables, ["createHostInvite", "joinHost", "revokeHostDevice", "listHostVideos", "generateHostVideo", "getHostVideoPreview", "deleteHostVideo"]);
-+  // The fixture PIN is an obviously-fake placeholder, never a live credential.
-+  assert.equal(roles.guestJoin.request.joinPin, "000000");
-+  assert.match(String(roles.guestJoin.request.joinPin), /^[0-9]{6}$/);
-+  // The host route carries a server-minted capability plus a 6-digit pairing
-+  // code (never a bare guest PIN shape for the token itself).
-+  assert.ok(String(roles.hostJoin.request.inviteToken).length > 0);
-+  assert.ok(!/^[0-9]{6}$/.test(String(roles.hostJoin.request.inviteToken)));
-+  assert.ok("pairingCode" in roles.hostJoin.request);
-+  assert.ok("pairingCode" in roles.createHostInvite.response);
-+  // Behavioural role-boundary coverage lives in the emulator tests below, not
-+  // in this JSON: guest joins yield role guest, host redemptions yield role
-+  // host, and the two routes are disjoint server-side.
-+});
-+
-+test("guest and host routes produce disjoint server-assigned roles (behavioural)", { skip: !HAS_FIRESTORE_EMULATOR }, async () => {
-+  const { app, db } = await createEmulatorContext();
-+  const partyId = randomPartyId();
-+  try {
-+    await seedTv(db, partyId, "tv-1", "main");
-+    const hosts = createHostJoinService({ db });
-+    const joinParty = createJoinPartyService({ db });
-+    const guest = await joinParty.joinParty({ partyId, deviceId: "p-guest-1", channelId: "main" });
-+    assert.equal(guest.role, "guest");
-+    const invite = await hosts.createHostInvite({ partyId, deviceId: "tv-1", channelId: "main" });
-+    const joined = await hosts.joinHost({
-+      partyId, deviceId: "p-host-1", channelId: "main",
-+      inviteToken: invite.inviteToken, pairingCode: invite.pairingCode,
-+    });
-+    assert.equal(joined.role, "host");
-+    assert.notEqual(guest.role, joined.role);
-+    assert.equal((await db.doc(`parties/${partyId}/devices/p-guest-1`).get()).data()?.role, "guest");
-+    assert.equal((await db.doc(`parties/${partyId}/devices/p-host-1`).get()).data()?.role, "host");
-+  } finally {
-+    await db.recursiveDelete(db.doc(`parties/${partyId}`)).catch(() => undefined);
-+    await disposeEmulatorContext(app);
-+  }
- });
- 
- test("only a registered TV may mint a host invite; invites bind party/channel/expiry", { skip: !HAS_FIRESTORE_EMULATOR }, async () => {
-@@ -52,15 +79,19 @@ test("only a registered TV may mint a host invite; invites bind party/channel/ex
-     assert.equal(invite.partyId, partyId);
-     assert.equal(invite.channelId, "main");
-     assert.ok(invite.inviteToken.startsWith("hi-"));
-+    assert.match(invite.pairingCode, /^[0-9]{6}$/);
-     assert.ok(Date.parse(invite.expiresAt) > Date.now());
--    // Only the token hash is stored, bound to party/channel/expiry.
-+    // Only hashes are stored, bound to party/channel/expiry; neither secret
-+    // appears in the stored doc.
-     const tokenHash = hashHostInviteToken(invite.inviteToken);
-     const stored = (await db.doc(`parties/${partyId}/hostInvites/${tokenHash.slice(0, 32)}`).get()).data()!;
-     assert.equal(stored.tokenHash, tokenHash);
-     assert.equal(stored.partyId, partyId);
-     assert.equal(stored.channelId, "main");
-     assert.equal(stored.status, "pending");
-+    assert.ok(typeof stored.pairingCodeHash === "string" && typeof stored.pairingSalt === "string");
-     assert.ok(!("inviteToken" in stored) && !JSON.stringify(stored).includes(invite.inviteToken));
-+    assert.ok(!JSON.stringify(stored).includes(invite.pairingCode), "pairing code is never stored in cleartext");
-     // Guests, unknown devices, and wrong channels cannot mint invites.
-     await assert.rejects(services.createHostInvite({ partyId, deviceId: "p-guest-1", channelId: "main" }),
-       (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN");
-@@ -81,25 +112,28 @@ test("host redemption is transactional: idempotent retry, replay/expiry/PIN/role
-     await seedTv(db, partyId, "tv-1", "main");
-     const services = createHostJoinService({ db });
-     const invite = await services.createHostInvite({ partyId, deviceId: "tv-1", channelId: "main" });
-+    const redeem = { partyId, channelId: "main", inviteToken: invite.inviteToken, pairingCode: invite.pairingCode };
- 
--    const joined = await services.joinHost({ partyId, deviceId: "p-host-1", channelId: "main", inviteToken: invite.inviteToken });
-+    const joined = await services.joinHost({ ...redeem, deviceId: "p-host-1" });
-     assert.deepEqual(joined, { partyId, deviceId: "p-host-1", channelId: "main", role: "host", status: "active", created: true });
-     const device = (await db.doc(`parties/${partyId}/devices/p-host-1`).get()).data()!;
-     assert.equal(device.role, "host");
-     assert.equal(device.status, "active");
-+    assert.equal(typeof device.redeemedFromInviteId, "string");
-+    assert.ok(device.redeemedAt, "redemption records redeemedAt on the device doc");
- 
-     // Same-device redemption retries are idempotent.
--    const retried = await services.joinHost({ partyId, deviceId: "p-host-1", channelId: "main", inviteToken: invite.inviteToken });
-+    const retried = await services.joinHost({ ...redeem, deviceId: "p-host-1" });
-     assert.equal(retried.created, false);
-     assert.equal(retried.role, "host");
- 
-     // Other-device replay of the same token cannot grant host access.
--    await assert.rejects(services.joinHost({ partyId, deviceId: "p-host-2", channelId: "main", inviteToken: invite.inviteToken }),
-+    await assert.rejects(services.joinHost({ ...redeem, deviceId: "p-host-2" }),
-       (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN");
-     assert.equal((await db.doc(`parties/${partyId}/devices/p-host-2`).get()).exists, false);
- 
-     // Guest PIN reuse cannot grant host access (shape-rejected, never redeemed).
--    await assert.rejects(services.joinHost({ partyId, deviceId: "p-host-3", channelId: "main", inviteToken: "004201" }),
-+    await assert.rejects(services.joinHost({ partyId, deviceId: "p-host-3", channelId: "main", inviteToken: "004201", pairingCode: invite.pairingCode }),
-       (e: unknown) => e instanceof BackendError);
-     assert.equal((await db.doc(`parties/${partyId}/devices/p-host-3`).get()).exists, false);
- 
-@@ -109,20 +143,22 @@ test("host redemption is transactional: idempotent retry, replay/expiry/PIN/role
-     const guest = await joinParty.joinParty({ partyId, deviceId: "p-guest-9", channelId: "main", role: "host" } as unknown as Record<string, unknown>);
-     assert.equal(guest.role, "guest");
-     assert.equal((await db.doc(`parties/${partyId}/devices/p-guest-9`).get()).data()?.role, "guest");
--    await assert.rejects(services.joinHost({ partyId, deviceId: "p-guest-9", channelId: "main", inviteToken: invite.inviteToken }),
-+    await assert.rejects(services.joinHost({ ...redeem, deviceId: "p-guest-9" }),
-       (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN");
- 
-     // Expired invites are refused.
-     const invite2 = await services.createHostInvite({ partyId, deviceId: "tv-1", channelId: "main" });
-     const tokenHash2 = hashHostInviteToken(invite2.inviteToken);
-     await db.doc(`parties/${partyId}/hostInvites/${tokenHash2.slice(0, 32)}`).update({ expiresAt: Timestamp.fromDate(new Date(Date.now() - 1000)) });
--    await assert.rejects(services.joinHost({ partyId, deviceId: "p-host-4", channelId: "main", inviteToken: invite2.inviteToken }),
--      (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN");
-+    await assert.rejects(services.joinHost({
-+      partyId, deviceId: "p-host-4", channelId: "main",
-+      inviteToken: invite2.inviteToken, pairingCode: invite2.pairingCode,
-+    }), (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN");
- 
-     // Cross-party token reuse is refused.
-     const otherParty = randomPartyId();
-     await seedTv(db, otherParty, "tv-9", "main");
--    await assert.rejects(services.joinHost({ partyId: otherParty, deviceId: "p-host-5", channelId: "main", inviteToken: invite.inviteToken }),
-+    await assert.rejects(services.joinHost({ ...redeem, partyId: otherParty, deviceId: "p-host-5" }),
-       (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN");
-     await db.recursiveDelete(db.doc(`parties/${otherParty}`)).catch(() => undefined);
-   } finally {
-@@ -131,6 +167,132 @@ test("host redemption is transactional: idempotent retry, replay/expiry/PIN/role
-   }
- });
- 
-+test("pairing code is required and wrong codes deny exactly like an unknown invite", { skip: !HAS_FIRESTORE_EMULATOR }, async () => {
-+  const { app, db } = await createEmulatorContext();
-+  const partyId = randomPartyId();
-+  try {
-+    await seedTv(db, partyId, "tv-1", "main");
-+    const services = createHostJoinService({ db });
-+    const invite = await services.createHostInvite({ partyId, deviceId: "tv-1", channelId: "main" });
-+    assert.match(invite.pairingCode, /^[0-9]{6}$/);
-+
-+    const probe = async (body: Record<string, unknown>): Promise<BackendError> =>
-+      services.joinHost(body).then(
-+        () => { throw new Error("expected rejection"); },
-+        (error: unknown) => error as BackendError,
-+      );
-+    // Missing, malformed, and wrong codes all deny with the SAME generic
-+    // error as an unknown invite: no oracle for code-vs-token probing.
-+    const unknown = await probe({ partyId, deviceId: "p-x", channelId: "main", inviteToken: "hi-deadbeef", pairingCode: "000000" });
-+    assert.ok(unknown instanceof BackendError && unknown.errorCode === "FORBIDDEN");
-+    for (const pairingCode of [undefined, "", "12345", "1234567", "abcdef", "12 456", 4201, null]) {
-+      const denied = await probe({ partyId, deviceId: "p-x", channelId: "main", inviteToken: invite.inviteToken, pairingCode });
-+      assert.ok(denied instanceof BackendError && denied.errorCode === "FORBIDDEN", `code ${String(pairingCode)} must deny`);
-+      assert.equal(denied.message, unknown.message, "denial message must be identical (no oracle)");
-+    }
-+    const wrongCode = String((Number(invite.pairingCode) + 1) % 1_000_000).padStart(6, "0");
-+    const wrong = await probe({ partyId, deviceId: "p-x", channelId: "main", inviteToken: invite.inviteToken, pairingCode: wrongCode });
-+    assert.ok(wrong instanceof BackendError && wrong.errorCode === "FORBIDDEN");
-+    assert.equal(wrong.message, unknown.message, "wrong code must deny identically to an unknown invite");
-+    assert.equal((await db.doc(`parties/${partyId}/devices/p-x`).get()).exists, false);
-+    // The correct half still redeems afterwards (wrong guesses do not burn it).
-+    const joined = await services.joinHost({
-+      partyId, deviceId: "p-host-ok", channelId: "main",
-+      inviteToken: invite.inviteToken, pairingCode: invite.pairingCode,
-+    });
-+    assert.equal(joined.role, "host");
-+  } finally {
-+    await db.recursiveDelete(db.doc(`parties/${partyId}`)).catch(() => undefined);
-+    await disposeEmulatorContext(app);
-+  }
-+});
-+
-+test("minting a new invite supersedes older pending invites for the same channel", { skip: !HAS_FIRESTORE_EMULATOR }, async () => {
-+  const { app, db } = await createEmulatorContext();
-+  const partyId = randomPartyId();
-+  try {
-+    await seedTv(db, partyId, "tv-1", "main");
-+    const services = createHostJoinService({ db });
-+    const first = await services.createHostInvite({ partyId, deviceId: "tv-1", channelId: "main" });
-+    const second = await services.createHostInvite({ partyId, deviceId: "tv-1", channelId: "main" });
-+    assert.notEqual(first.inviteToken, second.inviteToken);
-+    const firstStored = (await db.doc(`parties/${partyId}/hostInvites/${hashHostInviteToken(first.inviteToken).slice(0, 32)}`).get()).data()!;
-+    assert.equal(firstStored.status, "superseded", "older pending invite must be invalidated by the new mint");
-+    // The superseded invite can no longer redeem, even with its own code.
-+    await assert.rejects(services.joinHost({
-+      partyId, deviceId: "p-host-old", channelId: "main",
-+      inviteToken: first.inviteToken, pairingCode: first.pairingCode,
-+    }), (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN");
-+    // The newest invite redeems normally.
-+    const joined = await services.joinHost({
-+      partyId, deviceId: "p-host-new", channelId: "main",
-+      inviteToken: second.inviteToken, pairingCode: second.pairingCode,
-+    });
-+    assert.equal(joined.created, true);
-+  } finally {
-+    await db.recursiveDelete(db.doc(`parties/${partyId}`)).catch(() => undefined);
-+    await disposeEmulatorContext(app);
-+  }
-+});
-+
-+test("at most 3 active host devices per party; revocation frees capacity with an audit record", { skip: !HAS_FIRESTORE_EMULATOR }, async () => {
-+  const { app, db } = await createEmulatorContext();
-+  const partyId = randomPartyId();
-+  try {
-+    await seedTv(db, partyId, "tv-1", "main");
-+    const services = createHostJoinService({ db });
-+    const redeem = async (deviceId: string) => {
-+      const invite = await services.createHostInvite({ partyId, deviceId: "tv-1", channelId: "main" });
-+      return services.joinHost({
-+        partyId, deviceId, channelId: "main",
-+        inviteToken: invite.inviteToken, pairingCode: invite.pairingCode,
-+      });
-+    };
-+    for (const deviceId of ["p-host-1", "p-host-2", "p-host-3"]) {
-+      const joined = await redeem(deviceId);
-+      assert.equal(joined.created, true);
-+    }
-+    // Fourth redemption is denied until a host is revoked.
-+    const fourth = await services.createHostInvite({ partyId, deviceId: "tv-1", channelId: "main" });
-+    await assert.rejects(services.joinHost({
-+      partyId, deviceId: "p-host-4", channelId: "main",
-+      inviteToken: fourth.inviteToken, pairingCode: fourth.pairingCode,
-+    }), (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN");
-+    assert.equal((await db.doc(`parties/${partyId}/devices/p-host-4`).get()).exists, false);
-+
-+    // TV-only revocation: guests and strangers cannot revoke.
-+    await assert.rejects(services.revokeHostDevice({ partyId, deviceId: "p-host-1", channelId: "main", targetDeviceId: "p-host-2" }),
-+      (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN");
-+    await assert.rejects(services.revokeHostDevice({ partyId, deviceId: "nope", channelId: "main", targetDeviceId: "p-host-2" }),
-+      (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN");
-+
-+    // The TV revokes one host: device demoted, audit record written.
-+    const revoked = await services.revokeHostDevice({ partyId, deviceId: "tv-1", channelId: "main", targetDeviceId: "p-host-2" });
-+    assert.deepEqual(revoked, { partyId, targetDeviceId: "p-host-2", status: "revoked" });
-+    assert.equal((await db.doc(`parties/${partyId}/devices/p-host-2`).get()).data()?.status, "revoked");
-+    const audits = await db.collection(`parties/${partyId}/hostAudit`).where("targetDeviceId", "==", "p-host-2").get();
-+    assert.equal(audits.size, 1, "revocation must write exactly one audit record");
-+    assert.equal(audits.docs[0].data()?.action, "revoke");
-+    assert.equal(audits.docs[0].data()?.byDeviceId, "tv-1");
-+
-+    // The revoked host is denied on its next admin operation.
-+    await assert.rejects(assertRegisteredHostDevice(db, { partyId, deviceId: "p-host-2", channelId: "main" }),
-+      (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN");
-+
-+    // Capacity freed: the fourth phone redeems with a fresh invite.
-+    const fifth = await services.createHostInvite({ partyId, deviceId: "tv-1", channelId: "main" });
-+    const rejoined = await services.joinHost({
-+      partyId, deviceId: "p-host-4", channelId: "main",
-+      inviteToken: fifth.inviteToken, pairingCode: fifth.pairingCode,
-+    });
-+    assert.equal(rejoined.created, true);
-+    assert.equal(rejoined.role, "host");
-+  } finally {
-+    await db.recursiveDelete(db.doc(`parties/${partyId}`)).catch(() => undefined);
-+    await disposeEmulatorContext(app);
-+  }
-+});
-+
- test("legacy joinParty remains guest-only and never upgrades host devices", { skip: !HAS_FIRESTORE_EMULATOR }, async () => {
-   const { app, db } = await createEmulatorContext();
-   const partyId = randomPartyId();
-@@ -139,7 +301,10 @@ test("legacy joinParty remains guest-only and never upgrades host devices", { sk
-     const hosts = createHostJoinService({ db });
-     const joinParty = createJoinPartyService({ db });
-     const invite = await hosts.createHostInvite({ partyId, deviceId: "tv-1", channelId: "main" });
--    await hosts.joinHost({ partyId, deviceId: "p-host-1", channelId: "main", inviteToken: invite.inviteToken });
-+    await hosts.joinHost({
-+      partyId, deviceId: "p-host-1", channelId: "main",
-+      inviteToken: invite.inviteToken, pairingCode: invite.pairingCode,
-+    });
-     // A host device rejoining through the legacy path is rejected, not downgraded.
-     await assert.rejects(joinParty.joinParty({ partyId, deviceId: "p-host-1", channelId: "main" }),
-       (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN");
-diff --git a/backend/functions/test/host_media.test.ts b/backend/functions/test/host_media.test.ts
-index 70cab38a9a04bc83b509ba8def735e1562d95bf4..193d84f51fe3fba4965043c70b91efc68445377a 100644
---- a/backend/functions/test/host_media.test.ts
-+++ b/backend/functions/test/host_media.test.ts
-@@ -1,4 +1,5 @@
- import assert from "node:assert/strict";
-+import { readFile } from "node:fs/promises";
- import { resolve } from "node:path";
- import test from "node:test";
- import type { Bucket } from "@google-cloud/storage";
-@@ -28,6 +29,7 @@ function servicesFor(db: Firestore, bucket: Bucket) {
-     enqueueGeneration: async () => undefined,
-     pollIntervalMs: 1,
-     sleep: async () => undefined,
-+    signGuestUploadUrl: async (file) => `https://upload.invalid/${encodeURIComponent(file.name)}`,
-     signReadUrl: async (file) => `https://signed.invalid/${encodeURIComponent(file.name)}`,
-   });
- }
-@@ -39,7 +41,7 @@ async function seedHostParty(db: Firestore, partyId: string, channelId = "main")
-   await db.doc(`parties/${partyId}/devices/${tv}`).update({ role: "tv" });
-   const hosts = createHostJoinService({ db });
-   const invite = await hosts.createHostInvite({ partyId, deviceId: tv, channelId });
--  await hosts.joinHost({ partyId, deviceId: host, channelId, inviteToken: invite.inviteToken });
-+  await hosts.joinHost({ partyId, deviceId: host, channelId, inviteToken: invite.inviteToken, pairingCode: invite.pairingCode });
-   return { tv, host };
- }
- 
-@@ -144,6 +146,108 @@ test("host previews are separately referenced, TTL-limited, signed on demand, an
-   }
- });
- 
-+test("delete-then-preview and withdraw-then-preview are both denied with no resurrection", { skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST }, async () => {
-+  const { app, db, bucket } = await createEmulatorContext();
-+  const partyId = randomPartyId();
-+  try {
-+    const { host } = await seedHostParty(db, partyId);
-+    const services = servicesFor(db, bucket);
-+    const created = await services.generateHostVideo({ partyId, deviceId: host, channelId: "main", seedId: "seed-doomed", idempotencyKey: "idem-doomed" });
-+    await services.runGeneration({ partyId, deviceId: host, channelId: "main", jobId: created.jobId, idempotencyKey: "idem-doomed" });
-+    await services.getHostVideoPreview({ partyId, deviceId: host, channelId: "main", seedId: "seed-doomed" });
-+    const seedBefore = (await db.doc(`parties/${partyId}/seedVideos/seed-doomed`).get()).data()!;
-+    const previewPaths = [...(seedBefore.previewPaths as string[])];
-+    assert.ok(previewPaths.length === 4 && previewPaths.every((path) => path.includes("/hostPreviews/seed-doomed/")));
-+
-+    // Delete-then-preview: the seed is gone, the job is tombstoned, and no
-+    // preview is ever recreated.
-+    await services.deleteHostVideo({ partyId, deviceId: host, channelId: "main", seedIds: ["seed-doomed"] });
-+    for (const path of previewPaths) assert.equal((await bucket.file(path).exists())[0], false);
-+    await assert.rejects(services.getHostVideoPreview({ partyId, deviceId: host, channelId: "main", seedId: "seed-doomed" }),
-+      (e: unknown) => e instanceof BackendError && e.errorCode === "NOT_FOUND");
-+    assert.equal((await db.doc(`parties/${partyId}/seedVideos/seed-doomed`).get()).data()?.status, "deleted");
-+    for (const path of previewPaths) assert.equal((await bucket.file(path).exists())[0], false, "deleted preview must not resurrect");
-+
-+    // Withdraw-then-preview: a guest withdrawal fails the bound seed closed
-+    // and previews stay denied afterwards.
-+    const requested = await services.requestGuestUpload({
-+      partyId, deviceId: host, channelId: "main",
-+      consent: { accepted: true, textVersion: "host_source_v1", purpose: "host_source" },
++      consent: { accepted: true, textVersion: HOST_SOURCE_CONSENT_TEXT_VERSION, purpose: HOST_SOURCE_CONSENT_PURPOSE },
 +      contentType: "image/jpeg",
 +    });
-+    const photo = await readFile(resolve(__dirname, "fixtures/guest_photo.jpg"));
-+    await bucket.file(requested.objectPath).save(photo, { contentType: "image/jpeg" });
-+    await services.completeGuestUpload({ partyId, deviceId: host, channelId: "main", submissionId: requested.submissionId });
-+    await db.doc(`parties/${partyId}/seedVideos/seed-bound`).set({
-+      seedId: "seed-bound", partyId, deviceId: host, channelId: "main",
-+      jobId: "hv-seed-bound", status: "running", previewPaths: [],
++    await bucket.file(hostReq.objectPath).save(await photoBytes(), { contentType: "image/jpeg" });
++    await services.completeGuestUpload({ partyId, deviceId: "p-host-1", channelId: "main", submissionId: hostReq.submissionId });
++    const hostDoc = await assertGuestEligible(db, { partyId, deviceId: "p-host-1", channelId: "main" }, hostReq.submissionId, Date.now());
++    assert.equal(hostDoc.consent.textVersion, HOST_SOURCE_CONSENT_TEXT_VERSION);
++    assert.equal(hostDoc.consent.purpose, HOST_SOURCE_CONSENT_PURPOSE);
++    const guestStored = (await db.doc(`parties/${partyId}/guestMedia/${guestReq.submissionId}`).get()).data() as Record<string, Record<string, unknown>>;
++    const hostStored = (await db.doc(`parties/${partyId}/guestMedia/${hostReq.submissionId}`).get()).data() as Record<string, Record<string, unknown>>;
++    assert.equal(guestStored.attestation.role, "guest");
++    assert.equal(guestStored.attestation.textVersion, GUEST_CONSENT_TEXT_VERSION);
++    assert.equal(guestStored.attestation.purpose, GUEST_CONSENT_PURPOSE);
++    assert.equal(hostStored.attestation.role, "host");
++    assert.equal(hostStored.attestation.textVersion, HOST_SOURCE_CONSENT_TEXT_VERSION);
++    assert.equal(hostStored.attestation.purpose, HOST_SOURCE_CONSENT_PURPOSE);
++    assert.notEqual(guestStored.attestation.role, hostStored.attestation.role);
++    const mixedId = "gsub-mixedpair00000000000000001";
++    await db.doc(`parties/${partyId}/guestMedia/${mixedId}`).set({
++      submissionId: mixedId, partyId, deviceId: "p-guest-1", channelId: "main", status: "eligible",
++      consent: { accepted: true, textVersion: GUEST_CONSENT_TEXT_VERSION, purpose: HOST_SOURCE_CONSENT_PURPOSE, acceptedAt: new Date().toISOString(), deviceId: "p-guest-1" },
++      consentRevision: `${GUEST_CONSENT_TEXT_VERSION}:${new Date().toISOString()}`,
++      objectPath: `parties/${partyId}/guests/p-guest-1/ingest/${mixedId}/photo.jpg`,
++      contentType: "image/jpeg", expiresAt: new Date(Date.now() + 3600_000).toISOString(),
++      sourceHash: "a".repeat(64), sourceSizeBytes: 100,
 +    });
-+    await db.doc(`parties/${partyId}/jobs/hv-seed-bound`).set({
-+      jobId: "hv-seed-bound", partyId, deviceId: host, channelId: "main", state: "running",
-+      manifestVersion: 1, idempotencyKey: "idem-bound",
-+      guestMedia: { submissionId: requested.submissionId },
++    await assert.rejects(assertGuestEligible(db, { partyId, deviceId: "p-guest-1", channelId: "main" }, mixedId, Date.now()),
++      (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN");
++    const unknownId = "gsub-unknownpair0000000000000001";
++    await db.doc(`parties/${partyId}/guestMedia/${unknownId}`).set({
++      submissionId: unknownId, partyId, deviceId: "p-guest-1", channelId: "main", status: "eligible",
++      consent: { accepted: true, textVersion: "v9", purpose: GUEST_CONSENT_PURPOSE, acceptedAt: new Date().toISOString(), deviceId: "p-guest-1" },
++      consentRevision: `v9:${new Date().toISOString()}`,
++      objectPath: `parties/${partyId}/guests/p-guest-1/ingest/${unknownId}/photo.jpg`,
++      contentType: "image/jpeg", expiresAt: new Date(Date.now() + 3600_000).toISOString(),
++      sourceHash: "b".repeat(64), sourceSizeBytes: 100,
 +    });
-+    await services.withdrawGuestMedia({ partyId, deviceId: host, channelId: "main", submissionId: requested.submissionId });
-+    assert.equal((await db.doc(`parties/${partyId}/seedVideos/seed-bound`).get()).data()?.status, "failed");
-+    await assert.rejects(services.getHostVideoPreview({ partyId, deviceId: host, channelId: "main", seedId: "seed-bound" }),
-+      (e: unknown) => e instanceof BackendError && (e.errorCode === "NOT_FOUND" || e.errorCode === "CLIP_EXPIRED"));
++    await assert.rejects(assertGuestEligible(db, { partyId, deviceId: "p-guest-1", channelId: "main" }, unknownId, Date.now()),
++      (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN");
 +  } finally {
 +    await clearParty(db, bucket, partyId);
 +    await disposeEmulatorContext(app);
 +  }
 +});
-+
-+test("ACK-first-then-preview returns a typed error; publish-then-ACK keeps previews available", { skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST }, async () => {
-+  const { app, db, bucket } = await createEmulatorContext();
-+  const partyId = randomPartyId();
-+  try {
-+    // Case 1: delivery ACK purges bytes before any preview was materialized
-+    // (no seed catalog entry, nothing to copy eagerly). A later preview
-+    // attempt surfaces a typed outcome, never a raw storage INTERNAL.
-+    {
-+      const { host } = await seedHostParty(db, partyId);
-+      const services = servicesFor(db, bucket);
-+      const created = await services.generateHostVideo({ partyId, deviceId: host, channelId: "main", seedId: "seed-ack-first", idempotencyKey: "idem-ack-first" });
-+      await services.runGeneration({ partyId, deviceId: host, channelId: "main", jobId: created.jobId, idempotencyKey: "idem-ack-first" });
-+      const manifest = (await db.doc(`parties/${partyId}/manifests/current_main`).get()).data()!;
-+      const clipHashes = Object.fromEntries(
-+        (manifest.cameraClips as Array<{ cameraId: string; sha256: string }>).map((clip) => [clip.cameraId, clip.sha256]),
-+      );
-+      // Remove the seed catalog entry so the ACK eager pass has no live seed
-+      // to copy for (simulates a preview that was never materialized).
-+      await db.doc(`parties/${partyId}/seedVideos/seed-ack-first`).delete();
-+      await services.acknowledgeDelivery({ partyId, deviceId: host, channelId: "main", manifestVersion: manifest.version, clipHashes });
-+      await assert.rejects(services.getHostVideoPreview({ partyId, deviceId: host, channelId: "main", seedId: "seed-ack-first" }),
-+        (e: unknown) => e instanceof BackendError && (e.errorCode === "NOT_FOUND" || e.errorCode === "CLIP_EXPIRED"));
-+    }
-+    await clearParty(db, bucket, partyId);
-+    // Case 2: publish-then-ACK keeps the preview available because the ACK
-+    // eagerly copies delivery bytes to hostPreviews before purging.
-+    {
-+      const { host } = await seedHostParty(db, partyId);
-+      const services = servicesFor(db, bucket);
-+      const created = await services.generateHostVideo({ partyId, deviceId: host, channelId: "main", seedId: "seed-eager", idempotencyKey: "idem-eager" });
-+      await services.runGeneration({ partyId, deviceId: host, channelId: "main", jobId: created.jobId, idempotencyKey: "idem-eager" });
-+      const manifest = (await db.doc(`parties/${partyId}/manifests/current_main`).get()).data()!;
-+      const deliveryPaths = (manifest.cameraClips as Array<{ objectPath: string }>).map((clip) => clip.objectPath);
-+      const clipHashes = Object.fromEntries(
-+        (manifest.cameraClips as Array<{ cameraId: string; sha256: string }>).map((clip) => [clip.cameraId, clip.sha256]),
-+      );
-+      // No preview materialized yet: the ACK itself must copy eagerly.
-+      const seedBefore = (await db.doc(`parties/${partyId}/seedVideos/seed-eager`).get()).data()!;
-+      assert.deepEqual(seedBefore.previewPaths ?? [], []);
-+      await services.acknowledgeDelivery({ partyId, deviceId: host, channelId: "main", manifestVersion: manifest.version, clipHashes });
-+      for (const path of deliveryPaths) assert.equal((await bucket.file(path).exists())[0], false, "delivery bytes must be purged");
-+      const preview = await services.getHostVideoPreview({ partyId, deviceId: host, channelId: "main", seedId: "seed-eager" });
-+      assert.equal(preview.clips.length, 4);
-+      assert.ok(preview.clips.every((clip) => clip.url.includes("hostPreviews")));
-+    }
-+  } finally {
-+    await clearParty(db, bucket, partyId);
-+    await disposeEmulatorContext(app);
-+  }
-+});
-+
- test("host deletion removes seeds and objects, revokes manifests, preserves accounting, and blocks races", { skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST }, async () => {
-   const { app, db, bucket } = await createEmulatorContext();
-   const partyId = randomPartyId();
-diff --git a/backend/functions/test/retention.test.ts b/backend/functions/test/retention.test.ts
-index 68e46e4ec5e5220c154e181a8f5237189bedc833..ad533fd567d3b573e28cf121ba9ae4dc31212e9d 100644
---- a/backend/functions/test/retention.test.ts
-+++ b/backend/functions/test/retention.test.ts
-@@ -69,6 +69,36 @@ test("host seed previews are protected while live and purged after expiry", { sk
-   }
- });
- 
-+test("lapsed host invites expire via the sweep (Firestore TTL policy defense-in-depth)", { skip: !HAS_FIRESTORE_EMULATOR }, async () => {
-+  const { app, db, bucket } = await createEmulatorContext();
-+  const partyId = randomPartyId();
-+  try {
-+    await seedParty(db, partyId, "tv-1", "main");
-+    const past = Timestamp.fromDate(new Date(Date.now() - 1000));
-+    const future = Timestamp.fromDate(new Date(Date.now() + 60 * 60 * 1000));
-+    await db.doc(`parties/${partyId}/hostInvites/deadbeefdeadbeefdeadbeefdeadbeef`).set({
-+      inviteId: "deadbeefdeadbeefdeadbeefdeadbeef",
-+      tokenHash: "a".repeat(64),
-+      pairingCodeHash: "b".repeat(64),
-+      pairingSalt: "c".repeat(32),
-+      partyId, channelId: "main", status: "pending", createdByDevice: "tv-1", usedByDevice: null, expiresAt: past,
-+    });
-+    await db.doc(`parties/${partyId}/hostInvites/livefeedlivefeedlivefeedlivefeed`).set({
-+      inviteId: "livefeedlivefeedlivefeedlivefeed",
-+      tokenHash: "d".repeat(64),
-+      pairingCodeHash: "e".repeat(64),
-+      pairingSalt: "f".repeat(32),
-+      partyId, channelId: "main", status: "pending", createdByDevice: "tv-1", usedByDevice: null, expiresAt: future,
-+    });
-+    await sweepExpiredMedia(db, bucket, new Date());
-+    assert.equal((await db.doc(`parties/${partyId}/hostInvites/deadbeefdeadbeefdeadbeefdeadbeef`).get()).data()?.status, "expired");
-+    assert.equal((await db.doc(`parties/${partyId}/hostInvites/livefeedlivefeedlivefeedlivefeed`).get()).data()?.status, "pending");
-+  } finally {
-+    await clearParty(db, bucket, partyId);
-+    await disposeEmulatorContext(app);
-+  }
-+});
-+
- test("revoked-manifest objects are retried for deletion, never protected", { skip: !HAS_FIRESTORE_EMULATOR }, async () => {
-   const { app, db, bucket } = await createEmulatorContext();
-   const partyId = randomPartyId();
-diff --git a/backend/functions/test/security_rules.test.ts b/backend/functions/test/security_rules.test.ts
-index d5f992eb2e42d712f3eb3a02e42821d23d4548ac..23ca0f60069b062656cfdf4c59d6ac3f7ff1c191 100644
---- a/backend/functions/test/security_rules.test.ts
-+++ b/backend/functions/test/security_rules.test.ts
-@@ -114,29 +114,68 @@ test("anonymous clients cannot read or mutate host invites and seed catalog reco
-       await setDoc(doc(firestore, "parties/host-party/seedVideos/seed-1"), {
-         seedId: "seed-1", partyId: "host-party", channelId: "main", status: "ready",
-       });
-+      await setDoc(doc(firestore, "parties/other-party"), { status: "active", activeChannelId: "main" });
-+      await setDoc(doc(firestore, "parties/other-party/hostInvites/invite-9"), {
-+        tokenHash: "b".repeat(64), partyId: "other-party", channelId: "main", status: "pending",
-+      });
-     });
--    const client = env.unauthenticatedContext().firestore();
--    await assertFails(getDoc(doc(client, "parties/host-party/hostInvites/invite-1")));
--    await assertFails(setDoc(doc(client, "parties/host-party/hostInvites/invite-1"), { status: "redeemed" }));
--    await assertFails(getDoc(doc(client, "parties/host-party/seedVideos/seed-1")));
--    await assertFails(setDoc(doc(client, "parties/host-party/seedVideos/seed-1"), { status: "deleted" }));
--    await assertFails(setDoc(doc(client, "parties/host-party/seedVideos/forged"), { status: "ready" }));
-+    // Every caller context is denied: unauthenticated AND device-authed AND
-+    // cross-party. No direct client reads, writes, or listing on invites or
-+    // the seed catalog; all access is callable-only through the Admin SDK.
-+    for (const client of [env.unauthenticatedContext().firestore(), env.authenticatedContext("tv-1").firestore()]) {
-+      await assertFails(getDoc(doc(client, "parties/host-party/hostInvites/invite-1")));
-+      await assertFails(setDoc(doc(client, "parties/host-party/hostInvites/invite-1"), { status: "redeemed" }));
-+      await assertFails(setDoc(doc(client, "parties/host-party/hostInvites/forged"), { status: "pending" }));
-+      await assertFails(getDocs(collection(client, "parties/host-party/hostInvites")));
-+      await assertFails(getDoc(doc(client, "parties/host-party/seedVideos/seed-1")));
-+      await assertFails(setDoc(doc(client, "parties/host-party/seedVideos/seed-1"), { status: "deleted" }));
-+      await assertFails(setDoc(doc(client, "parties/host-party/seedVideos/forged"), { status: "ready" }));
-+      await assertFails(getDocs(collection(client, "parties/host-party/seedVideos")));
-+      // Cross-party reads are denied from every context as well.
-+      await assertFails(getDoc(doc(client, "parties/other-party/hostInvites/invite-9")));
-+    }
-   } finally {
-     await env.cleanup();
-   }
- });
- 
--test("storage rules keep the host-preview prefix denied for direct access", async () => {
--  const rules = await readFile(resolve(__dirname, "../../storage.rules"), "utf8");
--  // Host previews ride the catch-all deny: no direct client reads/writes.
--  // Signed preview URLs bypass rules with backend validation, exactly like
--  // delivery URLs; the backend never persists them.
--  assert.ok(rules.includes("allow read, write: if false"), "storage rules deny direct access by default");
--});
--
--test("storage rules keep the guest-ingest prefix denied for direct access", async () => {
-+test("storage rules deny read/write/list on host previews for every caller context", { skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST }, async () => {
-+  const host = emulatorHost();
-+  // STORAGE_EMULATOR_HOST may carry an http(s) scheme in newer firebase-tools.
-+  const [storageHost, rawStoragePort] = (process.env.STORAGE_EMULATOR_HOST ?? "127.0.0.1:9199").replace(/^https?:\/\//, "").split(":");
-   const rules = await readFile(resolve(__dirname, "../../storage.rules"), "utf8");
--  assert.ok(rules.includes("guests/{deviceId}/ingest"), "storage rules carry an explicit guest-ingest section");
--  const guestSection = rules.slice(rules.indexOf("guests/{deviceId}/ingest"));
--  assert.ok(guestSection.includes("allow read, write: if false"), "guest ingest stays denied for direct reads/writes/deletes");
-+  const env: RulesTestEnvironment = await initializeTestEnvironment({
-+    projectId: PROJECT_ID,
-+    firestore: { host: host.host, port: host.port },
-+    storage: { host: storageHost, port: Number(rawStoragePort ?? 9199), rules },
-+  });
-+  const previewPath = (party: string) => `parties/${party}/hostPreviews/seed-1/CAM-01.mp4`;
-+  try {
-+    // Seed preview bytes with rules disabled (Admin SDK equivalent).
-+    await env.withSecurityRulesDisabled(async (context) => {
-+      const storage = context.storage();
-+      await storage.ref(previewPath("host-party")).put(new Uint8Array([1, 2, 3, 4]));
-+    });
-+    // Host previews ride the catch-all deny: no direct client reads, writes,
-+    // listing, or deletes. Signed preview URLs bypass rules with backend
-+    // validation, exactly like delivery URLs; the backend never persists them.
-+    // Denied for unauthenticated AND device-authed callers alike.
-+    for (const context of [env.unauthenticatedContext(), env.authenticatedContext("tv-1")]) {
-+      const storage = context.storage();
-+      await assertFails(storage.ref(previewPath("host-party")).getDownloadURL());
-+      await assertFails(storage.ref(previewPath("host-party")).getMetadata());
-+      await assertFails(storage.ref(previewPath("host-party")).put(new Uint8Array([9])).then(() => undefined));
-+      await assertFails(storage.ref(previewPath("host-party")).delete());
-+      await assertFails(storage.ref("parties/host-party/hostPreviews/seed-1").listAll());
-+      // Cross-party preview objects are denied from every context as well.
-+      await assertFails(storage.ref(previewPath("other-party")).getDownloadURL());
-+      await assertFails(storage.ref(previewPath("other-party")).put(new Uint8Array([9])).then(() => undefined));
-+      // The guest-ingest prefix stays denied for direct reads/writes/deletes
-+      // in every context (signed PUT capabilities bypass rules instead).
-+      await assertFails(storage.ref("parties/host-party/guests/p-1/ingest/gsub-1/photo.jpg").getDownloadURL());
-+      await assertFails(storage.ref("parties/host-party/guests/p-1/ingest/gsub-1/photo.jpg").put(new Uint8Array([9])).then(() => undefined));
-+    }
-+  } finally {
-+    await env.cleanup();
-+  }
- });
-diff --git a/docs/backend-contract-v1.md b/docs/backend-contract-v1.md
-index 1383255bf1e3e40e21da47f2f26ce7dfaa042a3a..c32662bc14f063de22c628b5aa5b2bd1fb1fe248 100644
---- a/docs/backend-contract-v1.md
-+++ b/docs/backend-contract-v1.md
-@@ -36,6 +36,7 @@ an idempotency key.
- | `withdrawGuestMedia` | callable | party/device-scoped guest |
- | `createHostInvite` | callable | registered TV only |
- | `joinHost` | callable | phone with a valid host invite |
-+| `revokeHostDevice` | callable | registered TV only |
- | `listHostVideos` | callable | registered host only |
- | `generateHostVideo` | callable | registered host only |
- | `getHostVideoPreview` | callable | registered host only |
-@@ -106,14 +107,30 @@ Firestore role, and the callable gates all distinguish host from guest.
-   registered device with `role: "tv"`, else `FORBIDDEN`) mints a short-lived
-   (`HOST_INVITE_TTL_MS`, 5 minutes) invite. The token (`hi-…`) is returned
-   once; only its SHA-256 hash is stored at
--  `parties/{partyId}/hostInvites/{inviteId}`, bound to party/channel/expiry.
--- `joinHost { partyId, deviceId, channelId, inviteToken }` redeems the invite
-+  `parties/{partyId}/hostInvites/{inviteId}`, bound to party/channel/expiry,
-+  alongside a salted hash of a server-minted 6-digit `pairingCode` (also
-+  returned once, displayed next to the HOST QR on the TV, same 5-minute
-+  TTL). Minting a new invite supersedes older pending invites for the same
-+  party/channel. Invite docs carry `expiresAt` for the Firestore TTL policy
-+  plus the retention-sweep expiry pass.
-+- `joinHost { partyId, deviceId, channelId, inviteToken, pairingCode }`
-+  redeems the invite
-   transactionally for a separate phone identity with the server-assigned
--  host role. Same-device redemption retries are idempotent (`created:
-+  host role. BOTH halves are required: a wrong or missing pairing code
-+  denies generically with the same error as an unknown invite (no oracle).
-+  Same-device redemption retries are idempotent (`created:
-   false`); other-device replay, expiry, cross-party/cross-channel reuse,
--  guest PIN reuse (six-digit strings are shape-rejected as tokens), and
-+  guest PIN reuse (six-digit strings are shape-rejected as tokens),
-+  over-capacity redemption (max 3 active host devices per party; further
-+  redemption is denied until a host is revoked), and
-   client-supplied role fields (ignored; the role is always written
--  server-side) can never grant host access.
-+  server-side) can never grant host access. Redemption records
-+  `redeemedFromInviteId`/`redeemedAt` on the device doc.
-+- `revokeHostDevice { partyId, deviceId, targetDeviceId }` (TV-only caller:
-+  same registered-TV gate as `createHostInvite`) demotes a host device doc
-+  (`status: "revoked"`) and writes a `parties/{partyId}/hostAudit` audit
-+  record. A revoked host fails the registered-host gate on its next admin
-+  operation.
- - Legacy `joinParty` remains guest-only: it writes `role: "guest"`
-   server-side, rejects re-registration of non-guest (host/tv) device docs,
-   and never upgrades a role.
-@@ -216,7 +233,9 @@ Admin SDK. Direct client device writes stay denied by `firestore.rules`.
- - `listPartyDevices` (TV-only caller, unchanged gate `device.role === "tv"`;
-   guests get `FORBIDDEN`) response gains OPTIONAL `"joinPin"` (string when a
-   PIN is configured, absent otherwise). Device entries are
--  `{ deviceId, label?, role, status }`; `label` may be absent or empty for
-+  `{ deviceId, label?, role, status }` and contain ONLY active guest devices
-+  (`role === "guest"` AND `status === "active"`): tv/host deviceIds are never
-+  returned. `label` may be absent or empty for
-   self-registered guests — readers must fall back to a neutral device-based
-   display, never duplicate the id as label+value, never prompt for names.
-   Device `label` is reserved for later: omit it on create, tolerate
-@@ -257,11 +276,15 @@ Anonymous registered-device bearer model: no Firebase Auth, no login, no
- display name. The same party/device/channel registration gate authorizes every
- guest callable.
- 
--- `requestGuestUpload { partyId, deviceId, channelId, consent: { accepted: true, textVersion: "v1", purpose: "guest_cameo" }, contentType: "image/jpeg"|"image/png" }`
-+- `requestGuestUpload { partyId, deviceId, channelId, consent: { accepted: true, textVersion, purpose }, contentType: "image/jpeg"|"image/png" }`
-   records affirmative consent server-side (consent-text version, purpose,
-   timestamps, device binding, `pending_upload` status, 15-minute expiry) BEFORE
-   issuing a narrowly scoped short-lived signed PUT capability bound to the
--  server-generated object path and the content type. The capability is returned
-+  server-generated object path and the content type. Consent is namespaced by
-+  caller role: guests use `v1` / `guest_cameo`, host-originated source
-+  uploads use `host_source_v1` / `host_source` (with an attestation copy
-+  recording text, purpose, and role at acceptance); the pairs never mix
-+  across roles and both are enforced at completion eligibility. The capability is returned
-   and never persisted in Firestore or logs.
- - `completeGuestUpload { partyId, deviceId, channelId, submissionId }` verifies
-   the actual image bytes (JPEG/PNG magic, size within 10 MB), SHA-256, object
-diff --git a/test/fixtures/join_roles_v1.json b/test/fixtures/join_roles_v1.json
-index 3bca1239c6de0f0be72e34c99d7783bd05f52ccf..d133d83be7a495572df4e53554742e93d25bb431 100644
---- a/test/fixtures/join_roles_v1.json
-+++ b/test/fixtures/join_roles_v1.json
-@@ -1 +1 @@
--{"callables":["createHostInvite","joinHost","listHostVideos","generateHostVideo","getHostVideoPreview","deleteHostVideo"],"createHostInvite":{"request":{"channelId":"main","deviceId":"tv-pilot","partyId":"pilot"},"response":{"channelId":"main","expiresAt":"<iso8601>","inviteToken":"<server-minted hi-... capability>","partyId":"pilot"}},"guestJoin":{"request":{"channelId":"main","deviceId":"p-guest-1","joinPin":"004201","partyId":"pilot"},"response":{"channelId":"main","created":true,"deviceId":"p-guest-1","partyId":"pilot","role":"guest","status":"active"}},"hostJoin":{"request":{"channelId":"main","deviceId":"p-host-1","inviteToken":"<server-minted hi-... capability>","partyId":"pilot"},"response":{"channelId":"main","created":true,"deviceId":"p-host-1","partyId":"pilot","role":"host","status":"active"}},"notes":"Only a registered TV may mint a host invite (short-lived, token hash stored, party/channel/expiry bound). Redemption is transactional for a separate phone identity with the server-assigned host role; same-device retries are idempotent, other-device replay, expiry, guest PIN reuse, and client-only role changes never grant host. Legacy joinParty remains guest-only."}
-\ No newline at end of file
-+{"callables":["createHostInvite","joinHost","revokeHostDevice","listHostVideos","generateHostVideo","getHostVideoPreview","deleteHostVideo"],"createHostInvite":{"request":{"channelId":"main","deviceId":"tv-pilot","partyId":"pilot"},"response":{"channelId":"main","expiresAt":"<iso8601>","inviteToken":"<server-minted hi-... capability>","pairingCode":"<server-minted 6-digit code>","partyId":"pilot"}},"guestJoin":{"request":{"channelId":"main","deviceId":"p-guest-1","joinPin":"000000","partyId":"pilot"},"response":{"channelId":"main","created":true,"deviceId":"p-guest-1","partyId":"pilot","role":"guest","status":"active"}},"hostJoin":{"request":{"channelId":"main","deviceId":"p-host-1","inviteToken":"<server-minted hi-... capability>","pairingCode":"<server-minted 6-digit code>","partyId":"pilot"},"response":{"channelId":"main","created":true,"deviceId":"p-host-1","partyId":"pilot","role":"host","status":"active"}},"notes":"Only a registered TV may mint a host invite (short-lived, token hash + salted pairing-code hash stored, party/channel/expiry bound, max 3 active hosts per party). The invite response gains a server-minted 6-digit pairingCode shown next to the HOST QR; redemption requires both halves and is transactional for a separate phone identity with the server-assigned host role; same-device retries are idempotent, other-device replay, expiry, guest PIN reuse, wrong/missing pairing codes, over-capacity redemption, and client-only role changes never grant host. The TV may revoke a host device (revokeHostDevice, demote + audit record); revoked hosts fail the registered-host gate. The guest joinPin here is an obviously-fake placeholder (000000), never a live credential; behavioural role coverage lives in the emulator tests (host_join.test.ts), not in this JSON. Legacy joinParty remains guest-only."}
-\ No newline at end of file

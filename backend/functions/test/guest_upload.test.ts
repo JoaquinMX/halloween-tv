@@ -5,8 +5,9 @@ import { resolve } from "node:path";
 import test from "node:test";
 import type { Bucket, File } from "@google-cloud/storage";
 import type { Firestore } from "firebase-admin/firestore";
-import { BackendError } from "../src/contracts";
+import { BackendError, HOST_SOURCE_CONSENT_PURPOSE, HOST_SOURCE_CONSENT_TEXT_VERSION } from "../src/contracts";
 import { GUEST_CONSENT_PURPOSE, GUEST_CONSENT_TEXT_VERSION, GUEST_MAX_IMAGE_BYTES } from "../src/config";
+import { assertGuestEligible } from "../src/guest_media";
 import { createRuntimeServices } from "../src/runtime";
 import { FakeVideoGenerationPort } from "../src/providers/fake";
 import { sweepExpiredMedia } from "../src/retention";
@@ -697,6 +698,71 @@ test("withdrawal deletes retained host previews and fails the bound seed closed"
     assert.equal((await bucket.file(previewPath).exists())[0], false);
     assert.equal((await db.doc(`parties/${partyId}/seedVideos/seed-bound`).get()).data()?.status, "failed");
     assert.equal((await db.doc(`parties/${partyId}/jobs/${jobId}`).get()).data()?.hostDeleted, true);
+  } finally {
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+  }
+});
+
+test("eligibility gate accepts guest + host pairs, rejects mismatched/unknown pairs", {
+  skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
+}, async () => {
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  try {
+    await seedParty(db, partyId, "p-guest-1", "main");
+    await seedParty(db, partyId, "p-host-1", "main");
+    await db.doc(`parties/${partyId}/devices/p-host-1`).update({ role: "host" });
+    const services = servicesFor(db, bucket);
+    const guestReq = await services.requestGuestUpload({
+      partyId, deviceId: "p-guest-1", channelId: "main", consent: CONSENT, contentType: "image/jpeg",
+    });
+    await bucket.file(guestReq.objectPath).save(await photoBytes(), { contentType: "image/jpeg" });
+    await services.completeGuestUpload({ partyId, deviceId: "p-guest-1", channelId: "main", submissionId: guestReq.submissionId });
+    const guestDoc = await assertGuestEligible(db, { partyId, deviceId: "p-guest-1", channelId: "main" }, guestReq.submissionId, Date.now());
+    assert.equal(guestDoc.consent.textVersion, GUEST_CONSENT_TEXT_VERSION);
+    assert.equal(guestDoc.consent.purpose, GUEST_CONSENT_PURPOSE);
+    const hostReq = await services.requestGuestUpload({
+      partyId, deviceId: "p-host-1", channelId: "main",
+      consent: { accepted: true, textVersion: HOST_SOURCE_CONSENT_TEXT_VERSION, purpose: HOST_SOURCE_CONSENT_PURPOSE },
+      contentType: "image/jpeg",
+    });
+    await bucket.file(hostReq.objectPath).save(await photoBytes(), { contentType: "image/jpeg" });
+    await services.completeGuestUpload({ partyId, deviceId: "p-host-1", channelId: "main", submissionId: hostReq.submissionId });
+    const hostDoc = await assertGuestEligible(db, { partyId, deviceId: "p-host-1", channelId: "main" }, hostReq.submissionId, Date.now());
+    assert.equal(hostDoc.consent.textVersion, HOST_SOURCE_CONSENT_TEXT_VERSION);
+    assert.equal(hostDoc.consent.purpose, HOST_SOURCE_CONSENT_PURPOSE);
+    const guestStored = (await db.doc(`parties/${partyId}/guestMedia/${guestReq.submissionId}`).get()).data() as Record<string, Record<string, unknown>>;
+    const hostStored = (await db.doc(`parties/${partyId}/guestMedia/${hostReq.submissionId}`).get()).data() as Record<string, Record<string, unknown>>;
+    assert.equal(guestStored.attestation.role, "guest");
+    assert.equal(guestStored.attestation.textVersion, GUEST_CONSENT_TEXT_VERSION);
+    assert.equal(guestStored.attestation.purpose, GUEST_CONSENT_PURPOSE);
+    assert.equal(hostStored.attestation.role, "host");
+    assert.equal(hostStored.attestation.textVersion, HOST_SOURCE_CONSENT_TEXT_VERSION);
+    assert.equal(hostStored.attestation.purpose, HOST_SOURCE_CONSENT_PURPOSE);
+    assert.notEqual(guestStored.attestation.role, hostStored.attestation.role);
+    const mixedId = "gsub-mixedpair00000000000000001";
+    await db.doc(`parties/${partyId}/guestMedia/${mixedId}`).set({
+      submissionId: mixedId, partyId, deviceId: "p-guest-1", channelId: "main", status: "eligible",
+      consent: { accepted: true, textVersion: GUEST_CONSENT_TEXT_VERSION, purpose: HOST_SOURCE_CONSENT_PURPOSE, acceptedAt: new Date().toISOString(), deviceId: "p-guest-1" },
+      consentRevision: `${GUEST_CONSENT_TEXT_VERSION}:${new Date().toISOString()}`,
+      objectPath: `parties/${partyId}/guests/p-guest-1/ingest/${mixedId}/photo.jpg`,
+      contentType: "image/jpeg", expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+      sourceHash: "a".repeat(64), sourceSizeBytes: 100,
+    });
+    await assert.rejects(assertGuestEligible(db, { partyId, deviceId: "p-guest-1", channelId: "main" }, mixedId, Date.now()),
+      (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN");
+    const unknownId = "gsub-unknownpair0000000000000001";
+    await db.doc(`parties/${partyId}/guestMedia/${unknownId}`).set({
+      submissionId: unknownId, partyId, deviceId: "p-guest-1", channelId: "main", status: "eligible",
+      consent: { accepted: true, textVersion: "v9", purpose: GUEST_CONSENT_PURPOSE, acceptedAt: new Date().toISOString(), deviceId: "p-guest-1" },
+      consentRevision: `v9:${new Date().toISOString()}`,
+      objectPath: `parties/${partyId}/guests/p-guest-1/ingest/${unknownId}/photo.jpg`,
+      contentType: "image/jpeg", expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+      sourceHash: "b".repeat(64), sourceSizeBytes: 100,
+    });
+    await assert.rejects(assertGuestEligible(db, { partyId, deviceId: "p-guest-1", channelId: "main" }, unknownId, Date.now()),
+      (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN");
   } finally {
     await clearParty(db, bucket, partyId);
     await disposeEmulatorContext(app);

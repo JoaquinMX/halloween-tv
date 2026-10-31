@@ -3,8 +3,8 @@ import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import test from "node:test";
 import { createGenerationServices } from "../src/generation";
-import { REQUIRED_CAMERA_IDS } from "../src/config";
-import { BackendError } from "../src/contracts";
+import { GUEST_CONSENT_PURPOSE, GUEST_CONSENT_TEXT_VERSION, REQUIRED_CAMERA_IDS } from "../src/config";
+import { BackendError, HOST_SOURCE_CONSENT_PURPOSE, HOST_SOURCE_CONSENT_TEXT_VERSION } from "../src/contracts";
 import { FakeVideoGenerationPort } from "../src/providers/fake";
 import { ProviderResult, ProviderTaskStatus, VideoGenerationRequest } from "../src/video_generation_port";
 import { reconcileUsage, usageLedgerId } from "../src/usage";
@@ -438,6 +438,64 @@ test("lazy provider fallback threads fixtureDirectory through both construction 
     }
   } finally {
     await removeNormalizedVideo(expected).catch(() => undefined);
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+  }
+});
+
+test("requestGeneration gate accepts host-consented sources and rejects mismatched pairs", {
+  skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
+}, async () => {
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  async function seedEligible(submissionId: string, deviceId: string, textVersion: string, purpose: string): Promise<void> {
+    await db.doc(`parties/${partyId}/guestMedia/${submissionId}`).set({
+      submissionId, partyId, deviceId, channelId: "main", status: "eligible",
+      consent: { accepted: true, textVersion, purpose, acceptedAt: new Date().toISOString(), deviceId },
+      consentRevision: `${textVersion}:${new Date().toISOString()}`,
+      objectPath: `parties/${partyId}/guests/${deviceId}/ingest/${submissionId}/photo.jpg`,
+      contentType: "image/jpeg", expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+      sourceHash: "a".repeat(64), sourceSizeBytes: 100,
+    });
+  }
+  try {
+    await seedParty(db, partyId, "tv-main", "main");
+    await seedParty(db, partyId, "p-host-1", "main");
+    await db.doc(`parties/${partyId}/devices/p-host-1`).update({ role: "host" });
+    const services = createGenerationServices({ db, bucket, provider: new FakeVideoGenerationPort() });
+    // Guest pair still passes the request gate (byte-identical legacy behavior).
+    await seedEligible("gsub-guestpass000000000000001", "tv-main", GUEST_CONSENT_TEXT_VERSION, GUEST_CONSENT_PURPOSE);
+    const guestReq = await services.requestGeneration({
+      partyId, deviceId: "tv-main", channelId: "main", jobId: "job-guest-pass",
+      idempotencyKey: "idem-guest-pass", presetId: "cheap_demo", guestMediaId: "gsub-guestpass000000000000001",
+    });
+    assert.equal(guestReq.created, true);
+    await db.doc(`parties/${partyId}/jobs/job-guest-pass`).delete().catch(() => undefined);
+    await db.doc(`parties/${partyId}/generationBudget/active`).delete().catch(() => undefined);
+    // Host pair passes the request gate (same isSupportedConsent semantics).
+    await seedEligible("gsub-hostpass0000000000000001", "p-host-1", HOST_SOURCE_CONSENT_TEXT_VERSION, HOST_SOURCE_CONSENT_PURPOSE);
+    const hostReq = await services.requestGeneration({
+      partyId, deviceId: "p-host-1", channelId: "main", jobId: "job-host-pass",
+      idempotencyKey: "idem-host-pass", presetId: "cheap_demo", guestMediaId: "gsub-hostpass0000000000000001",
+    });
+    assert.equal(hostReq.created, true);
+    const binding = (await db.doc(`parties/${partyId}/jobs/job-host-pass`).get()).data()?.guestMedia as Record<string, unknown>;
+    assert.equal(binding.submissionId, "gsub-hostpass0000000000000001");
+    await db.doc(`parties/${partyId}/jobs/job-host-pass`).delete().catch(() => undefined);
+    await db.doc(`parties/${partyId}/generationBudget/active`).delete().catch(() => undefined);
+    // Mismatched pair fails the request gate.
+    await seedEligible("gsub-mixedfail000000000000001", "tv-main", GUEST_CONSENT_TEXT_VERSION, HOST_SOURCE_CONSENT_PURPOSE);
+    await assert.rejects(services.requestGeneration({
+      partyId, deviceId: "tv-main", channelId: "main", jobId: "job-mixed-fail",
+      idempotencyKey: "idem-mixed-fail", presetId: "cheap_demo", guestMediaId: "gsub-mixedfail000000000000001",
+    }), (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN");
+    // Unknown version fails the request gate.
+    await seedEligible("gsub-unknownfail0000000000001", "tv-main", "v9", GUEST_CONSENT_PURPOSE);
+    await assert.rejects(services.requestGeneration({
+      partyId, deviceId: "tv-main", channelId: "main", jobId: "job-unknown-fail",
+      idempotencyKey: "idem-unknown-fail", presetId: "cheap_demo", guestMediaId: "gsub-unknownfail0000000000001",
+    }), (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN");
+  } finally {
     await clearParty(db, bucket, partyId);
     await disposeEmulatorContext(app);
   }

@@ -238,6 +238,9 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
     throw new BackendError("FORBIDDEN", "Guest consent was withdrawn; the bound generation job is discarded.");
   }
 
+  // Worker-submission consent gate: delegates to the namespaced eligibility
+  // helper (guest v1/guest_cameo or host host_source_v1/host_source), so
+  // host-originated sources pass the same gate as guest sources.
   async function recheckGuestConsent(
     partyId: string,
     jobId: string,

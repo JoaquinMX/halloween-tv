@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { FieldValue } from "firebase-admin/firestore";
-import { BackendError, CanonicalClip, DeliveryManifest, validateCanonicalClips } from "./contracts";
-import { GUEST_CONSENT_PURPOSE, GUEST_CONSENT_TEXT_VERSION, GUEST_PROVIDER_CAMERA_ID, SCHEMA_VERSION, REQUIRED_CAMERA_IDS } from "./config";
+import { BackendError, CanonicalClip, DeliveryManifest, isSupportedConsent, validateCanonicalClips } from "./contracts";
+import { GUEST_PROVIDER_CAMERA_ID, SCHEMA_VERSION, REQUIRED_CAMERA_IDS } from "./config";
 import { FirestoreGenerationStore } from "./generation_store";
 import { GuestMediaDoc } from "./guest_media";
 import { usageLedgerPath } from "./usage";
@@ -40,8 +40,7 @@ function assertGuestBinding(
   }
   if (guest.status !== "eligible") throw new BackendError("FORBIDDEN", "Guest consent is no longer eligible for publication.");
   if (!guest.consent || guest.consent.accepted !== true ||
-      guest.consent.textVersion !== GUEST_CONSENT_TEXT_VERSION ||
-      guest.consent.purpose !== GUEST_CONSENT_PURPOSE) {
+      !isSupportedConsent(guest.consent.textVersion, guest.consent.purpose)) {
     throw new BackendError("FORBIDDEN", "Guest consent is not recorded for publication.");
   }
   if (guest.sourceHash !== binding.sourceHash || guest.consentRevision !== binding.consentRevision) {

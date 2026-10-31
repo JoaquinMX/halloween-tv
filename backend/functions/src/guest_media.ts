@@ -1,7 +1,6 @@
 import { Firestore } from "firebase-admin/firestore";
-import { BackendError, Identity } from "./contracts";
+import { BackendError, Identity, isSupportedConsent } from "./contracts";
 import {
-  GUEST_CONSENT_PURPOSE,
   GUEST_CONSENT_TEXT_VERSION,
 } from "./config";
 
@@ -97,8 +96,7 @@ export async function assertGuestEligible(
   if (doc.status === "expired") throw new BackendError("CLIP_EXPIRED", "Guest media has expired.");
   if (doc.status !== "eligible") throw new BackendError("FORBIDDEN", "Guest media is not eligible for generation.");
   if (!doc.consent || doc.consent.accepted !== true ||
-      doc.consent.textVersion !== GUEST_CONSENT_TEXT_VERSION ||
-      doc.consent.purpose !== GUEST_CONSENT_PURPOSE ||
+      !isSupportedConsent(doc.consent.textVersion, doc.consent.purpose) ||
       doc.consent.deviceId !== identity.deviceId) {
     throw new BackendError("FORBIDDEN", "Guest consent is not recorded for this device.");
   }
