@@ -20,6 +20,11 @@ abstract interface class HostJoinCallableInvoker {
 }
 
 /// Redeems a host invite and validates the server's scoped host response.
+///
+/// The invite token and the 6-digit [pairingCode] shown next to the TV's
+/// HOST QR are both required by `joinHost`: a wrong code denies exactly
+/// like an unknown invite (generic `FORBIDDEN`), so the entry screen can
+/// only surface the sanitized denial.
 final class HostJoinClient {
   HostJoinClient({
     required HostJoinCallableInvoker invoker,
@@ -34,12 +39,20 @@ final class HostJoinClient {
     required String deviceId,
     required String channelId,
     required String inviteToken,
+    String? pairingCode,
   }) async {
+    if (pairingCode != null && !RegExp(r'^[0-9]{6}$').hasMatch(pairingCode)) {
+      throw const FormatException('pairingCode must be six digits');
+    }
     final Map<String, Object?> payload = <String, Object?>{
       'partyId': partyId,
       'deviceId': deviceId,
       'channelId': channelId,
       'inviteToken': inviteToken,
+      // The backend requires the pairing code; it stays optional here only
+      // so older callers keep compiling — the dedicated host entry always
+      // collects it, and the server rejects a missing code generically.
+      if (pairingCode != null) 'pairingCode': pairingCode,
     };
     try {
       final Object? raw = await _invoker

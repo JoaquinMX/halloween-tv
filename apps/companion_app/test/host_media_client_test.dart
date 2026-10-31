@@ -233,6 +233,73 @@ void main() {
     );
   });
 
+  test('rejects cameraIds entries outside the canonical set', () async {
+    final invoker = FakeHostMediaInvoker();
+    final client = HostMediaClient(invoker: invoker);
+    Future<void> expectBadCameras(List<Object?> cameras) async {
+      invoker.nextResponse = <String, Object?>{
+        'videos': <Object?>[
+          <String, Object?>{
+            'seedId': 'x',
+            'partyId': 'party-1',
+            'channelId': 'cctv',
+            'status': 'ready',
+            'jobId': 'hv-x',
+            'createdAt': '2026-10-29T14:00:00.000Z',
+            'expiresAt': '2030-01-01T00:00:00.000Z',
+            'previewAvailable': true,
+            'cameraIds': cameras,
+          },
+        ],
+      };
+      await expectLater(
+        client.listVideos(
+          partyId: 'party-1',
+          deviceId: 'p-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          channelId: 'cctv',
+        ),
+        throwsFormatException,
+      );
+    }
+
+    // Non-string entries are never coerced.
+    await expectBadCameras(<Object?>['CAM-01', 42, 'CAM-03', 'CAM-04']);
+    await expectBadCameras(<Object?>['CAM-01', null, 'CAM-03', 'CAM-04']);
+    // Blanks are rejected.
+    await expectBadCameras(<Object?>['CAM-01', '', 'CAM-03', 'CAM-04']);
+    await expectBadCameras(<Object?>['CAM-01', '   ', 'CAM-03', 'CAM-04']);
+    // Unknown cameras are rejected even when well-formed strings.
+    await expectBadCameras(<Object?>['CAM-01', 'CAM-09', 'CAM-03', 'CAM-04']);
+    await expectBadCameras(<Object?>['CAM-01', 'cam-01', 'CAM-03', 'CAM-04']);
+    // The full canonical set still parses.
+    invoker.nextResponse = <String, Object?>{
+      'videos': <Object?>[
+        <String, Object?>{
+          'seedId': 'ok',
+          'partyId': 'party-1',
+          'channelId': 'cctv',
+          'status': 'ready',
+          'jobId': 'hv-ok',
+          'createdAt': '2026-10-29T14:00:00.000Z',
+          'expiresAt': '2030-01-01T00:00:00.000Z',
+          'previewAvailable': true,
+          'cameraIds': const <String>['CAM-01', 'CAM-02', 'CAM-03', 'CAM-04'],
+        },
+      ],
+    };
+    final List<HostSeedVideo> videos = await client.listVideos(
+      partyId: 'party-1',
+      deviceId: 'p-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      channelId: 'cctv',
+    );
+    expect(videos.single.cameraIds, <String>[
+      'CAM-01',
+      'CAM-02',
+      'CAM-03',
+      'CAM-04',
+    ]);
+  });
+
   test('bounds a callable that never completes', () async {
     final client = HostMediaClient(
       invoker: _PendingInvoker(),

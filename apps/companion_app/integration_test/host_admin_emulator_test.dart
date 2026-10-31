@@ -32,11 +32,10 @@ void main() {
     tester,
   ) async {
     if (_hostInvitePayload.isEmpty) {
-      // ignore: avoid_print
-      print(
-        'SKIP host admin: supply HOST_INVITE_PAYLOAD (fresh Host QR JSON).',
+      markTestSkipped(
+        'Provide HOST_INVITE_PAYLOAD (a fresh Host QR JSON from '
+        'createHostInvite) to run the emulator host-admin smoke test.',
       );
-      return;
     }
     SharedPreferences.setMockInitialValues(<String, Object>{
       DeviceIdentityStore.hostStorageKey: 'p-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',

@@ -290,7 +290,7 @@ void main() {
   });
 
   group('GuestCodePanel widget', () {
-    testWidgets('shows TV code large with exactly one QR from session', (
+    testWidgets('shows party scope with exactly one QR, never the TV id', (
       WidgetTester tester,
     ) async {
       final GuestCodeClient client = listingClient(
@@ -305,7 +305,10 @@ void main() {
       await tester.pump();
       await tester.pump();
       expect(find.text('GUEST CODES'), findsOneWidget);
-      expect(find.text('tv-abc'), findsOneWidget);
+      // The TV device id authorizes the request but is never rendered:
+      // neither as an exact label nor as a substring anywhere.
+      expect(find.text('tv-abc'), findsNothing);
+      expect(find.textContaining('tv-abc'), findsNothing);
       expect(find.byType(QrImageView), findsOneWidget);
       final Map<String, Object?> decoded = Map<String, Object?>.from(
         jsonDecode(qrDataOf(tester)) as Map,
@@ -379,7 +382,9 @@ void main() {
       await tester.pump();
       expect(find.byKey(kGuestCodeLoadingKey), findsOneWidget);
       expect(find.byType(QrImageView), findsNothing);
-      expect(find.text('tv-abc'), findsOneWidget);
+      // Even while loading, the TV device id is never on screen.
+      expect(find.text('tv-abc'), findsNothing);
+      expect(find.textContaining('tv-abc'), findsNothing);
       gate.completeError(const GuestCodeException('denied'));
       await tester.pump();
       await tester.pump();
@@ -692,7 +697,9 @@ void main() {
       await tester.pump();
       await tester.pump();
       expect(find.byType(QrImageView), findsOneWidget);
-      expect(find.text('tv-abc'), findsOneWidget);
+      // The TV device id stays off screen at every size.
+      expect(find.text('tv-abc'), findsNothing);
+      expect(find.textContaining('tv-abc'), findsNothing);
       expect(tester.takeException(), isNull);
       await disposePanel(tester);
     });
@@ -769,7 +776,10 @@ void main() {
       await tester.pump();
 
       expect(find.byKey(kGuestCodePanelKey), findsOneWidget);
-      expect(find.text('tv-abc'), findsOneWidget);
+      // The TV device id authorizes the listing but is never displayed —
+      // even on the wall's own guest-code page.
+      expect(find.text('tv-abc'), findsNothing);
+      expect(find.textContaining('tv-abc'), findsNothing);
       expect(find.byType(QrImageView), findsOneWidget);
       final QrImageView qr = tester.widget<QrImageView>(
         find.byKey(kGuestCodeQrKey),
@@ -797,7 +807,7 @@ void main() {
       await teardownWall(tester);
     });
 
-    testWidgets('guest list failure shows error with no QR, TV code stays', (
+    testWidgets('guest list failure shows error with no QR, TV id absent', (
       WidgetTester tester,
     ) async {
       final FakeClock clock = FakeClock(DateTime.utc(2026, 10, 31, 20));
@@ -822,7 +832,8 @@ void main() {
       await tester.pump();
       await tester.pump();
 
-      expect(find.text('tv-abc'), findsOneWidget);
+      expect(find.text('tv-abc'), findsNothing);
+      expect(find.textContaining('tv-abc'), findsNothing);
       expect(find.textContaining('denied'), findsOneWidget);
       expect(find.byType(QrImageView), findsNothing);
 

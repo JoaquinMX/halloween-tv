@@ -76,6 +76,7 @@ class WallScreen extends StatefulWidget {
     this.initialEffectsDisabled = false,
     this.initialCameraCount = kDefaultCctvClipCount,
     this.hostInviteClient,
+    this.hostDeviceClient,
     this.overscanPadding = const EdgeInsets.symmetric(
       horizontal: 28,
       vertical: 18,
@@ -111,7 +112,9 @@ class WallScreen extends StatefulWidget {
   /// Party this wall belongs to.
   final String partyId;
 
-  /// TV's own device code, shown on the host guest-code page.
+  /// TV's own device code, authorizing the host-only listing/invite calls.
+  ///
+  /// Never rendered: no screen displays the raw TV device id to guests.
   final String tvDeviceId;
 
   /// Active channel for the guest-code join payload.
@@ -124,6 +127,12 @@ class WallScreen extends StatefulWidget {
   /// Host-invite minter for the HOST QR destination; null hides the HOST QR
   /// button (offline builds stay on the recovery actions only).
   final HostInviteClient? hostInviteClient;
+
+  /// Host-management reader/revoker for the HOST QR destination; null hides
+  /// the active-host list inside the host panel (offline builds stay on
+  /// invite-only). Authorization carries the TV's device id; device ids are
+  /// never rendered.
+  final HostDeviceClient? hostDeviceClient;
 
   /// Seed for the wall's deterministic glitch bursts.
   final int glitchSeed;
@@ -176,6 +185,11 @@ class _WallScreenState extends State<WallScreen> {
   late PlaybackManifest _manifest;
   late Map<String, CachedMedia> _mediaByClipId;
   late Map<String, TileMediaSource> _tileSources;
+
+  /// False when the boot manifest has an unsupported clip count: the wall
+  /// renders the SIGNAL-LOST/cache state instead of throwing during
+  /// construction (see initState).
+  late bool _manifestSupported;
   final Map<String, Completer<bool>> _sourceSettles =
       <String, Completer<bool>>{};
   final Set<String> _initialSettledCameras = <String>{};
@@ -205,11 +219,26 @@ class _WallScreenState extends State<WallScreen> {
     _manifest = widget.manifest;
     _mediaByClipId = Map<String, CachedMedia>.of(widget.mediaByClipId);
     _cameraCount = _sanitizeCameraCount(widget.initialCameraCount);
+    // Fail closed on an unsupported manifest length: an unexpected clip
+    // count (anything but 1, 2, or 4) degrades to the SIGNAL-LOST/cache
+    // state instead of throwing a StateError out of construction, which
+    // would take down the whole wall element. Live updates carrying a bad
+    // length are rejected the same way in _applyVerifiedVersion (previous
+    // usable wall retained).
+    _manifestSupported = isSupportedCctvClipCount(_manifest.clips.length);
+    if (_manifestSupported) {
+      _tileSources = _activeSources(_sourcesFor(_manifest, _mediaByClipId));
+    } else {
+      _tileSources = <String, TileMediaSource>{};
+      _status = 'SIGNAL-LOST · UNSUPPORTED MANIFEST · KEEPING CACHED FEED';
+      _recoveryStatus =
+          'Unsupported manifest clip count '
+          '(${_manifest.clips.length}); expected 1, 2, or 4.';
+    }
     _focus.setActiveLayout(
       tiles: _effectiveCount,
       columns: _columnsFor(_effectiveCount),
     );
-    _tileSources = _activeSources(_sourcesFor(_manifest, _mediaByClipId));
     _effectsDisabled = widget.initialEffectsDisabled;
     _handle = WallPlaybackHandle(
       prepareAction: _prepareCurrentVersion,
@@ -438,6 +467,14 @@ class _WallScreenState extends State<WallScreen> {
     PlaybackManifest manifest,
     Map<String, CachedMedia> mediaByClipId,
   ) async {
+    // A live update with an unsupported clip count can never feed the
+    // active tiles: fail BEFORE touching wall state so the previous usable
+    // wall is retained untouched (same fail-closed rule as initState).
+    if (!isSupportedCctvClipCount(manifest.clips.length)) {
+      throw StateError(
+        'unsupported manifest clip count ${manifest.clips.length}',
+      );
+    }
     // Staging cannot feed the active tiles: fail BEFORE touching wall state
     // so the previous usable wall is retained untouched.
     final Map<String, TileMediaSource> targetSources = _activeSources(
@@ -878,11 +915,25 @@ class _WallScreenState extends State<WallScreen> {
     // Short release of select/enter/gameButtonA opens the hero; BACK keys
     // (backspace/escape/gameButtonB) restore the grid and originating focus.
     // A held select opens recovery once (deferred panel focus keeps its
-    // release from triggering the hero or a recovery action); hold repeats
-    // are swallowed. Grid traversal is suppressed in hero, and hero stays
+    // release from triggering the hero or a recovery action). Held-select
+    // repeats are swallowed so they can never retrigger the hero; arrow
+    // repeats keep flowing to traversal so a held D-pad direction moves
+    // across tiles. Grid traversal is suppressed in hero, and hero stays
     // available when recovery is disabled.
     if (event is KeyRepeatEvent) {
-      return KeyEventResult.handled;
+      if (_isSelectKey(event.logicalKey)) {
+        return KeyEventResult.handled;
+      }
+      if (_heroCameraId != null ||
+          _recoveryVisible ||
+          _guestCodesVisible ||
+          _hostCodesVisible) {
+        return KeyEventResult.handled;
+      }
+      if (_focus.handleArrow(event.logicalKey)) {
+        return KeyEventResult.handled;
+      }
+      return KeyEventResult.ignored;
     }
     if (event is KeyDownEvent) {
       if (event.logicalKey == LogicalKeyboardKey.contextMenu ||
@@ -1019,7 +1070,22 @@ class _WallScreenState extends State<WallScreen> {
                 // transiently double the decoder count).
                 child: KeyedSubtree(
                   key: ValueKey<String>('wall-${widget.partyId}'),
-                  child: channel.build(channelContext),
+                  // An unsupported boot manifest never reaches the tile
+                  // builders (their sources cannot exist): the SIGNAL-LOST
+                  // frame stays until a supported wall activates. The frame
+                  // is wrapped in an autofocus node so wall keys (MENU,
+                  // BACK) keep bubbling to the gate above even with no
+                  // tiles mounted.
+                  child: _manifestSupported
+                      ? channel.build(channelContext)
+                      : Focus(
+                          autofocus: true,
+                          onKeyEvent: (FocusNode node, KeyEvent event) =>
+                              KeyEventResult.ignored,
+                          child: const SignalLost(
+                            key: ValueKey<String>('wall-unsupported-manifest'),
+                          ),
+                        ),
                 ),
               ),
             ),
@@ -1056,6 +1122,7 @@ class _WallScreenState extends State<WallScreen> {
                     : _hostCodesVisible
                     ? HostCodePanel(
                         client: widget.hostInviteClient!,
+                        devicesClient: widget.hostDeviceClient,
                         primaryFocusNode: _recoveryFocus,
                         onBack: _closeHostCodes,
                         onClose: _closeRecovery,

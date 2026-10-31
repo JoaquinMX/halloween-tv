@@ -1,11 +1,13 @@
 /// Host-visible party code panel (D-pad settings overlay page).
 ///
-/// Shows the TV's own party/device code as large text, exactly one QR
+/// Shows the party/channel session scope as text plus exactly one QR
 /// encoding the authoritative anonymous session payload (opaque identifiers
 /// only — never URLs, device ids, or secrets), and the joined guest device
-/// list. The session (scope + optional PIN) always comes from the host-only
-/// `listPartyDevices` response via [GuestCodeClient]; nothing is fabricated
-/// from build-time config.
+/// list. The TV's own device id is NEVER rendered here: it authorizes the
+/// host-only `listPartyDevices` request but stays off the screen, so guests
+/// reading over a shoulder learn nothing. The session (scope + optional
+/// PIN) always comes from the host-only `listPartyDevices` response via
+/// [GuestCodeClient]; nothing is fabricated from build-time config.
 ///
 /// Refresh: one fetch immediately on open plus a bounded periodic refresh
 /// while visible. Overlapping requests are skipped, timers are cancelled on
@@ -56,7 +58,8 @@ const Duration kGuestCodeRefreshInterval = Duration(seconds: 10);
 /// `_fetching` true forever and wedge the panel (no retries, stale rows).
 const Duration kGuestCodeFetchTimeout = Duration(seconds: 10);
 
-/// Host panel: TV code (large text + session QR) and the guest list.
+/// Host panel: party/channel session scope (large text + session QR) and
+/// the guest list.
 ///
 /// Owns its listing refresh: fetches immediately on open and re-fetches on
 /// [refreshInterval] while mounted. Pass a fake [GuestCodeClient.invoker] in
@@ -74,9 +77,16 @@ class GuestCodePanel extends StatefulWidget {
   });
 
   /// Host-only listing reader (authorization carries the TV's device id).
+  ///
+  /// The id authorizes the request only and is never rendered: no screen
+  /// may display the raw TV device id to guests.
   final GuestCodeClient client;
 
-  /// TV's own device code, shown as large text.
+  /// TV's own device code (request authorization only; never displayed).
+  ///
+  /// Retained so the wall keeps passing its authorized identity through one
+  /// seam; the panel renders party/channel scope from the authoritative
+  /// listing instead.
   final String tvDeviceId;
 
   /// Closes the whole overlay.
@@ -213,31 +223,7 @@ class _GuestCodePanelState extends State<GuestCodePanel> {
                     Row(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: <Widget>[
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: <Widget>[
-                              const Text(
-                                'TV CODE',
-                                style: TextStyle(
-                                  color: Color(0xFFFFC107),
-                                  fontSize: 20,
-                                ),
-                              ),
-                              const SizedBox(height: 4),
-                              Text(
-                                widget.tvDeviceId,
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 44,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                              const SizedBox(height: 8),
-                              _sessionLine(),
-                            ],
-                          ),
-                        ),
+                        Expanded(child: _sessionLine()),
                         _qrBox(),
                       ],
                     ),

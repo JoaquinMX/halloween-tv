@@ -37,14 +37,17 @@ const String kGuestDeviceId = 'p-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const String kHostDeviceId = 'p-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 const String kHostToken =
     'hi-0123456789abcdef0123456789abcdef0123456789abcdef01';
+const String kHostPairingCode = '123456';
 
 String hostPayload({
   String party = 'party-1',
   String channel = 'cctv',
   String token = kHostToken,
+  String? pairingCode = kHostPairingCode,
 }) =>
     '{"partyId":"$party","channelId":"$channel","role":"host",'
-    '"inviteToken":"$token"}';
+    '"inviteToken":"$token"'
+    '${pairingCode == null ? '' : ',"pairingCode":"$pairingCode"'}}';
 
 GuestJoinData hostData({
   String party = 'party-1',
@@ -434,10 +437,70 @@ void main() {
     });
   });
 
+  group('host join client (pairing code contract)', () {
+    test('redeem sends the pairing code with the invite scope', () async {
+      final FakeHostJoinInvoker invoker = FakeHostJoinInvoker();
+      await HostJoinClient(invoker: invoker).redeem(
+        partyId: 'party-1',
+        deviceId: kHostDeviceId,
+        channelId: 'cctv',
+        inviteToken: kHostToken,
+        pairingCode: kHostPairingCode,
+      );
+      expect(invoker.calls, 1);
+      expect(invoker.lastPayload, <String, Object?>{
+        'partyId': 'party-1',
+        'deviceId': kHostDeviceId,
+        'channelId': 'cctv',
+        'inviteToken': kHostToken,
+        'pairingCode': kHostPairingCode,
+      });
+    });
+
+    test('malformed pairing codes fail before any network call', () async {
+      final FakeHostJoinInvoker invoker = FakeHostJoinInvoker();
+      final HostJoinClient client = HostJoinClient(invoker: invoker);
+      for (final String bad in <String>['12345', 'abcdef', '1234567', '']) {
+        await expectLater(
+          client.redeem(
+            partyId: 'party-1',
+            deviceId: kHostDeviceId,
+            channelId: 'cctv',
+            inviteToken: kHostToken,
+            pairingCode: bad,
+          ),
+          throwsFormatException,
+        );
+      }
+      expect(invoker.calls, 0);
+    });
+
+    test('denial surfaces without the pairing code leaking', () async {
+      final FakeHostJoinInvoker invoker = FakeHostJoinInvoker()
+        ..failure = cloud_functions.FirebaseFunctionsException(
+          code: 'permission-denied',
+          message: 'FORBIDDEN: wrong pairing code detail must never surface',
+          details: const <String, Object?>{'errorCode': 'FORBIDDEN'},
+        );
+      await expectLater(
+        HostJoinClient(invoker: invoker).redeem(
+          partyId: 'party-1',
+          deviceId: kHostDeviceId,
+          channelId: 'cctv',
+          inviteToken: kHostToken,
+          pairingCode: '000000',
+        ),
+        throwsA(isA<ManifestTransportException>()),
+      );
+      expect(invoker.calls, 1);
+    });
+  });
+
   group('host entry screen (real parser, fake scanner boundary)', () {
     Future<void> pumpEntry(
       WidgetTester tester, {
-      required void Function(GuestJoinData data) onHostJoin,
+      void Function(GuestJoinData data)? onHostJoin,
+      void Function(GuestJoinData data, String pairingCode)? onHostJoinWithCode,
       JoinPayloadScanner scanner = const UnavailableJoinPayloadScanner(),
     }) async {
       SharedPreferences.setMockInitialValues(<String, Object>{
@@ -447,7 +510,17 @@ void main() {
       await tester.pumpWidget(
         MaterialApp(
           home: HostEntryScreen(
-            onHostJoin: (data) async => onHostJoin(data),
+            onHostJoin: (GuestJoinData data) async {
+              final void Function(GuestJoinData data)? legacy = onHostJoin;
+              if (legacy == null) {
+                fail('unexpected legacy host join');
+              }
+              legacy(data);
+            },
+            onHostJoinWithCode: onHostJoinWithCode == null
+                ? null
+                : (GuestJoinData data, String pairingCode) async =>
+                      onHostJoinWithCode(data, pairingCode),
             onJoinAsGuest: () {},
             scanner: scanner,
           ),
@@ -456,13 +529,14 @@ void main() {
       await tester.pumpAndSettle();
     }
 
-    testWidgets('boot offers scan, paste, retry, and a guest route', (
+    testWidgets('boot offers scan, paste, code, and a guest route', (
       tester,
     ) async {
       GuestJoinData? received;
       await pumpEntry(tester, onHostJoin: (data) => received = data);
       expect(find.byKey(HostEntryScreen.scanKey), findsOneWidget);
       expect(find.byKey(HostEntryScreen.payloadFieldKey), findsOneWidget);
+      expect(find.byKey(HostEntryScreen.pairingCodeFieldKey), findsOneWidget);
       expect(find.byKey(HostEntryScreen.submitKey), findsOneWidget);
       expect(find.byKey(HostEntryScreen.joinAsGuestKey), findsOneWidget);
       expect(received, isNull);
@@ -472,17 +546,28 @@ void main() {
     testWidgets('scan and paste reach the same host payload (parity)', (
       tester,
     ) async {
-      GuestJoinData? scanned;
+      GuestJoinData? scannedData;
+      String? scannedCode;
       await pumpEntry(
         tester,
-        onHostJoin: (data) => scanned = data,
+        onHostJoinWithCode: (data, code) {
+          scannedData = data;
+          scannedCode = code;
+        },
         scanner: FakeScanner(JoinPayloadText(hostPayload())),
       );
       await tester.tap(find.byKey(HostEntryScreen.scanKey));
       await tester.pumpAndSettle();
 
-      GuestJoinData? pasted;
-      await pumpEntry(tester, onHostJoin: (data) => pasted = data);
+      GuestJoinData? pastedData;
+      String? pastedCode;
+      await pumpEntry(
+        tester,
+        onHostJoinWithCode: (data, code) {
+          pastedData = data;
+          pastedCode = code;
+        },
+      );
       await tester.enterText(
         find.byKey(HostEntryScreen.payloadFieldKey),
         hostPayload(),
@@ -490,14 +575,74 @@ void main() {
       await tester.tap(find.byKey(HostEntryScreen.submitKey));
       await tester.pumpAndSettle();
 
-      expect(scanned, isNotNull);
-      expect(pasted, isNotNull);
-      expect(scanned, pasted);
-      expect(scanned?.role, JoinRole.host);
-      expect(scanned?.inviteToken, kHostToken);
+      expect(scannedData, isNotNull);
+      expect(pastedData, isNotNull);
+      expect(scannedData, pastedData);
+      expect(scannedData?.role, JoinRole.host);
+      expect(scannedData?.inviteToken, kHostToken);
+      // The pairing code parses out of the payload on both routes.
+      expect(scannedCode, kHostPairingCode);
+      expect(pastedCode, kHostPairingCode);
       // The host phone identity is separate from the guest identity.
-      expect(scanned?.deviceId.value, kHostDeviceId);
-      expect(scanned?.deviceId.value, isNot(kGuestDeviceId));
+      expect(scannedData?.deviceId.value, kHostDeviceId);
+      expect(scannedData?.deviceId.value, isNot(kGuestDeviceId));
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('a manually typed code wins over a stale payload code', (
+      tester,
+    ) async {
+      String? receivedCode;
+      await pumpEntry(
+        tester,
+        onHostJoinWithCode: (_, code) => receivedCode = code,
+      );
+      await tester.enterText(
+        find.byKey(HostEntryScreen.payloadFieldKey),
+        hostPayload(pairingCode: '999999'),
+      );
+      await tester.enterText(
+        find.byKey(HostEntryScreen.pairingCodeFieldKey),
+        '000007',
+      );
+      await tester.tap(find.byKey(HostEntryScreen.submitKey));
+      await tester.pumpAndSettle();
+      expect(receivedCode, '000007');
+      expect(find.byKey(HostEntryScreen.errorKey), findsNothing);
+    });
+
+    testWidgets('missing or malformed codes fail before any network', (
+      tester,
+    ) async {
+      var joined = 0;
+      await pumpEntry(tester, onHostJoin: (_) => joined++);
+      // A payload without a minted code and no manual entry: the 6-digit
+      // requirement fails visibly before any network call.
+      await tester.enterText(
+        find.byKey(HostEntryScreen.payloadFieldKey),
+        hostPayload(pairingCode: null),
+      );
+      await tester.tap(find.byKey(HostEntryScreen.submitKey));
+      await tester.pumpAndSettle();
+      expect(joined, 0);
+      expect(find.byKey(HostEntryScreen.errorKey), findsOneWidget);
+      expect(
+        tester.widget<Text>(find.byKey(HostEntryScreen.errorKey)).data,
+        contains('pairing code'),
+      );
+
+      // Malformed codes fail the same way without touching the join.
+      await tester.enterText(
+        find.byKey(HostEntryScreen.pairingCodeFieldKey),
+        '12345',
+      );
+      await tester.tap(find.byKey(HostEntryScreen.submitKey));
+      await tester.pumpAndSettle();
+      expect(joined, 0);
+      expect(
+        tester.widget<Text>(find.byKey(HostEntryScreen.errorKey)).data,
+        contains('pairing code'),
+      );
       expect(tester.takeException(), isNull);
     });
 
@@ -509,6 +654,10 @@ void main() {
         scanner: FakeScanner(
           const JoinPayloadText('{"partyId":"p","channelId":"c"}'),
         ),
+      );
+      await tester.enterText(
+        find.byKey(HostEntryScreen.pairingCodeFieldKey),
+        kHostPairingCode,
       );
       await tester.tap(find.byKey(HostEntryScreen.scanKey));
       await tester.pumpAndSettle();
@@ -524,6 +673,10 @@ void main() {
         find.byKey(HostEntryScreen.payloadFieldKey),
         '{"partyId":"p","channelId":"c","role":"admin"}',
       );
+      await tester.enterText(
+        find.byKey(HostEntryScreen.pairingCodeFieldKey),
+        kHostPairingCode,
+      );
       await tester.tap(find.byKey(HostEntryScreen.submitKey));
       await tester.pumpAndSettle();
       expect(joined, isFalse);
@@ -532,6 +685,29 @@ void main() {
         tester.widget<Text>(find.byKey(HostEntryScreen.errorKey)).data,
         contains('unknown role'),
       );
+    });
+
+    testWidgets('host denial surfaces the generic error on the entry', (
+      tester,
+    ) async {
+      await pumpEntry(
+        tester,
+        onHostJoinWithCode: (_, _) {
+          throw const HostJoinException('Access was denied.');
+        },
+      );
+      await tester.enterText(
+        find.byKey(HostEntryScreen.payloadFieldKey),
+        hostPayload(),
+      );
+      await tester.enterText(
+        find.byKey(HostEntryScreen.pairingCodeFieldKey),
+        '000000',
+      );
+      await tester.tap(find.byKey(HostEntryScreen.submitKey));
+      await tester.pumpAndSettle();
+      expect(find.text('Access was denied.'), findsOneWidget);
+      expect(find.textContaining('wrong'), findsNothing);
     });
 
     testWidgets('legacy guest payloads route to the guest form, not host', (
@@ -639,7 +815,7 @@ void main() {
       await flush(tester);
     });
 
-    testWidgets('delete success reconciles; failure stays retryable', (
+    testWidgets('delete asks to confirm, then reconciles on success', (
       tester,
     ) async {
       mediaInvoker.seeds.addAll(<Map<String, Object?>>[
@@ -648,16 +824,45 @@ void main() {
       ]);
       final HostSession session = await joinedSession();
       await pumpPanel(tester, session);
+      // The delete dialog names the seed and states the blast radius.
       await tapVisible(tester, find.byKey(HostPanelScreen.deleteKey('a')));
+      await flush(tester);
+      expect(find.byKey(HostPanelScreen.deleteDialogKey), findsOneWidget);
+      expect(find.textContaining('"a"'), findsOneWidget);
+      expect(find.textContaining('previews'), findsOneWidget);
+      expect(find.textContaining('manifest'), findsOneWidget);
+      // CANCEL keeps the selection: no callable, row stays.
+      await tapVisible(tester, find.byKey(HostPanelScreen.deleteCancelKey));
+      await flush(tester);
+      expect(find.byKey(HostPanelScreen.deleteDialogKey), findsNothing);
+      expect(mediaInvoker.names.where((n) => n == kDeleteHostVideo), isEmpty);
+      expect(find.textContaining('a · Ready'), findsOneWidget);
+      // Confirm deletes and reconciles only after authoritative success.
+      await tapVisible(tester, find.byKey(HostPanelScreen.deleteKey('a')));
+      await flush(tester);
+      await tapVisible(tester, find.byKey(HostPanelScreen.deleteConfirmKey));
       await flush(tester);
       expect(find.textContaining('a · Ready'), findsNothing);
       expect(find.textContaining('b · Ready'), findsOneWidget);
+      await session.dispose();
+      await flush(tester);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('delete failure keeps the selection retryable', (tester) async {
+      mediaInvoker.seeds.addAll(<Map<String, Object?>>[
+        FakeHostMediaInvoker.seedJson('b', 'ready'),
+      ]);
+      final HostSession session = await joinedSession();
+      await pumpPanel(tester, session);
       mediaInvoker.failure = cloud_functions.FirebaseFunctionsException(
         code: 'permission-denied',
         message: 'denied',
         details: const <String, Object?>{'errorCode': 'FORBIDDEN'},
       );
       await tapVisible(tester, find.byKey(HostPanelScreen.deleteKey('b')));
+      await flush(tester);
+      await tapVisible(tester, find.byKey(HostPanelScreen.deleteConfirmKey));
       await flush(tester);
       expect(find.byKey(HostPanelScreen.messageKey), findsOneWidget);
       expect(find.textContaining('b · Ready'), findsOneWidget);
@@ -832,6 +1037,13 @@ void main() {
         find.byKey(HostEntryScreen.payloadFieldKey),
         hostPayload(),
       );
+      // The minted pairing code travels with the payload (prefilled), but
+      // the typed field is authoritative: enter it explicitly.
+      await enterVisible(
+        tester,
+        find.byKey(HostEntryScreen.pairingCodeFieldKey),
+        kHostPairingCode,
+      );
       await tapVisible(tester, find.byKey(HostEntryScreen.submitKey));
       await flush(tester);
       // Scope validated -> panel with the server-backed catalog.
@@ -855,6 +1067,11 @@ void main() {
         find.byKey(HostEntryScreen.payloadFieldKey),
         hostPayload(),
       );
+      await enterVisible(
+        tester,
+        find.byKey(HostEntryScreen.pairingCodeFieldKey),
+        '000000',
+      );
       await tapVisible(tester, find.byKey(HostEntryScreen.submitKey));
       await flush(tester);
       expect(find.byType(HostPanelScreen), findsNothing);
@@ -872,6 +1089,11 @@ void main() {
         find.byKey(HostEntryScreen.payloadFieldKey),
         '{"partyId":"party-1","channelId":"cctv"}',
       );
+      await enterVisible(
+        tester,
+        find.byKey(HostEntryScreen.pairingCodeFieldKey),
+        kHostPairingCode,
+      );
       await tapVisible(tester, find.byKey(HostEntryScreen.submitKey));
       await flush(tester);
       expect(joinInvoker.calls, 0);
@@ -885,6 +1107,11 @@ void main() {
         tester,
         find.byKey(HostEntryScreen.payloadFieldKey),
         hostPayload(),
+      );
+      await enterVisible(
+        tester,
+        find.byKey(HostEntryScreen.pairingCodeFieldKey),
+        kHostPairingCode,
       );
       await tapVisible(tester, find.byKey(HostEntryScreen.submitKey));
       await flush(tester);
@@ -909,6 +1136,11 @@ void main() {
         tester,
         find.byKey(HostEntryScreen.payloadFieldKey),
         hostPayload(),
+      );
+      await enterVisible(
+        tester,
+        find.byKey(HostEntryScreen.pairingCodeFieldKey),
+        kHostPairingCode,
       );
       await tapVisible(tester, find.byKey(HostEntryScreen.submitKey));
       await flush(tester);
