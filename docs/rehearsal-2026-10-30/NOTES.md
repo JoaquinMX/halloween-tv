@@ -217,3 +217,12 @@ with party/TV-device/channel IDs returned manifest v1, 4 clips
 - Credits: all 5 rows UNKNOWN — provider omits credits_charged (same as tonight's direct run). Realized debit requires Joaquin's console check. Reconcile (fixed counting) reports providerApiCalls=4 live submissions, never zero.
 - Step 2 (5s Scooby + reference) is ON HOLD: needs (a) fresh spend approval (budget exhausted), (b) preset change 2s->5s + reference-image input billing (code change, harness), (c) pricing confirmation (5s out + possible input billing).
 - Follow-ups for next cycle: enforce single-submit scope for live batches (guest-bound or explicit single-camera job type); review the 720s poll timeout vs provider latency; decide fate of the 3 staged live clips (leave staged under retention TTL).
+
+## 13. Step-2 live cameo outcome (orchestrator-executed 2026-10-31 ~06:00-08:20 CST)
+
+- Owner approval: Telegram 23:22 CST "Do step 1 and 2" (fresh spend, ≤5 attempts for this probe) + 07:40/00:13 CST "Go" to own the fix loop to the end.
+- Attempts: 1) c11-cameo-01 FAILED — reference passed as private storage_ref (provider cannot fetch); 2) c11-cameo-02 FAILED — input.media must be a list; 3) c11-cameo-03 FAILED — list items must be MediaItem dicts {type:"reference_image",url}. Each failure surfaced the provider's exact error (error-surfacing fix worked), and the final defect shape was confirmed against public DashScope docs (input.media array of {type,url}).
+- Attempt 4 (job c11-cameo-05): SUCCEEDED. 5s r2v cartoon (your photo as reference) normalized, published as manifest v3 (1 provider slot + 3 fixture slots), TV downloaded + hash-verified + "WALL UPDATED · v3" on screen, ACK 516fad0b..., job purged. Screenshot cycle11-tv-cameo... wait — post-purge wall shows CAM-01 playing from local cache; CAM-02..04 tiles dark (fixture slots, cosmetic; ACK proved verified bytes). Open question: fixture tile rendering post-purge.
+- Spend: probe used 4/5 attempts (1 spare). All rows credits UNKNOWN — provider omits credits_charged (same as tonight's direct runs). Joaquin's console: quota 2.12% -> 3.58% after step 1 (4 clips + prior run); step-2 delta pending his check. Reconcile: providerApiCalls counts live submissions; fixture slots unknown/null by design.
+- Window closed: GENERATION_ENABLED unset, provider fake, key removed from deploy env, predeploy restored, redeployed disabled + verified. No further live spending possible without a new deploy.
+- Branch orchestrator-cycle-11-guest-video-chain pushed (suite: backend 110/110, companion 111/111, analyze clean).
