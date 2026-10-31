@@ -13,6 +13,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { Storage } from "@google-cloud/storage";
 import {
   EXPECTED_NORMALIZATION,
   assertLinuxX64Executable,
@@ -63,6 +64,44 @@ async function readEnvironmentFiles(functionsRoot: string, projectId: string): P
 function isLinuxX64Elf(bytes: Buffer): boolean {
   return bytes[0] === 0x7f && bytes.toString("ascii", 1, 4) === "ELF" && bytes[4] === 2 && bytes[5] === 1 &&
     bytes.readUInt16LE(18) === 62;
+}
+
+/** GCS returns e.g. "US-EAST1"; trigger regions are lowercase "us-east1". */
+function normalizeRegionName(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+/**
+ * Reads the pinned v2 storage-trigger region from the artifact under check
+ * (compiled lib first, TypeScript source as fallback). The trigger must name
+ * its region explicitly because it defaults to the functions region otherwise.
+ */
+function resolveStorageTriggerRegion(functionsRoot: string): string {
+  for (const candidate of [join(functionsRoot, "lib", "src", "config.js"), join(functionsRoot, "src", "config.ts")]) {
+    if (!existsSync(candidate)) continue;
+    const match = /STORAGE_TRIGGER_REGION\s*=\s*["']([^"']+)["']/.exec(readFileSync(candidate, "utf8"));
+    if (match) return match[1];
+  }
+  throw new Error("Storage trigger region is not configured (STORAGE_TRIGGER_REGION missing in lib/src/config.js and src/config.ts); pin onGuestIngestFinalized to the ingest bucket region.");
+}
+
+/**
+ * Resolves the deploy bucket's location read-only. PREFLIGHT_BUCKET_LOCATION
+ * (or --bucket-location) is an offline/test seam; otherwise the location is
+ * read from the live bucket via ADC and never written.
+ */
+async function resolveBucketLocation(bucket: string): Promise<string> {
+  const override = (argument("bucket-location") ?? process.env.PREFLIGHT_BUCKET_LOCATION ?? "").trim();
+  if (override) return override;
+  try {
+    const [metadata] = await new Storage().bucket(bucket).getMetadata();
+    const location = String((metadata as { location?: unknown }).location ?? "");
+    if (!location) throw new Error("the Storage API returned an empty location");
+    return location;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Could not resolve location for bucket ${bucket}: ${detail}. Provide --bucket-location or PREFLIGHT_BUCKET_LOCATION for offline checks.`);
+  }
 }
 
 /** Runs the packaged fake provider from inside the artifact with no repository checkout. */
@@ -288,6 +327,23 @@ export async function runPreflight(): Promise<Record<string, unknown>> {
       throw new Error("backend/firebase.json must run the package predeploy validation before uploading Functions.");
     }
   });
+
+  if (target === "cloud") {
+    await recordAsync(async () => {
+      const triggerRegion = resolveStorageTriggerRegion(functionsRoot);
+      const bucketLocation = await resolveBucketLocation(bucket);
+      if (normalizeRegionName(triggerRegion) !== normalizeRegionName(bucketLocation)) {
+        throw new Error(`Storage trigger region ${triggerRegion} does not match deploy bucket ${bucket} location ${bucketLocation}; v2 storage triggers must live in the bucket's region.`);
+      }
+      if (compiledMainPath && existsSync(compiledMainPath)) {
+        const compiled = readFileSync(compiledMainPath, "utf8");
+        if (/onObjectFinalized/.test(compiled) &&
+            !compiled.includes("STORAGE_TRIGGER_REGION") && !compiled.includes(triggerRegion)) {
+          throw new Error(`Compiled storage trigger does not pin region ${triggerRegion}; pass region: STORAGE_TRIGGER_REGION to onObjectFinalized.`);
+        }
+      }
+    });
+  }
 
   if (failures.length) {
     const error = new Error(`${failures.length} preflight check(s) failed:\n- ${failures.join("\n- ")}`) as Error & { failures?: string[] };

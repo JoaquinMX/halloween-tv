@@ -328,6 +328,7 @@ function preflightEnv(): NodeJS.ProcessEnv {
   return {
     ...cleanEnv(),
     STORAGE_BUCKET: "artifact-bucket-123456",
+    PREFLIGHT_BUCKET_LOCATION: "us-east1",
     VIDEO_GENERATION_PROVIDER: "fake",
     FFMPEG_PATH: "runtime/bin/ffmpeg",
     FFPROBE_PATH: "runtime/bin/ffprobe",
@@ -443,6 +444,43 @@ test("preflight passes a complete artifact and rejects each missing prerequisite
 
   for (const artifact of [complete, shortDeadline, missingFixture, unwired, noRuntime, truncated, wrongArch, hashed, corrupt, profile, lie]) {
     rmSync(artifact.root, { recursive: true, force: true });
+  }
+});
+
+test("preflight pins the storage trigger to the deploy bucket region", () => {
+  // The compiled production trigger must carry an explicit region: the deploy
+  // bucket lives in us-east1 while functions default to us-central1.
+  const indexSource = readFileSync(join(PACKAGE_ROOT, "src", "index.ts"), "utf8");
+  assert.match(indexSource, /onObjectFinalized\(\{\s*bucket:[^}]*region:\s*STORAGE_TRIGGER_REGION/);
+  const configSource = readFileSync(join(PACKAGE_ROOT, "src", "config.ts"), "utf8");
+  assert.match(configSource, /STORAGE_TRIGGER_REGION\s*=\s*["']us-east1["']/);
+
+  // Matching trigger region passes, including the uppercase location casing
+  // returned by the live Storage API.
+  const matching = buildArtifact();
+  try {
+    const passed = runPreflightOn(matching);
+    assert.equal(passed.status, 0, passed.stderr);
+    assert.equal(lastJson(passed.stdout).preflight, "passed");
+    const uppercased = runTool("tools/deploy_preflight.ts",
+      ["--target=cloud", "--project=artifact-project-12345", "--bucket=artifact-bucket-123456",
+        `--functions-root=${matching.functions}`, `--config-root=${matching.root}`],
+      { ...preflightEnv(), PREFLIGHT_BUCKET_LOCATION: "US-EAST1" });
+    assert.equal(uppercased.status, 0, uppercased.stderr);
+  } finally {
+    rmSync(matching.root, { recursive: true, force: true });
+  }
+
+  // Mismatched trigger region fails with an actionable message.
+  const mismatched = buildArtifact();
+  try {
+    const configPath = join(mismatched.functions, "lib", "src", "config.js");
+    writeFileSync(configPath, readFileSync(configPath, "utf8").replace(/us-east1/, "us-central1"));
+    const rejected = runPreflightOn(mismatched);
+    assert.notEqual(rejected.status, 0);
+    assert.match(rejected.stderr, /Storage trigger region us-central1 does not match deploy bucket artifact-bucket-123456 location us-east1/);
+  } finally {
+    rmSync(mismatched.root, { recursive: true, force: true });
   }
 });
 
