@@ -192,3 +192,52 @@ test("accepted ACK retries its bounded version after partial purge, expiry, and 
     await disposeEmulatorContext(app);
   }
 });
+
+test("a manifest bound to withdrawn consent yields no delivery URLs even while it lingers", {
+  skip: !HAS_FIRESTORE_EMULATOR,
+}, async () => {
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  const deviceId = "tv-1";
+  const channelId = "main";
+  const version = 1;
+  const jobId = "job-revoked-consent";
+  const submissionId = "gsub-revoked000000000000000001";
+  const expiry = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+  const cameraClips = REQUIRED_CAMERA_IDS.map((cameraId) => {
+    const bytes = Buffer.from(`revoked-${cameraId}`);
+    return { cameraId, objectPath: `parties/${partyId}/channels/${channelId}/delivery/${version}/${cameraId}.mp4`, sha256: createHash("sha256").update(bytes).digest("hex"), sizeBytes: bytes.length, durationMs: 2000, expiresAt: expiry, bytes };
+  });
+  try {
+    await seedParty(db, partyId, deviceId, channelId);
+    await Promise.all(cameraClips.map(({ objectPath, bytes }) => bucket.file(objectPath).save(bytes)));
+    // Guest-bound job whose consent was withdrawn after publication; the
+    // manifest document itself has not been collected yet.
+    await db.doc(`parties/${partyId}/jobs/${jobId}`).set({
+      jobId, partyId, deviceId, channelId, manifestVersion: version, idempotencyKey: jobId, state: "failed",
+      guestMedia: { submissionId, objectPath: `parties/${partyId}/guests/${deviceId}/ingest/${submissionId}/photo.jpg`, sourceHash: "a".repeat(64), consentRevision: "v1:revoked", deviceId, channelId },
+    });
+    await db.doc(`parties/${partyId}/guestMedia/${submissionId}`).set({
+      submissionId, partyId, deviceId, channelId, status: "withdrawn", tombstone: true,
+      consentRevision: "v1:revoked", objectPath: `parties/${partyId}/guests/${deviceId}/ingest/${submissionId}/photo.jpg`,
+    });
+    await db.doc(`parties/${partyId}/manifests/current_${channelId}`).set({
+      partyId, channelId, version, schemaVersion: SCHEMA_VERSION, jobId, expiresAt: expiry,
+      createdAt: FieldValue.serverTimestamp(),
+      cameraClips: cameraClips.map(({ bytes: _bytes, ...clip }) => clip),
+    });
+    const services = createDeliveryServices({ db, bucket, signReadUrl: async () => "https://unused.invalid" });
+    await assert.rejects(services.getDeliveryUrls({ partyId, deviceId, channelId }),
+      (error: unknown) => error instanceof BackendError && error.errorCode === "FORBIDDEN");
+    await assert.rejects(services.getCurrentManifest({ partyId, deviceId, channelId }),
+      (error: unknown) => error instanceof BackendError && error.errorCode === "FORBIDDEN");
+    // Control: the same manifest shape without a guest binding still serves.
+    await db.doc(`parties/${partyId}/jobs/${jobId}`).update({ guestMedia: FieldValue.delete() });
+    const delivery = await services.getDeliveryUrls({ partyId, deviceId, channelId });
+    assert.equal(delivery.manifestVersion, version);
+    assert.equal(delivery.clips.length, 4);
+  } finally {
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+  }
+});

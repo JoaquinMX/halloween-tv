@@ -16,6 +16,21 @@ function addPaths(target: Set<string>, value: unknown): void {
   if (Array.isArray(value)) for (const item of value) if (typeof item === "string" && item.startsWith("parties/")) target.add(item);
 }
 
+/** A manifest is revoked when its job is bound to a withdrawn submission. */
+function isRevokedManifest(
+  jobId: string,
+  jobs: FirebaseFirestore.QuerySnapshot<FirebaseFirestore.DocumentData, FirebaseFirestore.DocumentData>,
+  withdrawnSubmissions: Set<string>,
+): boolean {
+  for (const jobDoc of jobs.docs) {
+    if (jobDoc.id !== jobId) continue;
+    const job = jobDoc.data() as Record<string, unknown>;
+    const guest = job.guestMedia as Record<string, unknown> | undefined;
+    return typeof guest?.submissionId === "string" && withdrawnSubmissions.has(guest.submissionId);
+  }
+  return false;
+}
+
 export interface RetentionResult {
   expiredJobs: number;
   deletedExpiredObjects: number;
@@ -111,11 +126,51 @@ export async function sweepExpiredMedia(
       }).catch(() => undefined);
     }
   }
+  // Withdrawn submissions revoke delivery eligibility: their manifests must
+  // never be protected from deletion, and any pending derivative deletions
+  // persisted at withdrawal are retried here (not protected).
+  const withdrawnSubmissions = new Set<string>();
+  const revokedPaths = new Set<string>();
+  for (const guestDoc of guestMedia.docs) {
+    const guest = guestDoc.data() as Record<string, unknown>;
+    if (guest.status === "withdrawn" || guest.tombstone === true) {
+      if (typeof guest.submissionId === "string") withdrawnSubmissions.add(guest.submissionId);
+      for (const key of ["pendingDeletions", "revokedManifestPaths"] as const) {
+        const list = guest[key];
+        if (Array.isArray(list)) {
+          for (const item of list) if (typeof item === "string" && item.startsWith("parties/")) revokedPaths.add(item);
+        }
+      }
+      if (typeof guest.objectPath === "string" && (guest.objectPath as string).startsWith("parties/")) {
+        revokedPaths.add(guest.objectPath as string);
+      }
+    }
+  }
   for (const manifestDoc of manifests.docs) {
     const manifest = manifestDoc.data();
     const expiry = expiryDate(manifest.expiresAt);
     if (expiry && expiry > now && Array.isArray(manifest.cameraClips)) {
+      // Revoked manifests (produced from a withdrawn guest submission) are
+      // never protected: their clips are retried for deletion below instead
+      // of lingering past withdrawal.
+      if (typeof manifest.jobId === "string" && isRevokedManifest(manifest.jobId, jobs, withdrawnSubmissions)) {
+        for (const clip of manifest.cameraClips) {
+          if (clip && typeof clip === "object" && typeof (clip as Record<string, unknown>).objectPath === "string") {
+            revokedPaths.add((clip as Record<string, unknown>).objectPath as string);
+          }
+        }
+        continue;
+      }
       for (const clip of manifest.cameraClips) if (typeof clip?.objectPath === "string") references.add(clip.objectPath);
+    } else if (Array.isArray(manifest.cameraClips) && typeof manifest.jobId === "string" &&
+        isRevokedManifest(manifest.jobId, jobs, withdrawnSubmissions)) {
+      // Even an expired revoked manifest's clips are queued for retry so a
+      // withdrawal is never left to the orphan pass alone.
+      for (const clip of manifest.cameraClips) {
+        if (clip && typeof clip === "object" && typeof (clip as Record<string, unknown>).objectPath === "string") {
+          revokedPaths.add((clip as Record<string, unknown>).objectPath as string);
+        }
+      }
     }
   }
   for (const jobDoc of jobs.docs) {
@@ -142,6 +197,20 @@ export async function sweepExpiredMedia(
   const [files] = await bucket.getFiles({ prefix: "parties/" });
   let deletedExpiredObjects = 0;
   let deletedOrphanObjects = 0;
+  // Retry revoked-manifest objects (and pending withdrawal deletions) before
+  // the orphan pass so they are deleted even if a stale reference rebuild
+  // would otherwise protect them. Idempotent: missing objects are ignored.
+  for (const path of revokedPaths) {
+    if (references.has(path)) references.delete(path);
+    try {
+      const [exists] = await bucket.file(path).exists();
+      if (!exists) continue;
+      await bucket.file(path).delete({ ignoreNotFound: true });
+      deletedOrphanObjects += 1;
+    } catch {
+      // Left for the next sweep; never counted as deleted.
+    }
+  }
   for (const file of files) {
     const path = file.name;
     if (!path || path.endsWith("/")) continue;

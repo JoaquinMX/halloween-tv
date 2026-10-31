@@ -153,6 +153,38 @@ function canonicalClipsMatch(manifest: DeliveryManifest, ack: AckInput): void {
   }
 }
 
+/**
+ * Delivery-time consent revocation: a manifest produced from a guest-bound
+ * job whose consent was withdrawn (or whose binding is gone) must not yield
+ * new signed URLs, even if the manifest document itself has not been
+ * collected yet. Text-only jobs (no guest binding) are unaffected.
+ */
+async function assertManifestConsentLive(db: Firestore, partyId: string, jobId: string): Promise<void> {
+  let job: FirebaseFirestore.DocumentData | undefined;
+  try {
+    const snapshot = await db.doc(`parties/${partyId}/jobs/${jobId}`).get();
+    if (!snapshot.exists) return;
+    job = snapshot.data();
+  } catch {
+    return;
+  }
+  const guest = job?.guestMedia as Record<string, unknown> | undefined;
+  const submissionId = guest && typeof guest.submissionId === "string" ? guest.submissionId : undefined;
+  if (!submissionId) return;
+  let current: FirebaseFirestore.DocumentData | undefined;
+  try {
+    const snapshot = await db.doc(`parties/${partyId}/guestMedia/${submissionId}`).get();
+    if (!snapshot.exists) throw new BackendError("FORBIDDEN", "Guest consent is no longer eligible for delivery.");
+    current = snapshot.data();
+  } catch (error) {
+    if (error instanceof BackendError) throw error;
+    return;
+  }
+  if (!current || current.status !== "eligible" || (current as Record<string, unknown>).tombstone === true) {
+    throw new BackendError("FORBIDDEN", "Guest consent was withdrawn; this manifest is revoked.");
+  }
+}
+
 export function createDeliveryServices(options: DeliveryServiceOptions): DeliveryServices {
   const { db, bucket } = options;
   const now = options.now ?? (() => new Date());
@@ -362,6 +394,7 @@ export function createDeliveryServices(options: DeliveryServiceOptions): Deliver
     const registered = await assertRegisteredPartyDevice(db, identity);
     const snapshot = await manifestRef(db, registered.partyId, registered.channelId).get();
     const manifest = manifestFrom(snapshot.data());
+    await assertManifestConsentLive(db, registered.partyId, manifest.jobId);
     const nowMs = now().getTime();
     const manifestExpiry = Date.parse(manifest.expiresAt);
     if (!Number.isFinite(manifestExpiry) || manifestExpiry <= nowMs) throw new BackendError("CLIP_EXPIRED", "Current manifest has expired.");
@@ -388,6 +421,7 @@ export function createDeliveryServices(options: DeliveryServiceOptions): Deliver
     const snapshot = await manifestRef(db, registered.partyId, registered.channelId).get();
     if (!snapshot.exists) throw new BackendError("NOT_FOUND", "Current manifest does not exist.");
     const manifest = manifestFrom(snapshot.data());
+    await assertManifestConsentLive(db, registered.partyId, manifest.jobId);
     if (manifest.partyId !== registered.partyId || manifest.channelId !== registered.channelId) {
       throw new BackendError("MANIFEST_MISMATCH", "Current manifest is outside the registered party and channel.");
     }

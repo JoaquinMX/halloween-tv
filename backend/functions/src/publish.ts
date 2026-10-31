@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { FieldValue } from "firebase-admin/firestore";
 import { BackendError, CanonicalClip, DeliveryManifest, validateCanonicalClips } from "./contracts";
-import { GUEST_PROVIDER_CAMERA_ID, SCHEMA_VERSION, REQUIRED_CAMERA_IDS } from "./config";
+import { GUEST_CONSENT_PURPOSE, GUEST_CONSENT_TEXT_VERSION, GUEST_PROVIDER_CAMERA_ID, SCHEMA_VERSION, REQUIRED_CAMERA_IDS } from "./config";
 import { FirestoreGenerationStore } from "./generation_store";
 import { GuestMediaDoc } from "./guest_media";
 import { usageLedgerPath } from "./usage";
@@ -33,7 +33,17 @@ function assertGuestBinding(
   nowMs: number,
 ): void {
   const binding = guestMediaOf(job)!;
+  // Irreversible withdrawal: a tombstone can never publish again, even if a
+  // racing completion wrote eligible around the withdrawal.
+  if ((guest as GuestMediaDoc & { tombstone?: unknown }).tombstone === true) {
+    throw new BackendError("FORBIDDEN", "Guest consent was withdrawn.");
+  }
   if (guest.status !== "eligible") throw new BackendError("FORBIDDEN", "Guest consent is no longer eligible for publication.");
+  if (!guest.consent || guest.consent.accepted !== true ||
+      guest.consent.textVersion !== GUEST_CONSENT_TEXT_VERSION ||
+      guest.consent.purpose !== GUEST_CONSENT_PURPOSE) {
+    throw new BackendError("FORBIDDEN", "Guest consent is not recorded for publication.");
+  }
   if (guest.sourceHash !== binding.sourceHash || guest.consentRevision !== binding.consentRevision) {
     throw new BackendError("FORBIDDEN", "Guest media changed while the job was running.");
   }

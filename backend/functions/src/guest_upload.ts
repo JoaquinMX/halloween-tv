@@ -73,6 +73,20 @@ function expiryIso(value: unknown): string {
   throw new BackendError("INTERNAL", "Guest media expiry is missing.");
 }
 
+function hardDeleteMs(doc: GuestMediaDoc, fallbackMs: number): number {
+  const raw = (doc as unknown as Record<string, unknown>).deleteAt;
+  if (raw && typeof raw === "object" && "toDate" in raw && typeof (raw as { toDate?: unknown }).toDate === "function") {
+    const ms = (raw as { toDate: () => Date }).toDate().getTime();
+    if (Number.isFinite(ms)) return ms;
+  }
+  if (raw instanceof Date && Number.isFinite(raw.getTime())) return raw.getTime();
+  if (typeof raw === "string") {
+    const parsed = Date.parse(raw);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return fallbackMs;
+}
+
 function looksLikeImage(bytes: Buffer): boolean {
   if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return true;
   if (bytes.length >= 4 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return true;
@@ -130,6 +144,9 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
     const acceptedAtIso = acceptedAt.toISOString();
     const consentRevision = consentRevisionFor(acceptedAtIso);
     const expiresAt = new Date(acceptedAt.getTime() + GUEST_UPLOAD_TTL_MS);
+    // Immutable creation-based deletion deadline: completion may narrow the
+    // visible expiry but must never extend retention past creation + 24h.
+    const deleteAt = new Date(acceptedAt.getTime() + GUEST_INPUT_TTL_MS);
     const ref = guestMediaRef(db, identity.partyId, submissionId);
     await ref.create({
       submissionId,
@@ -148,6 +165,7 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
       objectPath,
       contentType,
       expiresAt: Timestamp.fromDate(expiresAt),
+      deleteAt: Timestamp.fromDate(deleteAt),
       createdAt: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp(),
     });
@@ -187,6 +205,19 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
     const file = bucket.file(expectedPath);
     const [exists] = await file.exists();
     if (!exists) throw new BackendError("NOT_FOUND", "Guest photo bytes are not present.");
+    // Size-first gate: enforce the 10MB cap from object metadata before
+    // downloading any bytes, so an oversized PUT is rejected without a full
+    // download. The post-download length check below stays as a backstop for
+    // stores that report no size.
+    try {
+      const [metadata] = await file.getMetadata();
+      const reported = Number((metadata as { size?: unknown } | undefined)?.size);
+      if (Number.isFinite(reported) && (reported <= 0 || reported > GUEST_MAX_IMAGE_BYTES)) {
+        throw new BackendError("INVALID_ARGUMENT", "Guest photo size is outside the supported range.");
+      }
+    } catch (error) {
+      if (error instanceof BackendError) throw error;
+    }
     const [bytes] = await file.download();
     if (bytes.byteLength <= 0 || bytes.byteLength > GUEST_MAX_IMAGE_BYTES) {
       throw new BackendError("INVALID_ARGUMENT", "Guest photo size is outside the supported range.");
@@ -219,16 +250,61 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
     } catch {
       generation = null;
     }
-    const eligibleExpiresAt = new Date(now().getTime() + GUEST_INPUT_TTL_MS);
-    await ref.update({
-      status: "eligible",
-      sourceHash: sha256,
-      sourceSizeBytes: bytes.byteLength,
-      sourceGeneration: generation,
-      completedAt: FieldValue.serverTimestamp(),
-      expiresAt: Timestamp.fromDate(eligibleExpiresAt),
-      updatedAt: FieldValue.serverTimestamp(),
-    });
+    // Transactional commit against FRESH consent + status: a withdrawal that
+    // lands between the checks above and this write fails closed instead of
+    // producing eligible-on-tombstone. The immutable creation-based deadline
+    // caps the visible expiry so completion never extends retention.
+    const completionMs = now().getTime();
+    const hardDeadline = hardDeleteMs(doc, completionMs + GUEST_INPUT_TTL_MS);
+    const eligibleExpiresAt = new Date(Math.min(completionMs + GUEST_INPUT_TTL_MS, hardDeadline));
+    try {
+      await db.runTransaction(async (transaction) => {
+        const fresh = await transaction.get(ref);
+        if (!fresh.exists) throw new BackendError("NOT_FOUND", "Guest media does not exist.");
+        const current = fresh.data() as GuestMediaDoc;
+        if (current.partyId !== identity.partyId || current.deviceId !== identity.deviceId || current.channelId !== identity.channelId) {
+          throw new BackendError("FORBIDDEN", "Guest media is not bound to this party, device, and channel.");
+        }
+        // Withdrawal is irreversible: tombstone or withdrawn status fails the
+        // completion even when the pre-transaction snapshot looked live.
+        if ((current as GuestMediaDoc & { tombstone?: unknown }).tombstone === true || current.status === "withdrawn") {
+          throw new BackendError("FORBIDDEN", "Guest consent was withdrawn.");
+        }
+        if (current.status === "expired") throw new BackendError("CLIP_EXPIRED", "Guest upload capability has expired.");
+        const freshExpiryMs = current.expiresAt instanceof Timestamp
+          ? current.expiresAt.toDate().getTime()
+          : Date.parse(String(current.expiresAt));
+        if (!Number.isFinite(freshExpiryMs) || freshExpiryMs <= completionMs) {
+          transaction.update(ref, { status: "expired", updatedAt: FieldValue.serverTimestamp() });
+          throw new BackendError("CLIP_EXPIRED", "Guest upload capability has expired.");
+        }
+        if (!current.consent || current.consent.accepted !== true ||
+            current.consent.textVersion !== GUEST_CONSENT_TEXT_VERSION ||
+            current.consent.purpose !== GUEST_CONSENT_PURPOSE) {
+          throw new BackendError("FORBIDDEN", "Guest consent is not recorded for this device.");
+        }
+        if (current.status === "eligible") {
+          if (current.sourceHash !== sha256 || current.sourceSizeBytes !== bytes.byteLength) {
+            throw new BackendError("MANIFEST_MISMATCH", "Guest object changed after eligibility was recorded.");
+          }
+          return;
+        }
+        transaction.update(ref, {
+          status: "eligible",
+          sourceHash: sha256,
+          sourceSizeBytes: bytes.byteLength,
+          sourceGeneration: generation,
+          completedAt: FieldValue.serverTimestamp(),
+          expiresAt: Timestamp.fromDate(eligibleExpiresAt),
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+      });
+    } catch (error) {
+      if (error instanceof BackendError && error.errorCode === "CLIP_EXPIRED" && doc.status !== "expired") {
+        // Best-effort expiry marking already handled inside the transaction.
+      }
+      throw error;
+    }
     return {
       submissionId,
       partyId: identity.partyId,
@@ -290,7 +366,13 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
       throw new BackendError("FORBIDDEN", "Guest media is not bound to this party, device, and channel.");
     }
     const objectPath = guestObjectPath(identity.partyId, identity.deviceId, submissionId);
-    const withdrawnAt = now().toISOString();
+    const withdrawnAt = (doc as GuestMediaDoc & { withdrawnAt?: unknown }).withdrawnAt;
+    const withdrawnAtIso = typeof withdrawnAt === "string" && Number.isFinite(Date.parse(withdrawnAt))
+      ? withdrawnAt
+      : now().toISOString();
+    // Preserve the immutable creation-based deletion deadline across the
+    // tombstone rewrite so retention still bounds the (now deleted) input.
+    const existingDeleteAt = (doc as unknown as Record<string, unknown>).deleteAt;
     // Revoke eligibility first so concurrent submissions and publication fail closed.
     await ref.set({
       submissionId,
@@ -298,51 +380,152 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
       deviceId: identity.deviceId,
       channelId: identity.channelId,
       status: "withdrawn",
+      consent: doc.consent,
       consentRevision: doc.consentRevision,
       objectPath,
       contentType: doc.contentType,
       expiresAt: doc.expiresAt,
+      ...(existingDeleteAt !== undefined ? { deleteAt: existingDeleteAt } : {}),
       createdAt: doc.createdAt,
-      withdrawnAt,
+      withdrawnAt: withdrawnAtIso,
       tombstone: true,
+      pendingDeletions: [],
       updatedAt: FieldValue.serverTimestamp(),
     }, { merge: false });
-    // Discard attributable cloud derivatives and block running bound jobs.
-    const deletedObjects: string[] = [];
+    // Discard every attributable object: the source plus staged, delivered,
+    // and generated derivatives of all bound jobs plus the published manifest
+    // clips. Delivery eligibility is revoked immediately by deleting a current
+    // manifest produced from this submission, so no new delivery URLs can be
+    // issued post-withdrawal.
+    const attributable = new Set<string>([objectPath]);
     const jobs = await db.collection(`parties/${identity.partyId}/jobs`).where("guestMedia.submissionId", "==", submissionId).get();
+    const boundJobIds: string[] = [];
     for (const jobDoc of jobs.docs) {
-      const job = jobDoc.data();
+      boundJobIds.push(jobDoc.id);
+      const job = jobDoc.data() as Record<string, unknown>;
       const staged = (job.stagedOutputs && typeof job.stagedOutputs === "object" ? job.stagedOutputs : {}) as Record<string, unknown>;
       for (const clip of Object.values(staged)) {
         if (clip && typeof clip === "object" && typeof (clip as Record<string, unknown>).objectPath === "string") {
           const path = (clip as Record<string, unknown>).objectPath as string;
-          if (path.startsWith("parties/")) {
-            try {
-              await deleteWithRetry(deleteObject, bucket.file(path));
-              deletedObjects.push(path);
-            } catch {
-              // Failed derivative deletes stay visible via the throw below only
-              // for the source object; derivatives are retried by the sweeper.
+          if (path.startsWith("parties/")) attributable.add(path);
+        }
+      }
+      for (const key of ["deliveryPaths", "generatedPaths"] as const) {
+        const list = job[key];
+        if (Array.isArray(list)) for (const item of list) if (typeof item === "string" && item.startsWith("parties/")) attributable.add(item);
+      }
+    }
+    // Published manifest clips attributable to a bound job are deliverable
+    // until revoked: collect them here and delete the manifest doc below.
+    let revokedManifestPaths: string[] = [];
+    try {
+      const currentRef = db.doc(`parties/${identity.partyId}/manifests/current_${identity.channelId}`);
+      const current = await currentRef.get();
+      if (current.exists) {
+        const manifest = current.data() as Record<string, unknown>;
+        if (typeof manifest.jobId === "string" && boundJobIds.includes(manifest.jobId)) {
+          const clips = manifest.cameraClips;
+          if (Array.isArray(clips)) {
+            for (const clip of clips) {
+              if (clip && typeof clip === "object" && typeof (clip as Record<string, unknown>).objectPath === "string") {
+                const path = (clip as Record<string, unknown>).objectPath as string;
+                if (path.startsWith("parties/")) {
+                  attributable.add(path);
+                  revokedManifestPaths.push(path);
+                }
+              }
             }
           }
         }
       }
-      if (!["failed", "purged", "expired"].includes(String(job.state))) {
-        await jobDoc.ref.update({
+    } catch {
+      revokedManifestPaths = [...attributable].filter((p) => p.includes("/delivery/"));
+    }
+    const deletedObjects: string[] = [];
+    const pendingDeletions: string[] = [];
+    for (const path of attributable) {
+      try {
+        await deleteWithRetry(deleteObject, bucket.file(path));
+        deletedObjects.push(path);
+      } catch {
+        // Persisted below for the sweeper; verifiedAbsent stays false until
+        // every attributable object is confirmed absent.
+        pendingDeletions.push(path);
+      }
+    }
+    // Fail bound jobs closed with budget-pointer release (same semantics as
+    // the worker-side failForWithdrawnConsent path).
+    const budgetRef = db.doc(`parties/${identity.partyId}/generationBudget/active`);
+    for (const jobDoc of jobs.docs) {
+      const job = jobDoc.data() as Record<string, unknown>;
+      if (["failed", "purged", "expired"].includes(String(job.state))) {
+        await db.runTransaction(async (transaction) => {
+          const budget = await transaction.get(budgetRef);
+          if (budget.exists && budget.data()?.activeJobId === jobDoc.id) {
+            transaction.update(budgetRef, { activeJobId: null, state: "idle", updatedAt: FieldValue.serverTimestamp() });
+          }
+        }).catch(() => undefined);
+        continue;
+      }
+      await db.runTransaction(async (transaction) => {
+        const [current, budget] = await Promise.all([transaction.get(jobDoc.ref), transaction.get(budgetRef)]);
+        if (!current.exists) return;
+        transaction.update(jobDoc.ref, {
           state: "failed",
           status: "failed",
           errorCode: "FORBIDDEN",
+          reconciliationReason: "GUEST_CONSENT_WITHDRAWN",
           failedAt: FieldValue.serverTimestamp(),
           timestamp: FieldValue.serverTimestamp(),
           workerLeaseUntilMs: 0,
         });
+        if (budget.exists && budget.data()?.activeJobId === jobDoc.id) {
+          transaction.update(budgetRef, { activeJobId: null, state: "idle", updatedAt: FieldValue.serverTimestamp() });
+        }
+      }).catch(() => undefined);
+    }
+    // Revoke the deliverable manifest after its bytes are deleted.
+    try {
+      const currentRef = db.doc(`parties/${identity.partyId}/manifests/current_${identity.channelId}`);
+      const current = await currentRef.get();
+      if (current.exists) {
+        const manifest = current.data() as Record<string, unknown>;
+        if (typeof manifest.jobId === "string" && boundJobIds.includes(manifest.jobId)) {
+          await currentRef.delete().catch(() => undefined);
+        }
+      }
+    } catch {
+      // Revocation best-effort: delivery paths additionally refuse withdrawn
+      // bindings, and retention retries revoked-manifest objects.
+    }
+    // verifiedAbsent ONLY after every attributable object (source + staged +
+    // delivered + generated) is confirmed absent.
+    let verifiedAbsent = pendingDeletions.length === 0;
+    if (verifiedAbsent) {
+      for (const path of attributable) {
+        try {
+          const [stillExists] = await bucket.file(path).exists();
+          if (stillExists) {
+            verifiedAbsent = false;
+            pendingDeletions.push(path);
+          }
+        } catch {
+          verifiedAbsent = false;
+          pendingDeletions.push(path);
+        }
       }
     }
-    await deleteWithRetry(deleteObject, bucket.file(objectPath));
-    deletedObjects.unshift(objectPath);
-    const [stillExists] = await bucket.file(objectPath).exists();
-    if (stillExists) throw new BackendError("INTERNAL", "Guest source object could not be removed.");
-    return { submissionId, status: "withdrawn", deletedObjects, verifiedAbsent: true };
+    // Order the source first for stable assertions, without duplicating it.
+    const orderedDeleted = [
+      ...(deletedObjects.includes(objectPath) ? [objectPath] : []),
+      ...deletedObjects.filter((p) => p !== objectPath),
+    ];
+    await ref.update({
+      pendingDeletions,
+      revokedManifestPaths,
+      updatedAt: FieldValue.serverTimestamp(),
+    }).catch(() => undefined);
+    return { submissionId, status: "withdrawn", deletedObjects: orderedDeleted, verifiedAbsent };
   }
 
   /**

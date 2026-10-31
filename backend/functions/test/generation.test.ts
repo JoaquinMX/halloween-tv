@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { resolve } from "node:path";
 import test from "node:test";
 import { createGenerationServices } from "../src/generation";
 import { REQUIRED_CAMERA_IDS } from "../src/config";
@@ -160,6 +162,57 @@ test("request idempotency cannot be rebound to another device", { skip: !HAS_FIR
     await assert.rejects(services.requestGeneration({ ...input, deviceId: "tv-2" }),
       (error: unknown) => error instanceof BackendError && error.errorCode === "FORBIDDEN");
   } finally {
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+  }
+});
+
+test("lazy provider fallback threads fixtureDirectory through both construction paths", {
+  skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
+}, async () => {
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  const deviceId = "tv-lazy-fixture";
+  const channelId = "main";
+  const jobId = "job-lazy-fixture";
+  const idempotencyKey = "idem-lazy-fixture";
+  const { mkdtemp, copyFile, readFile } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { normalizeProviderVideo, removeNormalizedVideo } = await import("../src/normalize");
+  const assets = resolve(process.cwd(), "../../apps/tv_app/assets");
+  // Every slot reads the CAM-01 bytes: only the threaded directory produces
+  // this digest on all four cameras.
+  const isolated = await mkdtemp(join(tmpdir(), "halloween-fixtures-"));
+  const cam01 = await readFile(join(assets, "cam01.mp4"));
+  for (const name of ["cam01.mp4", "cam02.mp4", "cam03.mp4", "cam04.mp4"]) {
+    await copyFile(join(assets, "cam01.mp4"), join(isolated, name));
+  }
+  const defaultCam02 = await readFile(join(assets, "cam02.mp4"));
+  assert.notDeepEqual(cam01, defaultCam02, "fixture inputs must differ for this regression to discriminate");
+  const expected = await normalizeProviderVideo(
+    { video: { kind: "file", value: join(isolated, "cam01.mp4") }, secondsOut: 2, secondsIn: 0, creditsCharged: 0 },
+  );
+  try {
+    await seedParty(db, partyId, deviceId, channelId);
+    // No explicit provider: the service must lazily construct one from the
+    // threaded fixture directory instead of the repository default.
+    const services = createGenerationServices({
+      db, bucket, fixtureDirectory: isolated, pollIntervalMs: 1, sleep: async () => undefined,
+    });
+    await services.requestGeneration({ partyId, deviceId, channelId, jobId, idempotencyKey, presetId: "cheap_demo" });
+    const run = await services.runGeneration({ partyId, deviceId, channelId, jobId, idempotencyKey });
+    assert.equal(run.state, "ready");
+    const manifest = (await db.doc(`parties/${partyId}/manifests/current_${channelId}`).get()).data()!;
+    assert.equal(manifest.cameraClips.length, 4);
+    for (const clip of manifest.cameraClips as Array<{ cameraId: string; sha256: string; sizeBytes: number; objectPath: string }>) {
+      assert.equal(clip.sha256, expected.sha256, `${clip.cameraId} must come from the threaded fixture directory`);
+      assert.equal(clip.sizeBytes, expected.sizeBytes);
+      const [bytes] = await bucket.file(clip.objectPath).download();
+      assert.equal(createHash("sha256").update(bytes).digest("hex"), clip.sha256);
+    }
+  } finally {
+    await removeNormalizedVideo(expected).catch(() => undefined);
     await clearParty(db, bucket, partyId);
     await disposeEmulatorContext(app);
   }
