@@ -190,3 +190,13 @@ with party/TV-device/channel IDs returned manifest v1, 4 clips
   lineup ✓ (both parties), TV host panel + guest list incl. phone ✓,
   offline continuity ✓, live resync ✓. Only emulator-side item carried
   over unchanged; no code changed this pass.
+
+## 10. Cycle-11 guest chain + fake rehearsal + TV ACK (orchestrator-executed 2026-10-30/31)
+
+- P0 camera fix proven on Pixel 9A291FFBA00654: camera opens on grant (Joaquin-confirmed), typed join reaches live lineup (screenshot cycle11-camera-lineup.png), live camera frame (cycle11-camera-preview.png).
+- Backend 80/80 + companion 104/104 serial suites green on merged tip (incl. consent-gating, withdrawal races, empty-fixture closedown, memory-floor + trigger-region preflight tests).
+- Deployed to halloween-tv: 13 functions (4 guest callables + onGuestIngestFinalized us-east1), rules/indexes/storage. Fixes found by deploy, not review: storage trigger region (bucket is US-EAST1, Eventarc SA granted storage.viewer), worker OOM at 256MiB (raised to 1GiB GENERATION_WORKER_MEMORY + preflight floor).
+- Fake E2E (zero provider calls): job c11-fake-04 on rehearsal-c11-fake-01/haunted_surveillance (TV watches literal haunted_surveillance — party activeChannelId aligned), 1 fake submit CAM-01 normalized to generated-shape H.264/yuv420p/24fps/854x480/2s + 3 fixture slots, manifest v2. Physical TV downloaded, hash-verified, WALL UPDATED v2 on screen (cycle11-tv-generated.png), ACKed (deliveryAckId c9688...), job purged, post-purge playback retained (cycle11-tv-post-purge.png). Reconcile: providerApiCalls=0, CAM-01 synthetic_zero; fixture slots unknown/null by design.
+- Rehearsal window still OPEN (GENERATION_ENABLED=true + fake, predeploy --allow-generation): must restore disabled + redeploy after live batch. Stuck job c11-fake-02 marked failed (worker OOM, maxAttempts 1).
+- PENDING: live cheap_demo (wan3.0-video 480p 2s) needs ALIBABA_API_KEY + ALIBABA_WORKSPACE_ID from Joaquin (no Secret Manager on project; .env.halloween-tv is gitignored and deploy-safe). Spend pre-approved ≤5 attempts with realized-credit logging.
+- Known gaps: emulator Storage lacks XML PUT route (signed-PUT proven on cloud instead); TV live channel is a hardcoded constant (single-party assumption, flagged for review).

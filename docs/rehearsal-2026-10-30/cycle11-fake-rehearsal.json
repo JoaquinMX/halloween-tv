@@ -1,0 +1,63 @@
+{
+  "mode": "fake-rehearsal",
+  "preview": false,
+  "target": "cloud",
+  "projectId": "halloween-tv",
+  "partyId": "rehearsal-c11-fake-01",
+  "deviceId": "g-c11fake01",
+  "channelId": "haunted_surveillance",
+  "jobId": "c11-fake-04",
+  "idempotencyKey": "c11-fake-04",
+  "provider": "fake",
+  "presetId": "cheap_demo",
+  "guestPlan": "consented synthetic photo (requestGuestUpload -> PUT -> completeGuestUpload) then ONE guest-bound requestGeneration (1 fake submit for CAM-01 + 3 fixture slots for CAM-02..CAM-04); poll observes only, never resubmits",
+  "submits": 1,
+  "applied": true,
+  "result": "rehearsed",
+  "providerSelection": "fake",
+  "submissions": 1,
+  "polls": 3,
+  "jobState": "ready",
+  "manifestVersion": 2,
+  "manifestJobId": "c11-fake-04",
+  "providerSlots": [
+    "CAM-01"
+  ],
+  "fixtureSlots": [
+    "CAM-02",
+    "CAM-03",
+    "CAM-04"
+  ],
+  "usage": [
+    {
+      "cameraId": "CAM-01",
+      "providerTaskId": "CAM-01__21cab51465d2e4817df2a9ce",
+      "credits": 0,
+      "synthetic": true
+    },
+    {
+      "cameraId": "CAM-02",
+      "providerTaskId": null,
+      "credits": null,
+      "synthetic": true
+    },
+    {
+      "cameraId": "CAM-03",
+      "providerTaskId": null,
+      "credits": null,
+      "synthetic": true
+    },
+    {
+      "cameraId": "CAM-04",
+      "providerTaskId": null,
+      "credits": null,
+      "synthetic": true
+    }
+  ],
+  "syntheticZeroCameras": 4,
+  "providerApiCalls": 0,
+  "fakeCredits": "synthetic zero",
+  "guestSubmissionId": "gsub-5fbcffa9aeb34d3a806f0333d37593ad",
+  "guestSourceHash": "b9edd0f18539faefd58a9b8e6c1e2ba35b56614c9805be03c1b2c59e4317c019",
+  "syntheticPhotoSource": "locally generated single-frame JPEG (native host ffmpeg lavfi testsrc; no real user photo)"
+}
