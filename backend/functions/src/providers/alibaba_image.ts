@@ -10,13 +10,18 @@ import { sha256 } from "../cartoon_pipeline";
  *   POST https://token-plan.ap-southeast-1.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation
  *   Body: { model: 'qwen-image-3.0-pro',
  *           input: { messages: [{ role: 'user',
- *                     content: [{ image: <dataURI_style_scene> },
- *                              { image: <dataURI_subject> },
+ *                     content: [{ image: <dataURI_style_scene: image 1> },
+ *                              { image: <dataURI_subject: image 2> },
  *                              { text: <positivePrompt> }] }] },
  *           parameters: { size: '1024*768', n: 1, seed,
  *                         prompt_extend: false, enable_thinking: false,
  *                         watermark: false, negative_prompt } }
  *   Parse: output.choices[*].message.content[*].image
+ *
+ *   Wire positions are fixed: image 1 is always the style_scene bytes and
+ *   image 2 is always the subject_identity bytes. The still prompt text maps
+ *   these positions explicitly (see REFERENCE_ROLE_MAPPING in
+ *   cartoon_prompts.ts) because TypeScript role labels never reach the model.
  *
  * No task polling: the call is synchronous. Both image references are
  * in-process data URIs (data:image/jpeg|png;base64) derived from the

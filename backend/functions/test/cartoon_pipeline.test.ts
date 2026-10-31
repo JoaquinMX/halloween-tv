@@ -115,6 +115,9 @@ test("cartoon still serializes to the verified sync multimodal body (no network)
     getScenario(catalog, "attic-computer-corner"), FUNCTIONS_ROOT)));
   assert.deepEqual(Buffer.from(String(subjectItem.image).split(",")[1], "base64"), Buffer.from(PORTRAIT_BYTES));
   assert.equal(textItem.text, request.prompt);
+  // Fix-5b: the composed still maps wire positions explicitly.
+  assert.ok(request.prompt.includes("reference image 1 is the SCENE/STYLE reference only"));
+  assert.ok(request.prompt.includes("reference image 2 is the ACTUAL PERSON"));
   assert.deepEqual(body.parameters, {
     size: "1024*768",
     n: 1,
