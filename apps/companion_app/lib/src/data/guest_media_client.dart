@@ -8,9 +8,25 @@ const String kCompleteGuestUpload = 'completeGuestUpload';
 const String kGetGuestMediaStatus = 'getGuestMediaStatus';
 const String kWithdrawGuestMedia = 'withdrawGuestMedia';
 
-/// Server-side consent envelope (mirror backend/functions/src/config.ts).
+/// Server-side consent envelope.
+//
+// Pinned to the backend contract of record:
+// backend/functions/src/config.ts -> GUEST_CONSENT_TEXT_VERSION ("v1"),
+// GUEST_CONSENT_PURPOSE ("guest_cameo"). The backend rejects any other
+// textVersion/purpose with INVALID_ARGUMENT; keep these literals in sync
+// with that file (no other source of truth on either side).
 const String kGuestConsentTextVersion = 'v1';
 const String kGuestConsentPurpose = 'guest_cameo';
+
+/// Content types the backend accepts for guest photos.
+//
+// Pinned to backend/functions/src/config.ts -> GUEST_ALLOWED_CONTENT_TYPES
+// (["image/jpeg", "image/png"]). requestGuestUpload rejects anything else
+// with INVALID_ARGUMENT; the picker threads one of these through submit.
+const List<String> kGuestAllowedContentTypes = <String>[
+  'image/jpeg',
+  'image/png',
+];
 
 abstract interface class GuestMediaCallableInvoker {
   Future<Object?> call(String name, Map<String, Object?> payload);
@@ -97,10 +113,13 @@ final class GuestMediaClient {
         .timeout(const Duration(seconds: 15));
     if (raw is! Map ||
         raw['submissionId'] is! String ||
-        raw['uploadUrl'] is! String ||
-        raw['contentType'] != contentType) {
+        raw['uploadUrl'] is! String) {
       throw const FormatException('Upload capability response is malformed');
     }
+    // The backend never echoes contentType (see guest_upload.ts:
+    // requestGuestUpload returns {submissionId, objectPath, uploadUrl,
+    // expiresAt, consentRevision} only). The PUT below uses the caller's
+    // contentType, which the backend bound into the signed URL.
     final uri = Uri.tryParse(raw['uploadUrl'] as String);
     if (uri == null ||
         uri.scheme != 'https' ||
@@ -109,7 +128,9 @@ final class GuestMediaClient {
       throw const FormatException('Upload capability URL is invalid');
     }
     final id = raw['submissionId'] as String;
-    if (!RegExp(r'^[A-Za-z0-9_-]{8,128}$').hasMatch(id)) {
+    // Backend validateId shape (contracts.ts ID_RE): leading alnum, then
+    // alnum/_/-, max 128 chars. The server mints `gsub-<32 hex>`.
+    if (!RegExp(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$').hasMatch(id)) {
       throw const FormatException('Submission receipt is invalid');
     }
     return GuestUploadCapability(
@@ -124,11 +145,13 @@ final class GuestMediaClient {
   Future<void> complete({
     required String partyId,
     required String deviceId,
+    required String channelId,
     required String submissionId,
   }) async {
     await _invoker
         .call(kCompleteGuestUpload, {
           ..._scope(partyId, deviceId),
+          'channelId': channelId,
           'submissionId': submissionId,
         })
         .timeout(const Duration(seconds: 15));
@@ -137,11 +160,13 @@ final class GuestMediaClient {
   Future<Map<String, Object?>> status({
     required String partyId,
     required String deviceId,
+    required String channelId,
     required String submissionId,
   }) async {
     final raw = await _invoker
         .call(kGetGuestMediaStatus, {
           ..._scope(partyId, deviceId),
+          'channelId': channelId,
           'submissionId': submissionId,
         })
         .timeout(const Duration(seconds: 15));
@@ -154,26 +179,23 @@ final class GuestMediaClient {
   Future<Map<String, Object?>> withdraw({
     required String partyId,
     required String deviceId,
+    required String channelId,
     required String submissionId,
   }) async {
     final raw = await _invoker
         .call(kWithdrawGuestMedia, {
           ..._scope(partyId, deviceId),
+          'channelId': channelId,
           'submissionId': submissionId,
         })
         .timeout(const Duration(seconds: 15));
     if (raw is! Map || raw['status'] is! String) {
       throw const FormatException('Withdrawal response is malformed');
     }
+    // Backend terminal status (guest_upload.ts WithdrawGuestMediaResult):
+    // exactly 'withdrawn'. Anything else is a contract violation.
     final String returnedStatus = raw['status'] as String;
-    if (!const {
-      'recorded',
-      'withdrawalRecorded',
-      'withdrawal_recorded',
-      'deletionPending',
-      'deletion_pending',
-      'deleted',
-    }.contains(returnedStatus)) {
+    if (returnedStatus != 'withdrawn') {
       throw const FormatException('Withdrawal response is malformed');
     }
     return Map<String, Object?>.from(raw);

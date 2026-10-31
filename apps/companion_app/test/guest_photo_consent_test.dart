@@ -13,6 +13,9 @@ class Picker implements GuestPhotoPicker {
   final File file;
   @override
   Future<File?> pickPhoto() async => file;
+  @override
+  String contentTypeFor(File file) =>
+      file.path.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg';
 }
 
 class Boundary implements GuestMediaCallableInvoker {
@@ -31,13 +34,23 @@ class Boundary implements GuestMediaCallableInvoker {
           consent['purpose'] != 'guest_cameo') {
         throw StateError('affirmative consent object is required');
       }
+      // Backend-faithful capability: no contentType echo.
       return {
-        'submissionId': 'receipt_12345',
+        'submissionId': 'gsub-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        'objectPath':
+            'parties/party/guests/device/ingest/gsub-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/photo.jpg',
         'uploadUrl': 'https://signed.example/upload',
-        'contentType': 'image/jpeg',
+        'expiresAt': '2030-01-01T00:00:00.000Z',
+        'consentRevision': 'v1:2026-10-30T00:00:00.000Z',
       };
     }
-    return {'status': 'complete'};
+    if (payload['channelId'] != 'cctv') {
+      throw StateError('INVALID_ARGUMENT: channelId is required for $name');
+    }
+    if (name == kWithdrawGuestMedia) {
+      return {'status': 'withdrawn', 'verifiedAbsent': true};
+    }
+    return {'status': 'eligible'};
   }
 }
 

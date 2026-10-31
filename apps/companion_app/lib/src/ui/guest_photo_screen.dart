@@ -104,11 +104,14 @@ final class _GuestPhotoScreenState extends State<GuestPhotoScreen> {
       return;
     }
     setState(() => message = 'Uploading…');
+    String contentType = 'image/jpeg';
     try {
+      contentType = widget.picker.contentTypeFor(selected);
       await widget.session.submit(
         selected,
         consent: consent,
         confirmed: confirmed,
+        contentType: contentType,
       );
       if (mounted) setState(() => message = 'Photo submitted.');
     } catch (_) {
@@ -157,28 +160,29 @@ final class _GuestPhotoScreenState extends State<GuestPhotoScreen> {
               : submit,
           child: const Text('Review and upload'),
         ),
-        if (widget.session.submissionId != null)
+        if (widget.session.submissionIds.isNotEmpty)
+          for (final String id in widget.session.submissionIds)
+            OutlinedButton(
+              onPressed: widget.session.busy
+                  ? null
+                  : () async {
+                      await widget.session.withdraw(submissionId: id);
+                      if (mounted) {
+                        setState(
+                          () => message =
+                              widget.session.submissionIds.contains(id)
+                              ? 'Cloud deletion is pending. Retry when online.'
+                              : 'Withdrawal recorded and deletion confirmed.',
+                        );
+                      }
+                    },
+              child: const Text('Delete photo and withdraw'),
+            ),
+        if (widget.session.statuses.values.any(
+          (s) => s == 'deletionPending' || s == 'recorded',
+        ))
           OutlinedButton(
-            onPressed: widget.session.busy
-                ? null
-                : () async {
-                    await widget.session.withdraw();
-                    if (mounted) {
-                      setState(
-                        () => message = widget.session.status == 'deleted'
-                            ? 'Withdrawal recorded and deletion confirmed.'
-                            : widget.session.status == 'recorded'
-                            ? 'Withdrawal recorded; cloud deletion is pending. Retry deletion when online.'
-                            : 'Cloud deletion is pending. Retry when online.',
-                      );
-                    }
-                  },
-            child: const Text('Delete photo and withdraw'),
-          ),
-        if (widget.session.status == 'deletionPending' ||
-            widget.session.status == 'recorded')
-          OutlinedButton(
-            onPressed: widget.session.retryWithdrawal,
+            onPressed: () => widget.session.retryWithdrawal(),
             child: const Text('Retry deletion'),
           ),
         if (message != null)

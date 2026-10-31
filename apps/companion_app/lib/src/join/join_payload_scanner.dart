@@ -178,7 +178,9 @@ final class CameraJoinPayloadScanner implements JoinPayloadScanner {
     try {
       final BuildContext candidate = supplier();
       return candidate.mounted ? candidate : null;
-    } on Exception {
+    } catch (_) {
+      // Supplier failures (including FlutterError, an Error, from a torn
+      // down element) mean no usable fallback: type-or-paste stays.
       return null;
     }
   }
@@ -204,8 +206,10 @@ final class CameraJoinPayloadScanner implements JoinPayloadScanner {
         context,
       ).push<String>(MaterialPageRoute(builder: (_) => const QrScanScreen()));
       return _Pushed(text);
-    } on Exception {
-      // No Navigator above this context: the caller falls back to the
+    } catch (_) {
+      // No Navigator above this context: Navigator.of throws FlutterError
+      // (an Error, not an Exception) when no Navigator is in scope, e.g. a
+      // stale ancestor context captured above MaterialApp. Fall back to the
       // legacy supplier or to the type-or-paste path.
       return const _NoNavigator();
     }

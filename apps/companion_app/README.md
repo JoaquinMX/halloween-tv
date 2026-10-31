@@ -88,10 +88,16 @@ Optional flow behind "Submit a guest photo" on the now-playing screen:
   `consent && confirmed`; `GuestMediaClient.requestUpload` refuses
   `affirmativeConsent: false` before any network).
 - The client then requests an upload capability (`requestGuestUpload`),
-  PUTs the bytes, and confirms (`completeGuestUpload`). Withdrawal
-  (`withdrawGuestMedia`) records withdrawal and clears the local receipt
-  once deletion is confirmed; a saved receipt is re-checked on next launch
-  (`recover`). Denied/failed uploads keep the photo local and retryable.
+  PUTs the bytes with the caller-chosen content type (`image/jpeg` or
+  `image/png`, threaded from the picker), and confirms
+  (`completeGuestUpload`). Every call carries
+  `{partyId, deviceId, channelId}` plus `submissionId` where applicable —
+  the backend rejects a missing `channelId` with `INVALID_ARGUMENT`.
+  Withdrawal (`withdrawGuestMedia`) returns the terminal status `withdrawn`.
+  Each submission keeps its own persisted receipt and withdrawal control,
+  so withdrawing one photo never strands another; a saved receipt is
+  re-checked on next launch (`recover`). Denied/failed uploads keep the
+  photo local and retryable.
 - Privacy copy (shown in-app): the photo is transformed for Halloween, may
   appear on the party TV, is processed by the media provider and temporarily
   retained in cloud storage; a copy already downloaded to the TV may not be
@@ -101,14 +107,19 @@ Backend status: the guest-media callables are implemented server-side
 (`backend/functions/src/guest_upload.ts`, wired in
 `backend/functions/src/index.ts`). `requestGuestUpload` requires
 `{partyId, deviceId, channelId, contentType, byteSize,
-consent:{accepted:true, textVersion:'v1', purpose:'guest_cameo'}}` and mints
-a per-submission signed PUT capability bound to a server-assigned object
-path; `completeGuestUpload`, `getGuestMediaStatus`, and `withdrawGuestMedia`
-are scoped by `{partyId, deviceId, channelId, submissionId}`. The emulator
-contract test (`integration_test/guest_photo_emulator_test.dart`) pins this
-envelope end to end; it currently proceeds through capability issuance and
-fails at the signed PUT step because the Storage emulator has no XML-API
-PUT route (HTTP 501), before any completion.
+consent:{accepted:true, textVersion:'v1', purpose:'guest_cameo'}}` (consent
+literals pinned in `guest_media_client.dart` against
+`backend/functions/src/config.ts`) and mints a per-submission signed PUT
+capability bound to a server-assigned object path, returning
+`{submissionId, objectPath, uploadUrl, expiresAt, consentRevision}` — the
+backend never echoes `contentType`; the PUT uses the caller content type.
+`completeGuestUpload`, `getGuestMediaStatus`, and `withdrawGuestMedia`
+are scoped by `{partyId, deviceId, channelId, submissionId}`, with
+withdrawal terminal at status `withdrawn`. The emulator contract test
+(`integration_test/guest_photo_emulator_test.dart`) pins this envelope end
+to end; it proceeds through capability issuance and reaches the signed PUT
+step, which the Storage emulator refuses with HTTP 501 (no XML-API PUT
+route), before any completion.
 
 ## Getting Started
 
