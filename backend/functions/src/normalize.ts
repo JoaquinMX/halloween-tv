@@ -19,6 +19,11 @@ export interface NormalizationOptions {
   ffprobePath?: string;
   fetchImpl?: typeof fetch;
   tempRoot?: string;
+  /**
+   * Locked delivery duration for this job. Defaults to the cheap_demo 2s
+   * profile; the STEP 2 cameo batch passes 5. Anything else is rejected.
+   */
+  expectedSecondsOut?: 2 | 5;
 }
 
 function run(command: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
@@ -64,18 +69,24 @@ export async function normalizeProviderVideo(
   result: ProviderResult,
   options: NormalizationOptions = {},
 ): Promise<NormalizedVideo> {
-  if (result.secondsOut !== 2 || result.secondsIn !== 0) {
-    throw new Error("Provider result does not match the two-second text-only preset.");
+  const expectedSecondsOut = options.expectedSecondsOut ?? 2;
+  if (result.secondsOut !== expectedSecondsOut || result.secondsIn !== 0) {
+    throw new Error(expectedSecondsOut === 5
+      ? "Provider result does not match the five-second cameo reference preset."
+      : "Provider result does not match the two-second text-only preset.");
   }
   const directory = await mkdtemp(join(options.tempRoot ?? tmpdir(), "halloween-generation-"));
   const source = join(directory, "source.mp4");
   const output = join(directory, "normalized.mp4");
   try {
     await resolveSource(result, source, options.fetchImpl ?? fetch);
-    const filter = "fps=24,scale=854:480:force_original_aspect_ratio=decrease,pad=854:480:(ow-iw)/2:(oh-ih)/2,setsar=1,tpad=stop_mode=clone:stop_duration=2";
+    const filter = `fps=24,scale=854:480:force_original_aspect_ratio=decrease,pad=854:480:(ow-iw)/2:(oh-ih)/2,setsar=1,tpad=stop_mode=clone:stop_duration=${expectedSecondsOut}`;
+    // The prepared runtime profile pins the cheap_demo two-second path, which
+    // keeps the literal "-t", "2" construction the deploy preflight greps for.
+    const durationArgs = expectedSecondsOut === 5 ? ["-t", "5"] : ["-t", "2"];
     await run(options.ffmpegPath ?? process.env.FFMPEG_PATH ?? "ffmpeg", [
       "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", source,
-      "-an", "-vf", filter, "-t", "2", "-r", "24", "-c:v", "libx264",
+      "-an", "-vf", filter, ...durationArgs, "-r", "24", "-c:v", "libx264",
       "-pix_fmt", "yuv420p", "-movflags", "+faststart", output,
     ]);
     const probe = await run(options.ffprobePath ?? process.env.FFPROBE_PATH ?? "ffprobe", [
@@ -89,9 +100,10 @@ export async function normalizeProviderVideo(
     };
     const video = parsed.streams?.[0];
     const durationMs = Math.round(Number(parsed.format?.duration) * 1000);
+    const expectedDurationMs = expectedSecondsOut * 1000;
     if (video?.codec_name !== "h264" || video.pix_fmt !== "yuv420p" || video.r_frame_rate !== "24/1" ||
-        video.width !== 854 || video.height !== 480 || durationMs !== 2000) {
-      throw new Error("FFmpeg output did not match H.264/yuv420p/24fps/480P/two-second profile.");
+        video.width !== 854 || video.height !== 480 || durationMs !== expectedDurationMs) {
+      throw new Error(`FFmpeg output did not match H.264/yuv420p/24fps/480P/${expectedSecondsOut === 5 ? "five-second" : "two-second"} profile.`);
     }
     const bytes = await readFile(output);
     if (!bytes.length || bytes.length > MAX_SOURCE_BYTES) throw new Error("Normalized output size is outside the supported range.");

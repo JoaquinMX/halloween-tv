@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 import { FieldValue } from "firebase-admin/firestore";
 import { assertRegisteredPartyDevice } from "./auth";
 import { BackendError, parseRequestGeneration, RequestGenerationInput, validateId } from "./contracts";
-import { GUEST_PROVIDER_CAMERA_ID, MEDIA_RETENTION_MS, REQUIRED_CAMERA_IDS } from "./config";
+import { CAMEO_DEMO_PRESET, GUEST_PROVIDER_CAMERA_ID, MEDIA_RETENTION_MS, REQUIRED_CAMERA_IDS } from "./config";
 import { FirestoreGenerationStore, GenerationTask } from "./generation_store";
 import { assertGuestEligible } from "./guest_media";
 import { normalizeProviderVideo, NormalizationOptions, removeNormalizedVideo } from "./normalize";
@@ -14,6 +14,7 @@ import { AlibabaSubmissionError } from "./providers/alibaba";
 import { recordUsageOutcome, UsageLedgerInput } from "./usage";
 import { createVideoGenerationProviderFromEnvironment, FakeVideoGenerationPort } from "./providers/fake";
 import {
+  buildCameoDemoRequest,
   buildCheapDemoRequest,
   CameraId,
   GuestImageReference,
@@ -96,7 +97,8 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
     if (job.state !== "running") throw new BackendError("MANIFEST_MISMATCH", "Only a running generation job can stage media.");
     const old = (job.stagedOutputs ?? {})[cameraId];
     if (old && typeof old === "object") return old as Record<string, unknown>;
-    const normalized = await normalizeProviderVideo(result, options.normalization);
+    const expectedSecondsOut = job.presetId === CAMEO_DEMO_PRESET.presetId ? CAMEO_DEMO_PRESET.secondsOut : 2;
+    const normalized = await normalizeProviderVideo(result, { ...options.normalization, expectedSecondsOut });
     const expiresAt = new Date(now().getTime() + MEDIA_RETENTION_MS).toISOString();
     const objectPath = store.plannedObjectPath(job.partyId, job.channelId, Number(job.manifestVersion), cameraId);
     try {
@@ -150,9 +152,10 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
     if (job.state !== "running") throw new BackendError("MANIFEST_MISMATCH", "Only a running generation job can stage media.");
     const old = (job.stagedOutputs ?? {})[cameraId];
     if (old && typeof old === "object") return old as Record<string, unknown>;
+    const expectedSecondsOut = job.presetId === CAMEO_DEMO_PRESET.presetId ? CAMEO_DEMO_PRESET.secondsOut : 2;
     const normalized = await normalizeProviderVideo(
-      { video: { kind: "file", value: fixturePathFor(cameraId) }, secondsOut: 2, secondsIn: 0, creditsCharged: null },
-      options.normalization,
+      { video: { kind: "file", value: fixturePathFor(cameraId) }, secondsOut: expectedSecondsOut, secondsIn: 0, creditsCharged: null },
+      { ...options.normalization, expectedSecondsOut },
     );
     const expiresAt = new Date(now().getTime() + MEDIA_RETENTION_MS).toISOString();
     const objectPath = store.plannedObjectPath(job.partyId, job.channelId, Number(job.manifestVersion), cameraId);
@@ -241,12 +244,12 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
 
   async function pollUntilComplete(
     taskId: string,
-    rehearsalProvider: VideoGenerationPort | undefined,
+    activeProvider: VideoGenerationPort | undefined,
     deadline = now().getTime() + providerTimeoutMs,
   ): Promise<ProviderTaskStatus> {
     // Default-path resolution stays lazy (exactly as before) so unknown or
     // misconfigured providers fail at the same point with the same shape.
-    const active = rehearsalProvider ?? getProvider();
+    const active = activeProvider ?? getProvider();
     while (true) {
       const status = await active.getStatus(taskId);
       if (status.state === "SUCCEEDED" || status.state === "FAILED") return status;
@@ -270,6 +273,9 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
     // unmarked jobs keep `undefined` so every default-path call site resolves
     // lazily through getProvider() exactly as before.
     const activeProvider = resolveRehearsalProvider(claim.job);
+    // 5s on every slot (one provider camera + three padded fixture slots).
+    const jobPresetId = claim.job.presetId === CAMEO_DEMO_PRESET.presetId ? CAMEO_DEMO_PRESET.presetId : "cheap_demo";
+    const expectedSecondsOut = jobPresetId === CAMEO_DEMO_PRESET.presetId ? CAMEO_DEMO_PRESET.secondsOut : 2;
     // Consent-bound guest execution plan: exactly ONE provider-generated camera
     // slot (CAM-01, bound to the validated guest photo) plus three locally
     // prepared fixture slots. Text-only jobs keep four provider cameras.
@@ -296,7 +302,7 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
           if (isGuestJob && cameraId !== GUEST_PROVIDER_CAMERA_ID) {
             await recordUsageOutcome(options.db, ledgerInput(job, cameraId), {
               success: true,
-              secondsOut: 2,
+              secondsOut: expectedSecondsOut,
               secondsIn: 0,
               creditsCharged: null,
               providerTaskId: null,
@@ -341,10 +347,10 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
         let providerTask = (job.providerTasks ?? {})[cameraId] as { taskId?: unknown } | undefined;
         if (isGuestJob && cameraId !== GUEST_PROVIDER_CAMERA_ID) {
           const staged = await stageFixtureSlot(validTask.partyId, validTask.jobId, cameraId);
-          await store.recordFixtureResult(validTask.partyId, validTask.jobId, cameraId, staged);
+          await store.recordFixtureResult(validTask.partyId, validTask.jobId, cameraId, staged, expectedSecondsOut);
           await recordUsageOutcome(options.db, ledgerInput(job, cameraId), {
             success: true,
-            secondsOut: 2,
+            secondsOut: expectedSecondsOut,
             secondsIn: 0,
             creditsCharged: null,
             providerTaskId: null,
@@ -368,7 +374,9 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
               job = await store.getJob(validTask.partyId, validTask.jobId);
               providerTask = (job.providerTasks ?? {})[cameraId] as { taskId?: unknown } | undefined;
             } else {
-              const request = buildCheapDemoRequest(validTask.jobId, validTask.idempotencyKey, cameraId, guestReference);
+              const request = jobPresetId === CAMEO_DEMO_PRESET.presetId
+                ? buildCameoDemoRequest(validTask.jobId, validTask.idempotencyKey, cameraId, guestReference)
+                : buildCheapDemoRequest(validTask.jobId, validTask.idempotencyKey, cameraId, guestReference);
               const submitted = await (activeProvider ?? getProvider()).submit(request);
               await store.recordSubmission(validTask.partyId, validTask.jobId, cameraId, submitted.taskId);
               providerTask = { taskId: submitted.taskId };
@@ -376,7 +384,7 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
           } catch (error) {
             const certainty = error instanceof AlibabaSubmissionError ? error.certainty : "unknown";
             const errorCode = "PROVIDER_UNAVAILABLE";
-            await store.recordSubmissionFailure({ ...validTask, presetId: "cheap_demo" }, cameraId, errorCode, certainty);
+            await store.recordSubmissionFailure({ ...validTask, presetId: jobPresetId }, cameraId, errorCode, certainty);
             await recordUsageOutcome(options.db, ledgerInput(job, cameraId), {
               success: false,
               providerTaskId: null,
@@ -399,7 +407,7 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
         }
         if (status.state === "FAILED") {
           const errorCode = status.errorCode ?? "PROVIDER_FAILED";
-          await store.recordProviderFailure({ ...validTask, presetId: "cheap_demo" }, cameraId, errorCode);
+          await store.recordProviderFailure({ ...validTask, presetId: jobPresetId }, cameraId, errorCode);
           await recordUsageOutcome(options.db, ledgerInput(job, cameraId), {
             success: false,
             providerTaskId: providerTask.taskId,

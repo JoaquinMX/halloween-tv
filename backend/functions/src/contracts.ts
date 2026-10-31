@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { CHEAP_DEMO_PRESET, ERROR_CODES, ErrorCode, REQUIRED_CAMERA_IDS } from "./config";
+import { CAMEO_DEMO_PRESET, CHEAP_DEMO_PRESET, ERROR_CODES, ErrorCode, REQUIRED_CAMERA_IDS } from "./config";
 
 export type { ErrorCode };
 
@@ -19,7 +19,7 @@ export interface Identity {
 export interface RequestGenerationInput extends Identity {
   jobId: string;
   idempotencyKey: string;
-  presetId: typeof CHEAP_DEMO_PRESET.presetId;
+  presetId: typeof CHEAP_DEMO_PRESET.presetId | typeof CAMEO_DEMO_PRESET.presetId;
   /** Optional consent-bound guest media submission bound at request time. */
   guestMediaId?: string;
 }
@@ -76,6 +76,20 @@ export function parseRequestGeneration(value: unknown): RequestGenerationInput {
   if (!isRecord(value)) throw new BackendError("INVALID_ARGUMENT", "Request payload must be an object.");
   const jobId = validateId(value.jobId, "jobId");
   const idempotencyKey = validateId(value.idempotencyKey, "idempotencyKey");
+  if (value.presetId === CAMEO_DEMO_PRESET.presetId) {
+    // STEP 2 cameo batch: separate server lock, guest-bound only. Text-only
+    // requests for this preset are rejected; prompts stay fixed server-side.
+    for (const [key, expected] of Object.entries(CAMEO_DEMO_PRESET)) {
+      if (key in value && value[key] !== expected) {
+        throw new BackendError("INVALID_ARGUMENT", `Unsupported ${key}.`);
+      }
+    }
+    if (!("guestMediaId" in value) || typeof value.guestMediaId !== "string" || !value.guestMediaId) {
+      throw new BackendError("INVALID_ARGUMENT", "The cameo_demo preset requires a consent-bound guestMediaId.");
+    }
+    validateId(value.guestMediaId, "guestMediaId");
+    return { ...identity, jobId, idempotencyKey, presetId: CAMEO_DEMO_PRESET.presetId, guestMediaId: value.guestMediaId };
+  }
   if (value.presetId !== CHEAP_DEMO_PRESET.presetId) {
     throw new BackendError("INVALID_ARGUMENT", "Only the cheap_demo preset is supported.");
   }
@@ -167,7 +181,7 @@ export function validateCanonicalClips(clips: unknown): asserts clips is Canonic
         !REQUIRED_CAMERA_IDS.includes(raw.cameraId as (typeof REQUIRED_CAMERA_IDS)[number]) ||
         typeof raw.objectPath !== "string" || typeof raw.sha256 !== "string" || !HASH_RE.test(raw.sha256) ||
         !Number.isSafeInteger(raw.sizeBytes) || Number(raw.sizeBytes) <= 0 ||
-        !Number.isSafeInteger(raw.durationMs) || Number(raw.durationMs) !== 2000 ||
+        (!Number.isSafeInteger(raw.durationMs) || (Number(raw.durationMs) !== 2000 && Number(raw.durationMs) !== 5000)) ||
         typeof raw.expiresAt !== "string" || !Number.isFinite(Date.parse(raw.expiresAt))) {
       throw new BackendError("MANIFEST_MISMATCH", "Manifest clip fields are invalid.");
     }

@@ -64,6 +64,8 @@ export function buildAlibabaSubmitBody(request: VideoGenerationRequest): {
   if (request.referenceImage !== undefined) {
     // Consent-bound guest photo for the cameo camera. The object reference is
     // server-side storage state; provider credentials never leave the backend.
+    // Supported for both the 2s cheap_demo guest job and the 5s cameo_demo
+    // batch (happyhorse-1.1-r2v); duration is carried through per-request.
     input.reference_image = {
       storage_ref: request.referenceImage.objectPath,
       sha256: request.referenceImage.sha256,
@@ -160,11 +162,14 @@ export class AlibabaVideoGenerationPort implements VideoGenerationPort {
     }
     const usage = record(root?.usage);
     if (usage?.video_count !== undefined && usage.video_count !== 1) {
-      throw new Error("Alibaba returned an output count outside the cheap_demo preset.");
+      throw new Error("Alibaba returned an output count outside the locked preset.");
     }
     const duration = typeof usage?.duration === "number" && Number.isFinite(usage.duration)
       ? usage.duration
       : 2;
+    // Reference inputs can bill input duration: surfaced as secondsIn for the
+    // usage ledger, never estimated. Image references carry no input-video
+    // seconds; the realized console Credits stay the only billable truth.
     const inputDuration = typeof usage?.input_video_duration === "number" && Number.isFinite(usage.input_video_duration)
       ? usage.input_video_duration
       : 0;

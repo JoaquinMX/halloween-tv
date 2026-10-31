@@ -15,6 +15,7 @@ import {
 /** Offline provider backed by the repository's four deterministic MP4 fixtures. */
 export class FakeVideoGenerationPort implements VideoGenerationPort {
   private readonly byKey = new Map<string, string>();
+  private readonly byRequest = new Map<string, VideoGenerationRequest>();
   private readonly fixtureDirectory: string;
 
   constructor(fixtureDirectory = resolve(process.cwd(), "../../apps/tv_app/assets")) {
@@ -27,6 +28,7 @@ export class FakeVideoGenerationPort implements VideoGenerationPort {
     if (oldTaskId) return { taskId: oldTaskId };
     const taskId = `${request.cameraId}__${createHash("sha256").update(request.idempotencyKey).digest("hex").slice(0, 24)}`;
     this.byKey.set(request.idempotencyKey, taskId);
+    this.byRequest.set(taskId, { ...request });
     return { taskId };
   }
 
@@ -40,9 +42,13 @@ export class FakeVideoGenerationPort implements VideoGenerationPort {
     const index = REQUIRED_CAMERA_IDS.indexOf(cameraId);
     const path = resolve(this.fixtureDirectory, `cam${String(index + 1).padStart(2, "0")}.mp4`);
     if (!existsSync(path)) throw new Error(`Offline fake fixture is missing for ${cameraId}.`);
+    // Offline shape follows the submitted preset: cheap_demo reports 2s, the
+    // STEP 2 cameo batch reports 5s. Unknown task IDs keep the legacy 2s
+    // shape so pre-existing callers are unaffected.
+    const submitted = this.byRequest.get(taskId);
     return {
       video: { kind: "file", value: path },
-      secondsOut: 2,
+      secondsOut: submitted?.secondsOut ?? 2,
       secondsIn: 0,
       creditsCharged: 0,
     };

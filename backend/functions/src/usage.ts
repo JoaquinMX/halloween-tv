@@ -35,11 +35,19 @@ export function usageLedgerPath(input: UsageLedgerInput): string {
 }
 
 /** Fields match backend-contract-v1; per-camera rows preserve every provider task ID. */
-export function usageIntentDocument(input: UsageLedgerInput, timestamp: unknown = FieldValue.serverTimestamp()) {
+export function usageIntentDocument(
+  input: UsageLedgerInput,
+  timestamp: unknown = FieldValue.serverTimestamp(),
+  preset: { presetId: string; modelId: string; secondsOut: number } = {
+    presetId: "cheap_demo",
+    modelId: "wan3.0-video",
+    secondsOut: 2,
+  },
+) {
   return {
-    model_id: "wan3.0-video",
-    preset_id: "cheap_demo",
-    seconds_out: 2,
+    model_id: preset.modelId,
+    preset_id: preset.presetId,
+    seconds_out: preset.secondsOut,
     seconds_in: 0,
     credits_charged: null,
     provider_task_id: null,
@@ -97,7 +105,7 @@ export async function reconcileUsage(db: Firestore): Promise<UsageReconciliation
   const issues: UsageReconciliationIssue[] = [];
   for (const snapshot of jobs.docs) {
     const job = snapshot.data();
-    if (job.presetId !== "cheap_demo" || typeof job.partyId !== "string" || typeof job.jobId !== "string") continue;
+    if ((job.presetId !== "cheap_demo" && job.presetId !== "cameo_demo") || typeof job.partyId !== "string" || typeof job.jobId !== "string") continue;
     const cameraTasks = job.providerTasks && typeof job.providerTasks === "object" ? job.providerTasks as Record<string, Record<string, unknown>> : {};
     const attempts = job.cameraAttempts && typeof job.cameraAttempts === "object" ? job.cameraAttempts as Record<string, Record<string, unknown>> : {};
     for (const cameraId of REQUIRED_CAMERA_IDS) {
