@@ -71,16 +71,32 @@ export interface GenerationServices {
 }
 
 /**
+ * Rollout-6 narrow pre-contact config failure: the cartoon image stage has
+ * no configured provider. Checked by identity (instanceof) only — generic
+ * PROVIDER_UNAVAILABLE BackendErrors and generic message regexes stay
+ * non-definitive so unknown/timeout/ambiguous outcomes never fail.
+ */
+export class CartoonImageProviderMissingError extends BackendError {
+  constructor(message = "Cartoon image provider is not configured.") {
+    super("PROVIDER_UNAVAILABLE", message);
+  }
+}
+
+/**
  * Rollout-5 fail-on-definitive classifier. Returns true ONLY for definitive
  * terminal worker errors: request validation (INVALID_ARGUMENT,
  * MANIFEST_MISMATCH, or config-shape plain Errors), consent refusal
- * (FORBIDDEN), and 4xx-certain provider rejections (AlibabaSubmissionError
- * certainty "non_billable"). Unknown/timeout/ambiguous outcomes — including
- * AlibabaSubmissionError "unknown", PROVIDER_UNAVAILABLE, AbortError/timeouts,
- * socket/fetch failures, and reconciliation phrasing — return false and keep
- * the releaseWorker-only path so a running job is never failed blindly.
+ * (FORBIDDEN), 4xx-certain provider rejections (AlibabaSubmissionError
+ * certainty "non_billable"), and the narrow pre-contact cartoon image
+ * provider configuration failure (CartoonImageProviderMissingError,
+ * checked by identity). Unknown/timeout/ambiguous outcomes — including
+ * AlibabaSubmissionError "unknown", generic PROVIDER_UNAVAILABLE,
+ * AbortError/timeouts, socket/fetch failures, and reconciliation phrasing —
+ * return false and keep the releaseWorker-only path so a running job is
+ * never failed blindly.
  */
 export function isDefinitiveTerminalWorkerError(error: unknown): boolean {
+  if (error instanceof CartoonImageProviderMissingError) return true;
   if (error instanceof AlibabaSubmissionError) return error.certainty === "non_billable";
   if (error instanceof BackendError) {
     if (error.errorCode === "INVALID_ARGUMENT" || error.errorCode === "FORBIDDEN" ||
@@ -400,8 +416,44 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
       // never animates an offline placeholder while billing real credits.
       // Callers that explicitly want the offline fixture inject
       // FakeImageGenerationPort (marked fixture:true, refused at publish
-      // for non-rehearsal jobs).
-      throw new BackendError("PROVIDER_UNAVAILABLE", "Cartoon image provider is not configured.");
+      // for non-rehearsal jobs). Rollout-6: this pre-contact configuration
+      // failure is definitive by identity (CartoonImageProviderMissingError)
+      // so the claimed job fails closed instead of wedging running+in_flight.
+      throw new CartoonImageProviderMissingError();
+    };
+    /**
+     * Rollout-6 fail+release for definitive cartoon FAILED outcomes: the
+     * same recordProviderFailure discipline the text path gets (job failed,
+     * budget idle, evidence preserved). Unknown/timeout/ambiguous paths
+     * never call this helper — they keep the releaseWorker-only path in
+     * settleClaimedJob, never fail, never resubmit.
+     */
+    const failDefinitiveCartoonCamera = async (rawCode?: string, rawMessage?: string): Promise<string> => {
+      const sanitizedMessage = (rawMessage ?? "")
+        .replace(/https?:\/\/\S+/gi, "[url]")
+        .replace(/wss?:\/\/\S+/gi, "[url]")
+        .replace(/gs:\/\/\S+/gi, "[url]")
+        .replace(/Bearer\s+[A-Za-z0-9._~+/_=-]+/gi, "Bearer [redacted]")
+        .replace(/sk-[A-Za-z0-9_-]+/g, "[redacted]")
+        .replace(/[\u0000-\u001f\u007f]+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 280);
+      const detail = [(rawCode ?? "").trim(), sanitizedMessage].map((part) => part.trim()).filter(Boolean).join(": ");
+      const persistable = detail ? detail.slice(0, 280) : "PROVIDER_FAILED";
+      await store.recordProviderFailure(
+        {
+          partyId: validTask.partyId,
+          deviceId: validTask.deviceId,
+          channelId: validTask.channelId,
+          jobId: validTask.jobId,
+          idempotencyKey: validTask.idempotencyKey,
+          presetId: "cheap_demo",
+        },
+        "CAM-01",
+        persistable,
+      );
+      return detail;
     };
     try {
       let job = await store.getJob(validTask.partyId, validTask.jobId);
@@ -506,6 +558,13 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
             await recordCartoonStillOutcome(options.db, ledgerInput(job, "CAM-01"), {
               success: false, providerTaskId: stillTaskId, creditsCharged: null, errorCode: "PROVIDER_UNAVAILABLE",
             });
+            // Definitive still FAILED takes the text-path fail+release
+            // discipline (job failed, budget idle, evidence preserved);
+            // unknown/timeout/ambiguous never reach this branch.
+            const stillDetail = await failDefinitiveCartoonCamera(status.errorCode, status.errorMessage);
+            if (stillDetail) {
+              throw new BackendError("PROVIDER_UNAVAILABLE", `Cartoon still task failed (${stillDetail.slice(0, 280)}).`);
+            }
             throw new BackendError("PROVIDER_UNAVAILABLE", "Cartoon still task failed.");
           }
           if (typeof imagePort.getResult === "function") {
@@ -534,6 +593,13 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
               await recordCartoonStillOutcome(options.db, ledgerInput(job, "CAM-01"), {
                 success: false, providerTaskId: submittedTaskId, creditsCharged: null, errorCode: "PROVIDER_UNAVAILABLE",
               });
+              // Definitive still FAILED takes the text-path fail+release
+              // discipline (job failed, budget idle, evidence preserved);
+              // unknown/timeout/ambiguous never reach this branch.
+              const submitDetail = await failDefinitiveCartoonCamera(status.errorCode, status.errorMessage);
+              if (submitDetail) {
+                throw new BackendError("PROVIDER_UNAVAILABLE", `Cartoon still task failed (${submitDetail.slice(0, 280)}).`);
+              }
               throw new BackendError("PROVIDER_UNAVAILABLE", "Cartoon still task failed.");
             }
             const result = await imagePort.getResult(submittedTaskId);
@@ -635,9 +701,45 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
         await store.heartbeat(validTask.partyId, validTask.jobId);
         const status = await pollUntilComplete(providerTask.taskId, activeVideo, jobDeadline);
         if (status.state === "FAILED") {
+          // Definitive video FAILED takes the text-path fail+release
+          // discipline (job failed, budget idle, evidence preserved);
+          // unknown/timeout/ambiguous keep the releaseWorker-only path.
+          // Surface the provider's failure reason in the worker error and
+          // on the job doc (truncated, sanitized — no credentials/URLs) so
+          // the next diagnosis does not need a manual API query. Empty
+          // reasons keep the legacy generic mapping.
+          const rawCode = typeof status.errorCode === "string" ? status.errorCode : "";
+          const rawMessage = typeof status.errorMessage === "string" ? status.errorMessage : "";
+          const sanitizedMessage = rawMessage
+            .replace(/https?:\/\/\S+/gi, "[url]")
+            .replace(/wss?:\/\/\S+/gi, "[url]")
+            .replace(/gs:\/\/\S+/gi, "[url]")
+            .replace(/Bearer\s+[A-Za-z0-9._~+/_=-]+/gi, "Bearer [redacted]")
+            .replace(/sk-[A-Za-z0-9_-]+/g, "[redacted]")
+            .replace(/[\u0000-\u001f\u007f]+/g, " ")
+            .replace(/\s+/g, " ")
+            .trim()
+            .slice(0, 280);
+          const detail = [rawCode, sanitizedMessage].map((part) => part.trim()).filter(Boolean).join(": ");
           await recordUsageOutcome(options.db, ledgerInput(job, "CAM-01"), {
             success: false, providerTaskId: providerTask.taskId, creditsCharged: null, errorCode: "PROVIDER_UNAVAILABLE",
           });
+          const persistable = detail ? detail.slice(0, 280) : "PROVIDER_FAILED";
+          await store.recordProviderFailure(
+            {
+              partyId: validTask.partyId,
+              deviceId: validTask.deviceId,
+              channelId: validTask.channelId,
+              jobId: validTask.jobId,
+              idempotencyKey: validTask.idempotencyKey,
+              presetId: "cheap_demo",
+            },
+            "CAM-01",
+            persistable,
+          );
+          if (detail) {
+            throw new BackendError("PROVIDER_UNAVAILABLE", `Provider task failed (${detail.slice(0, 280)}).`);
+          }
           throw new BackendError("PROVIDER_UNAVAILABLE", "Provider task failed.");
         }
         const result = await (activeVideo ?? getProvider()).getResult(providerTask.taskId);
