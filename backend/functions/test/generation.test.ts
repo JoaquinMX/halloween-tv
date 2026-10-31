@@ -150,6 +150,99 @@ test("registered anonymous request runs fake provider through normalization and 
   }
 });
 
+test("rehearsalOnly marker binds the worker to the fake provider when live is configured", {
+  skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
+}, async () => {
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  /** Live-shaped stand-in: any submit reaching it would be billable work. */
+  class LiveSpyProvider {
+    submissions = 0;
+    async submit(_request: VideoGenerationRequest) {
+      this.submissions += 1;
+      return { taskId: "live-billable-task-1" };
+    }
+    async getStatus(_taskId: string): Promise<ProviderTaskStatus> { return { state: "SUCCEEDED" }; }
+    async getResult(_taskId: string): Promise<ProviderResult> {
+      return { video: { kind: "file", value: "unused" }, secondsOut: 2, secondsIn: 0, creditsCharged: 9 };
+    }
+  }
+  const deviceId = "tv-rehearsal";
+  const channelId = "main";
+  const jobId = "job-rehearsal-marker";
+  const idempotencyKey = "idem-rehearsal-marker";
+  try {
+    await seedParty(db, partyId, deviceId, channelId);
+    const live = new LiveSpyProvider();
+    const services = createGenerationServices({
+      db,
+      bucket,
+      provider: live,
+      pollIntervalMs: 1,
+      sleep: async () => undefined,
+    });
+    const request = await services.requestGeneration({
+      partyId, deviceId, channelId, jobId, idempotencyKey, presetId: "cheap_demo", rehearsalOnly: true,
+    });
+    assert.equal(request.created, true);
+    assert.equal((await db.doc(`parties/${partyId}/jobs/${jobId}`).get()).data()?.rehearsalOnly, true);
+    const run = await services.runGeneration({ partyId, deviceId, channelId, jobId, idempotencyKey });
+    assert.equal(run.state, "ready");
+    assert.equal(live.submissions, 0, "a rehearsal-marked job must never reach the live provider");
+    for (const cameraId of REQUIRED_CAMERA_IDS) {
+      const ledger = (await db.doc(`parties/${partyId}/costLogs/${usageLedgerId(jobId, cameraId)}`).get()).data()!;
+      assert.match(ledger.provider_task_id, new RegExp(`^${cameraId}__[a-f0-9]{24}$`));
+      assert.equal(ledger.credits_charged, 0);
+    }
+    assert.deepEqual(await reconcileUsage(db), []);
+  } finally {
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+  }
+});
+
+test("rehearsalOnly marker is validated, bound to the job, and optional", {
+  skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
+}, async () => {
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  const deviceId = "tv-marker";
+  const channelId = "main";
+  try {
+    await seedParty(db, partyId, deviceId, channelId);
+    const services = createGenerationServices({
+      db,
+      bucket,
+      provider: new FakeVideoGenerationPort(),
+      pollIntervalMs: 1,
+      sleep: async () => undefined,
+    });
+    const base = { partyId, deviceId, channelId, jobId: "job-marker", idempotencyKey: "idem-marker", presetId: "cheap_demo" };
+    await assert.rejects(services.requestGeneration({ ...base, rehearsalOnly: "true" }),
+      (error: unknown) => error instanceof BackendError && error.errorCode === "INVALID_ARGUMENT");
+    await assert.rejects(services.requestGeneration({ ...base, rehearsalOnly: false }),
+      (error: unknown) => error instanceof BackendError && error.errorCode === "INVALID_ARGUMENT");
+    const marked = await services.requestGeneration({ ...base, rehearsalOnly: true });
+    assert.equal(marked.created, true);
+    assert.equal((await db.doc(`parties/${partyId}/jobs/job-marker`).get()).data()?.rehearsalOnly, true);
+    const repeat = await services.requestGeneration({ ...base, rehearsalOnly: true });
+    assert.equal(repeat.created, false);
+    // The same job cannot be re-requested as an unmarked (live-path) job.
+    await assert.rejects(services.requestGeneration(base),
+      (error: unknown) => error instanceof BackendError && error.errorCode === "FORBIDDEN");
+    const status = await services.getGenerationStatus({ ...base, rehearsalOnly: true });
+    assert.equal(status.jobId, "job-marker");
+    // Run the marked job to release the party budget: the default path then stays marker-free.
+    const run = await services.runGeneration({ partyId, deviceId, channelId, jobId: "job-marker", idempotencyKey: "idem-marker" });
+    assert.equal(run.state, "ready");
+    await services.requestGeneration({ partyId, deviceId, channelId, jobId: "job-default", idempotencyKey: "idem-default", presetId: "cheap_demo" });
+    assert.equal((await db.doc(`parties/${partyId}/jobs/job-default`).get()).data()?.rehearsalOnly, undefined);
+  } finally {
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+  }
+});
+
 test("request idempotency cannot be rebound to another device", { skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST }, async () => {
   const { app, db, bucket } = await createEmulatorContext();
   const partyId = randomPartyId();

@@ -7,6 +7,7 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import { createDeliveryServices } from "../src/delivery";
 import { REQUIRED_CAMERA_IDS } from "../src/config";
+import { usageIntentDocument, usageLedgerId } from "../src/usage";
 import { HAS_FIRESTORE_EMULATOR, clearParty, createEmulatorContext, disposeEmulatorContext, randomPartyId } from "./support/emulators";
 
 const PACKAGE_ROOT = process.cwd();
@@ -166,6 +167,7 @@ test("fake rehearsal previews without network and refuses live, mixed, and impli
   assert.equal(plan.result, "preview");
   assert.equal(plan.preview, true);
   assert.equal(plan.provider, "fake");
+  assert.equal(plan.rehearsalOnly, true);
   assert.equal(plan.submits, 1);
   assert.equal(plan.jobId, "rehearsal-job-1");
 
@@ -678,6 +680,76 @@ test("delivery verification exits nonzero when downloaded bytes do not match the
     assert.equal((await db.doc(`parties/${partyId}/jobs/pilot-fixture-v1`).get()).data()?.state, "ready",
       "a failed verification must not purge delivery objects");
     rmSync(outputDirectory, { recursive: true, force: true });
+  } finally {
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+  }
+});
+
+test("usage reconciliation counts live submissions with unknown credits as provider calls", {
+  skip: !HAS_EMULATORS ? "requires both emulator targets" : false,
+}, async () => {
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  try {
+    const deviceId = "tv-usage-provenance";
+    const channelId = "main";
+    // Reproduces the false-zero-spend shape: four durable live task IDs whose
+    // realized charges are still unknown (null credits).
+    const liveJobId = "job-live-unknown-credits";
+    const liveTasks: Record<string, { taskId: string }> = {};
+    for (const cameraId of REQUIRED_CAMERA_IDS) liveTasks[cameraId] = { taskId: `live-alibaba-task-${cameraId}` };
+    await db.doc(`parties/${partyId}/jobs/${liveJobId}`).set({
+      partyId, jobId: liveJobId, deviceId, channelId,
+      manifestVersion: 1, idempotencyKey: "idem-live-unknown", presetId: "cheap_demo",
+      state: "running", providerTasks: liveTasks, cameraAttempts: {},
+    });
+    for (const cameraId of REQUIRED_CAMERA_IDS) {
+      await db.doc(`parties/${partyId}/costLogs/${usageLedgerId(liveJobId, cameraId)}`).set({
+        ...usageIntentDocument({
+          partyId, deviceId, channelId, manifestVersion: 1,
+          idempotencyKey: "idem-live-unknown", jobId: liveJobId, cameraId,
+        }),
+        provider_task_id: `live-alibaba-task-${cameraId}`,
+        success: true,
+      });
+    }
+    // Control: offline fake-shaped rows with synthetic zero imply no calls.
+    const fakeJobId = "job-fake-synthetic-zero";
+    const fakeTasks: Record<string, { taskId: string }> = {};
+    for (const cameraId of REQUIRED_CAMERA_IDS) fakeTasks[cameraId] = { taskId: `${cameraId}__${"b".repeat(24)}` };
+    await db.doc(`parties/${partyId}/jobs/${fakeJobId}`).set({
+      partyId, jobId: fakeJobId, deviceId, channelId,
+      manifestVersion: 2, idempotencyKey: "idem-fake-zero", presetId: "cheap_demo",
+      state: "ready", providerTasks: fakeTasks, cameraAttempts: {},
+    });
+    for (const cameraId of REQUIRED_CAMERA_IDS) {
+      await db.doc(`parties/${partyId}/costLogs/${usageLedgerId(fakeJobId, cameraId)}`).set({
+        ...usageIntentDocument({
+          partyId, deviceId, channelId, manifestVersion: 2,
+          idempotencyKey: "idem-fake-zero", jobId: fakeJobId, cameraId,
+        }),
+        provider_task_id: `${cameraId}__${"b".repeat(24)}`,
+        credits_charged: 0,
+        success: true,
+      });
+    }
+    const result = runTool("tools/reconcile_usage.ts", ["--target=emulator"], emulatorEnv(partyId));
+    assert.equal(result.status, 0, result.stderr);
+    const report = lastJson(result.stdout) as {
+      providerApiCalls: number; unknownCreditRows: number; cameras: Array<Record<string, any>>;
+    };
+    const liveRows = report.cameras.filter((row) => row.jobId === liveJobId);
+    assert.equal(liveRows.length, 4);
+    for (const row of liveRows) {
+      assert.equal(row.creditStatus, "unknown");
+      assert.equal(row.credits, null);
+    }
+    assert.ok(report.providerApiCalls >= 4,
+      `live submissions with unknown credits must count as provider calls (got ${report.providerApiCalls})`);
+    const fakeRows = report.cameras.filter((row) => row.jobId === fakeJobId);
+    assert.equal(fakeRows.length, 4);
+    for (const row of fakeRows) assert.equal(row.creditStatus, "synthetic_zero");
   } finally {
     await clearParty(db, bucket, partyId);
     await disposeEmulatorContext(app);

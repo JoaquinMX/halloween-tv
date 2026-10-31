@@ -17,6 +17,12 @@
  * locally prepared fixture slots (CAM-02..04). Fake selection is logged and
  * usage must reconcile to synthetic zero with provider API calls = 0.
  *
+ * Spend safety is bound server-side, not by local flags: the tool always sends
+ * `rehearsalOnly: true` on requestGeneration, the store validates and persists
+ * the marker on the job document, and the worker resolves ONLY the offline
+ * fake provider for marked jobs regardless of deployed provider config. Any
+ * non-fake resolution under the marker fails closed before submit.
+ *
  * Refusals: live providers (only --provider=fake is accepted and an ambient
  * VIDEO_GENERATION_PROVIDER, when set, must also be fake), mixed
  * emulator/cloud targets, and implicit selection (party/device/channel/job
@@ -152,6 +158,8 @@ async function main(): Promise<void> {
     jobId,
     idempotencyKey,
     provider: "fake",
+    rehearsalOnly: true,
+    rehearsalBinding: "request carries rehearsalOnly:true; the server persists the marker on the job and the worker resolves only the fake provider",
     presetId: "cheap_demo",
     guestPlan: "consented synthetic photo (requestGuestUpload -> PUT -> completeGuestUpload) then ONE guest-bound requestGeneration (1 fake submit for CAM-01 + 3 fixture slots for CAM-02..CAM-04); poll observes only, never resubmits",
     submits: 1,
@@ -198,7 +206,7 @@ async function main(): Promise<void> {
     if (typeof sourceHash !== "string" || !/^[a-f0-9]{64}$/.test(sourceHash)) fail("Completed guest photo has no canonical source hash.");
 
     const request = await callFunction(`${base}/requestGeneration`, {
-      ...identity, jobId, idempotencyKey, presetId: "cheap_demo", guestMediaId: submissionId,
+      ...identity, jobId, idempotencyKey, presetId: "cheap_demo", guestMediaId: submissionId, rehearsalOnly: true,
     });
     if (request.created !== true) {
       fail(`Job ${jobId} already exists (created=false); the rehearsal observes the stored job and never resubmits. Re-run without --apply to preview, or select a fresh --job.`);
@@ -222,6 +230,9 @@ async function main(): Promise<void> {
         await sleep(10_000);
       }
       if (String(job?.state) !== "ready") fail(`Rehearsal job ended in state=${String(job?.state)} (errorCode=${String(job?.errorCode ?? "none")}).`);
+      if (job?.rehearsalOnly !== true) {
+        fail("Rehearsal job is missing the server-persisted rehearsalOnly marker; refusing to attribute usage to a fake-only run.");
+      }
 
       const manifestVersion = Number(job?.manifestVersion);
       const manifestSnapshot = await db.doc(`parties/${partyId}/manifests/current_${channelId}`).get();
@@ -265,6 +276,7 @@ async function main(): Promise<void> {
         applied: true,
         result: "rehearsed",
         providerSelection: "fake",
+        rehearsalMarkerPersisted: job?.rehearsalOnly === true,
         submissions,
         polls,
         jobState: job?.state,

@@ -192,7 +192,15 @@ never applies to emulator targets and never permits a live provider.
 
 Run exactly one explicitly selected guest-bound job through the deployed
 `requestGeneration` + real task queue (defaults to preview; refuses live
-providers and mixed targets; poll observes only, never resubmits):
+providers and mixed targets; poll observes only, never resubmits).
+Spend safety is bound server-side, not by local flags: the tool always sends
+`rehearsalOnly: true`, the store validates and persists the marker on the job
+document (any other marker value is rejected, and an existing jobId cannot be
+re-requested with a different marker), and the worker resolves ONLY the
+offline fake provider for marked jobs regardless of the deployed
+`VIDEO_GENERATION_PROVIDER` — any non-fake resolution under the marker fails
+closed before submit. Jobs without the marker take the unchanged default
+path:
 
 ```sh
 cd backend/functions
@@ -203,13 +211,16 @@ npm run rehearse:fake -- --target=cloud --project="$GCLOUD_PROJECT" \
 # preview first; then repeat with --apply --out=../../docs/rehearsal-<date>/cycle-fake-rehearsal.json
 ```
 
-Expected evidence: `providerSelection: fake`, `submissions: 1`, one
+Expected evidence: `providerSelection: fake`, `rehearsalOnly: true`,
+`rehearsalMarkerPersisted: true`, `submissions: 1`, one
 provider slot (CAM-01, normalized to the generated-shape
 H.264/yuv420p/24fps/854x480/2s silent clip) plus three fixture slots,
 `syntheticZeroCameras: 4`, `providerApiCalls: 0`, `fakeCredits: synthetic
-zero`. The consented photo source is a locally generated synthetic JPEG —
-never a real user photo. A second `--apply` with the same `--job` observes
-the stored job and refuses to resubmit (`created=false`).
+zero`. The tool refuses to attribute usage when the finished job document is
+missing the persisted marker. The consented photo source is a locally
+generated synthetic JPEG — never a real user photo. A second `--apply` with
+the same `--job` observes the stored job and refuses to resubmit
+(`created=false`).
 
 After the rehearsal, restore the disabled state and redeploy: unset
 `GENERATION_ENABLED` (or set it `false`), re-run cloud preflight WITHOUT
@@ -328,7 +339,7 @@ Expected evidence: a successful scheduled sweep in logs; expired jobs transition
 
 ## 11. Read-only usage reconciliation and live-credit procedure
 
-Read-only reconciliation checks required per-camera cost fields, task IDs, success outcomes, and uncertain submission states. Missing credit values are labelled `unknown`; fake-provider zero values are labelled `synthetic_zero`:
+Read-only reconciliation checks required per-camera cost fields, task IDs, success outcomes, and uncertain submission states. Missing credit values are labelled `unknown`; fake-provider zero values are labelled `synthetic_zero`. `providerApiCalls` counts durable submitted tasks by provenance (any non-fake-shaped task ID), so live submissions with still-unknown charges count as calls instead of false zero spend:
 
 ```sh
 firebase --config ../firebase.json emulators:exec --project demo-halloween-tv --only firestore,storage \
