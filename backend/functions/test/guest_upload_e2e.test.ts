@@ -591,3 +591,318 @@ test("fix-5a busy party: pending intent persists, dispatches once with identical
     await disposeEmulatorContext(app);
   }
 });
+
+/**
+ * Fix-5e regression (a), concurrent/reuse: two racing flushes see the same
+ * pending intent with no job yet. Both pass the pre-check, one store call
+ * creates the job (created:true) and the other reuses it (created:false).
+ * The captured-enqueue counter must show EXACTLY ONE dispatch for the raced
+ * job: pre-fix code enqueues unconditionally after the store call (twice
+ * total). A Firestore read barrier (timing only — all outcomes come from the
+ * real production flush path) forces both flushes past the pre-check before
+ * either store call commits, so the race is deterministic, not timing-based.
+ */
+test("fix-5e racing flushes enqueue the reused job exactly once", {
+  skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
+}, async () => {
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  const channelId = "main";
+  const enqueues: Array<Record<string, string>> = [];
+  class CountingVideo extends FakeVideoGenerationPort {
+    videoSubmits = 0;
+    override async submit(request: import("../src/video_generation_port").VideoGenerationRequest) {
+      this.videoSubmits += 1;
+      return super.submit(request);
+    }
+  }
+  const provider = new CountingVideo(FIXTURE_DIR);
+  const imagePort = new FakeImageGenerationPort();
+  const photoPath = resolve(__dirname, "fixtures/guest_photo.jpg");
+  const guest = (deviceId: string) => ({ partyId, deviceId, channelId });
+  const consent = { accepted: true, textVersion: GUEST_CONSENT_TEXT_VERSION, purpose: GUEST_CONSENT_PURPOSE };
+  try {
+    await seedParty(db, partyId, "p-race-1", channelId);
+    await seedParty(db, partyId, "p-race-2", channelId);
+    await seedParty(db, partyId, "p-race-w1", channelId);
+    await seedParty(db, partyId, "p-race-w2", channelId);
+    const uploadOnly = createRuntimeServices({
+      db, bucket, generationEnabled: false, pollIntervalMs: 1, sleep: async () => undefined,
+      signGuestUploadUrl: async (file) => `https://upload.invalid/${encodeURIComponent(file.name)}`,
+      signReadUrl: async (file) => `https://signed.invalid/${encodeURIComponent(file.name)}`,
+    });
+    const services = createRuntimeServices({
+      db, bucket, generationEnabled: true, provider, imageProvider: imagePort,
+      fixtureDirectory: FIXTURE_DIR,
+      enqueueGeneration: async (task) => { enqueues.push({ ...task }); },
+      pollIntervalMs: 1, sleep: async () => undefined,
+      signGuestUploadUrl: async (file) => `https://upload.invalid/${encodeURIComponent(file.name)}`,
+      signReadUrl: async (file) => `https://signed.invalid/${encodeURIComponent(file.name)}`,
+    });
+    const photo = await readFile(photoPath);
+
+    // Guest 1 occupies capacity through the real explicit path.
+    const req1 = await uploadOnly.requestGuestUpload({ ...guest("p-race-1"), consent, contentType: "image/jpeg" });
+    await bucket.file(req1.objectPath).save(photo, { contentType: "image/jpeg" });
+    await uploadOnly.completeGuestUpload({ ...guest("p-race-1"), submissionId: req1.submissionId });
+    const created1 = await services.requestCartoonFromPortrait({
+      ...guest("p-race-1"), guestMediaId: req1.submissionId, rehearsalOnly: true,
+    });
+    assert.equal(created1.created, true);
+    assert.equal(enqueues.length, 1);
+
+    // Guest 2 completes while busy: durable pending intent, no job, no enqueue.
+    const req2 = await services.requestGuestUpload({ ...guest("p-race-2"), consent, contentType: "image/jpeg" });
+    await bucket.file(req2.objectPath).save(photo, { contentType: "image/jpeg" });
+    await services.completeGuestUpload({ ...guest("p-race-2"), submissionId: req2.submissionId });
+    assert.equal((await db.doc(`parties/${partyId}/pendingGenerations/${req2.submissionId}`).get()).data()?.status, "pending");
+    assert.equal((await db.doc(`parties/${partyId}/jobs/cartoon-${req2.submissionId}`).get()).exists, false);
+    const job2Id = `cartoon-${req2.submissionId}`;
+
+    // Release capacity with direct fixture writes (no flush trigger here).
+    await db.doc(`parties/${partyId}/jobs/${created1.jobId}`).update({ state: "ready", status: "ready" });
+    await db.doc(`parties/${partyId}/generationBudget/active`).set({ activeJobId: null, state: "idle" }, { merge: true });
+
+    // Withdrawal triggers (unrelated guests, no jobs of their own).
+    const wsubs: string[] = [];
+    for (const w of ["p-race-w1", "p-race-w2"]) {
+      const r = await uploadOnly.requestGuestUpload({ ...guest(w), consent, contentType: "image/jpeg" });
+      await bucket.file(r.objectPath).save(photo, { contentType: "image/jpeg" });
+      await uploadOnly.completeGuestUpload({ ...guest(w), submissionId: r.submissionId });
+      wsubs.push(r.submissionId);
+    }
+
+    // Timing-only barrier on the raced job's direct reads: hold the first two
+    // flush pre-check gets until BOTH racing flushes have arrived, then let
+    // both observe the still-missing job. Transactional store behavior is
+    // untouched: one caller creates, the other reuses (created:false).
+    const targetSuffix = `jobs/${job2Id}`;
+    let arrivals = 0;
+    let released = false;
+    const waiters: Array<() => void> = [];
+    const releaseGate = () => {
+      released = true;
+      for (const w of waiters.splice(0)) w();
+    };
+    const gatedDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === "doc") {
+          return (path: string) => {
+            const ref = (target as Firestore).doc(path);
+            if (typeof path === "string" && path.endsWith(targetSuffix)) {
+              const realGet = ref.get.bind(ref);
+              return new Proxy(ref, {
+                get(refTarget, refProp, refReceiver) {
+                  if (refProp === "get") {
+                    return async (...args: []) => {
+                      if (!released) {
+                        arrivals += 1;
+                        if (arrivals >= 2) {
+                          releaseGate();
+                        } else {
+                          await new Promise<void>((resolve) => {
+                            waiters.push(resolve);
+                            setTimeout(resolve, 15000);
+                          });
+                        }
+                      }
+                      return realGet(...args);
+                    };
+                  }
+                  return Reflect.get(refTarget, refProp, refReceiver);
+                },
+              });
+            }
+            return ref;
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? (value as (...a: never[]) => unknown).bind(target) : value;
+      },
+    }) as Firestore;
+    const racing = createRuntimeServices({
+      db: gatedDb, bucket, generationEnabled: true, provider, imageProvider: imagePort,
+      fixtureDirectory: FIXTURE_DIR,
+      enqueueGeneration: async (task) => { enqueues.push({ ...task }); },
+      pollIntervalMs: 1, sleep: async () => undefined,
+      signGuestUploadUrl: async (file) => `https://upload.invalid/${encodeURIComponent(file.name)}`,
+      signReadUrl: async (file) => `https://signed.invalid/${encodeURIComponent(file.name)}`,
+    });
+    const settled = await Promise.allSettled([
+      racing.withdrawGuestMedia({ ...guest("p-race-w1"), submissionId: wsubs[0] }),
+      racing.withdrawGuestMedia({ ...guest("p-race-w2"), submissionId: wsubs[1] }),
+    ]);
+    for (const s of settled) {
+      assert.equal(s.status, "fulfilled", `withdraw trigger must succeed: ${s.status === "rejected" ? String(s.reason) : ""}`);
+    }
+    assert.equal(arrivals, 2, "both racing flushes must reach the job pre-check");
+    const job2Enqueues = enqueues.filter((e) => e.jobId === job2Id);
+    assert.equal(job2Enqueues.length, 1, `raced job must enqueue exactly once (got ${job2Enqueues.length})`);
+    assert.equal(enqueues.length, 2, "only the occupier and the single dispatch may enqueue");
+    const job2 = (await db.doc(`parties/${partyId}/jobs/${job2Id}`).get()).data()!;
+    assert.equal(job2.state, "queued");
+    const intent2 = (await db.doc(`parties/${partyId}/pendingGenerations/${req2.submissionId}`).get()).data()!;
+    assert.equal(intent2.status, "queued", "reused-job flush must reflect queued state, never double-enqueue");
+    assert.equal((await db.collection(`parties/${partyId}/jobs`).get()).size, 2);
+    assert.equal(provider.videoSubmits, 0, "no provider video submit during dispatch");
+    assert.equal(imagePort.submissions.length, 0, "no provider still submit during dispatch");
+  } finally {
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+  }
+});
+
+/**
+ * Fix-5e regression (b), plan drift: a pending intent whose plan differs from
+ * the deterministic shared plan must make NO provider submit, become
+ * unavailable/MANIFEST_MISMATCH, have ONLY its just-created job failed via
+ * failEnqueue (budget released, job+ledger rows preserved with verifiable
+ * provenance), and leave capacity free so an unrelated eligible pending guest
+ * dispatches next. Pre-fix code leaves the just-created job queued holding
+ * the budget, so the unrelated guest stays pending forever.
+ */
+test("fix-5e plan drift fails only the just-created job and frees the next guest", {
+  skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
+}, async () => {
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  const channelId = "main";
+  const enqueues: Array<Record<string, string>> = [];
+  class CountingVideo extends FakeVideoGenerationPort {
+    videoSubmits = 0;
+    override async submit(request: import("../src/video_generation_port").VideoGenerationRequest) {
+      this.videoSubmits += 1;
+      return super.submit(request);
+    }
+  }
+  const provider = new CountingVideo(FIXTURE_DIR);
+  const imagePort = new FakeImageGenerationPort();
+  const photoPath = resolve(__dirname, "fixtures/guest_photo.jpg");
+  const guest = (deviceId: string) => ({ partyId, deviceId, channelId });
+  const consent = { accepted: true, textVersion: GUEST_CONSENT_TEXT_VERSION, purpose: GUEST_CONSENT_PURPOSE };
+  const photo = await readFile(photoPath);
+  const expectedHash = (await import("node:crypto")).createHash("sha256").update(photo).digest("hex");
+  try {
+    for (const d of ["p-drift-0", "p-drift-a", "p-drift-w"]) await seedParty(db, partyId, d, channelId);
+    const uploadOnly = createRuntimeServices({
+      db, bucket, generationEnabled: false, pollIntervalMs: 1, sleep: async () => undefined,
+      signGuestUploadUrl: async (file) => `https://upload.invalid/${encodeURIComponent(file.name)}`,
+      signReadUrl: async (file) => `https://signed.invalid/${encodeURIComponent(file.name)}`,
+    });
+    const services = createRuntimeServices({
+      db, bucket, generationEnabled: true, provider, imageProvider: imagePort,
+      fixtureDirectory: FIXTURE_DIR,
+      enqueueGeneration: async (task) => { enqueues.push({ ...task }); },
+      pollIntervalMs: 1, sleep: async () => undefined,
+      signGuestUploadUrl: async (file) => `https://upload.invalid/${encodeURIComponent(file.name)}`,
+      signReadUrl: async (file) => `https://signed.invalid/${encodeURIComponent(file.name)}`,
+    });
+    async function completePortrait(deviceId: string) {
+      const r = await services.requestGuestUpload({ ...guest(deviceId), consent, contentType: "image/jpeg" });
+      await bucket.file(r.objectPath).save(photo, { contentType: "image/jpeg" });
+      await services.completeGuestUpload({ ...guest(deviceId), submissionId: r.submissionId });
+      return r;
+    }
+    // Occupy capacity through the real explicit path.
+    const req0 = await uploadOnly.requestGuestUpload({ ...guest("p-drift-0"), consent, contentType: "image/jpeg" });
+    await bucket.file(req0.objectPath).save(photo, { contentType: "image/jpeg" });
+    await uploadOnly.completeGuestUpload({ ...guest("p-drift-0"), submissionId: req0.submissionId });
+    const created0 = await services.requestCartoonFromPortrait({
+      ...guest("p-drift-0"), guestMediaId: req0.submissionId, rehearsalOnly: true,
+    });
+    assert.equal(created0.created, true);
+    assert.equal(enqueues.length, 1);
+
+    // Drifted guest completes while busy, then its persisted intent plan is
+    // tampered (plan identity drift; eligibility bindings untouched).
+    const reqA = await completePortrait("p-drift-a");
+    const intentARef = db.doc(`parties/${partyId}/pendingGenerations/${reqA.submissionId}`);
+    const intentA = (await intentARef.get()).data() as Record<string, unknown>;
+    assert.equal(intentA.status, "pending");
+    const truePlanA = intentA.plan as Record<string, unknown>;
+    const tamperedPlan = { ...(truePlanA as Record<string, unknown>), seed: Number(truePlanA.seed ?? 0) + 1 };
+    assert.notDeepEqual(tamperedPlan, truePlanA);
+    await intentARef.update({ plan: tamperedPlan });
+
+    // Release capacity with direct fixture writes (no flush trigger here), then
+    // run the drifted flush alone: no other pending guest exists yet.
+    await db.doc(`parties/${partyId}/jobs/${created0.jobId}`).update({ state: "ready", status: "ready" });
+    await db.doc(`parties/${partyId}/generationBudget/active`).set({ activeJobId: null, state: "idle" }, { merge: true });
+    const reqW = await uploadOnly.requestGuestUpload({ ...guest("p-drift-w"), consent, contentType: "image/jpeg" });
+    await bucket.file(reqW.objectPath).save(photo, { contentType: "image/jpeg" });
+    await uploadOnly.completeGuestUpload({ ...guest("p-drift-w"), submissionId: reqW.submissionId });
+    await services.withdrawGuestMedia({ ...guest("p-drift-w"), submissionId: reqW.submissionId });
+
+    // Drift assertions: no provider submit, intent terminal, just-created job
+    // failed via failEnqueue, budget released, evidence preserved.
+    const jobAId = `cartoon-${reqA.submissionId}`;
+    assert.equal(provider.videoSubmits, 0, "drifted dispatch makes no provider video submit");
+    assert.equal(imagePort.submissions.length, 0, "drifted dispatch makes no provider still submit");
+    const intentAAfter = (await intentARef.get()).data() as Record<string, unknown>;
+    assert.equal(intentAAfter.status, "unavailable");
+    assert.equal(intentAAfter.errorCode, "MANIFEST_MISMATCH");
+    const jobA = (await db.doc(`parties/${partyId}/jobs/${jobAId}`).get()).data() as Record<string, unknown>;
+    assert.ok(jobA, "the just-created job row must be preserved, never deleted");
+    assert.equal(jobA.state, "failed");
+    assert.equal(jobA.errorCode, "PROVIDER_UNAVAILABLE");
+    assert.ok(jobA.enqueueFailedAt, "failEnqueue evidence must be recorded");
+    assert.ok(jobA.failedAt, "failEnqueue evidence must be recorded");
+    assert.equal(enqueues.filter((e) => e.jobId === jobAId).length, 0, "the drifted job must never enqueue");
+    assert.equal(enqueues.length, 1, "no dispatch may enqueue during the drifted flush");
+    const budgetAfterDrift = (await db.doc(`parties/${partyId}/generationBudget/active`).get()).data() as Record<string, unknown>;
+    assert.equal(budgetAfterDrift.activeJobId, null, "failEnqueue must release the budget");
+    assert.equal(budgetAfterDrift.state, "idle");
+    const costLogs = await db.collection(`parties/${partyId}/costLogs`).get();
+    const jobALogs = costLogs.docs.filter((d) => d.id.startsWith(jobAId));
+    assert.equal(jobALogs.length, 5, "job+ledger evidence preserved (4 camera rows + 1 still row)");
+    // Provenance on the preserved job still verifies: guest binding plus the
+    // deterministic shared plan (not the tampered intent plan).
+    const binding = jobA.guestMedia as Record<string, unknown>;
+    assert.equal(binding.submissionId, reqA.submissionId);
+    assert.equal(binding.sourceHash, expectedHash);
+    assert.equal(binding.consentRevision, reqA.consentRevision);
+    assert.equal(jobA.guestMediaId, reqA.submissionId);
+    const { loadValidatedCatalogs, resolveFunctionsRoot } = await import("../src/scenario_catalog");
+    const { buildAutoCartoonPlan } = await import("../src/cartoon_pipeline");
+    const catalogs = loadValidatedCatalogs(resolveFunctionsRoot(resolve(__dirname, "../src")));
+    const rebuilt = buildAutoCartoonPlan({ submissionId: reqA.submissionId, catalog: catalogs.catalog, situations: catalogs.situations });
+    assert.deepEqual(jobA.cartoonPlan, JSON.parse(JSON.stringify(rebuilt)), "preserved job carries the deterministic shared plan");
+    assert.notDeepEqual(jobA.cartoonPlan, tamperedPlan);
+
+    // Capacity is free: an unrelated eligible guest dispatches next through the
+    // real busy-then-release path (pending while a fresh occupier holds the
+    // budget, dispatched by the worker-release flush).
+    await seedParty(db, partyId, "p-drift-1", channelId);
+    await seedParty(db, partyId, "p-drift-b", channelId);
+    const req1 = await uploadOnly.requestGuestUpload({ ...guest("p-drift-1"), consent, contentType: "image/jpeg" });
+    await bucket.file(req1.objectPath).save(photo, { contentType: "image/jpeg" });
+    await uploadOnly.completeGuestUpload({ ...guest("p-drift-1"), submissionId: req1.submissionId });
+    const created1 = await services.requestCartoonFromPortrait({ ...guest("p-drift-1"), guestMediaId: req1.submissionId, rehearsalOnly: true });
+    assert.equal(created1.created, true);
+    const reqB = await completePortrait("p-drift-b");
+    assert.equal((await db.doc(`parties/${partyId}/pendingGenerations/${reqB.submissionId}`).get()).data()?.status, "pending");
+    const run1 = await services.runGeneration({
+      partyId, deviceId: "p-drift-1", channelId, jobId: created1.jobId, idempotencyKey: created1.jobId,
+    });
+    assert.equal(run1.state, "ready");
+    const jobBId = `cartoon-${reqB.submissionId}`;
+    assert.equal(enqueues.filter((e) => e.jobId === jobBId).length, 1, "the unrelated guest dispatches next");
+    const jobB = (await db.doc(`parties/${partyId}/jobs/${jobBId}`).get()).data() as Record<string, unknown>;
+    assert.equal(jobB.state, "queued");
+    const intentB = (await db.doc(`parties/${partyId}/pendingGenerations/${reqB.submissionId}`).get()).data() as Record<string, unknown>;
+    assert.deepEqual(jobB.cartoonPlan, intentB.plan, "the next dispatch reuses the same immutable plan");
+    const budgetFinal = (await db.doc(`parties/${partyId}/generationBudget/active`).get()).data() as Record<string, unknown>;
+    assert.equal(budgetFinal.activeJobId, jobBId, "capacity now belongs to the unrelated guest");
+    const statusB = await services.getGuestMediaStatus({ ...guest("p-drift-b"), submissionId: reqB.submissionId });
+    assert.equal(statusB.generation?.state, "queued");
+    // The drifted job was never raw-deleted and never silently rerolled.
+    assert.equal((await db.doc(`parties/${partyId}/jobs/${jobAId}`).get()).exists, true);
+    assert.deepEqual(
+      ((await db.doc(`parties/${partyId}/jobs/${jobAId}`).get()).data() as Record<string, unknown>).cartoonPlan,
+      JSON.parse(JSON.stringify(rebuilt)),
+    );
+  } finally {
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+  }
+});

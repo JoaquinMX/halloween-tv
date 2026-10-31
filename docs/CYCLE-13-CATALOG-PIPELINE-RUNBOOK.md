@@ -109,6 +109,11 @@ Physical-TV and live-provider validation remain pending until separately authori
 - Queue intent lifecycle is transient-vs-terminal: withdrawn/expired/not-found/forbidden delete intents, ambiguous read failures leave the intent pending with attempt accounting, and `unavailable` is reserved for genuine admission/terminal errors (queue rejection, consent/permission denial).
 - Withdrawal-triggered flush uses the validated identity's `partyId` from the withdrawal result, never the raw caller value.
 
+## Fix-5e behavior notes (created-gated dispatch; created-only mismatch release)
+
+- Pending-intent dispatch enqueues a queue task ONLY when the store reports the cartoon request as just-created (`created: true`). A reused/raced job (`created: false`) never enqueues here: the flush reads the actual existing job state and reflects it on the intent (queued/running -> intent queued; failed -> intent unavailable with the job's code; ready/delivering/expired/purged -> intent done; missing -> stays pending for the next pass, never deleted).
+- On cartoon-plan drift, only the just-created job is failed transactionally via `failEnqueue` (budget released, job + ledger rows preserved with verifiable provenance), then the intent is marked unavailable/`MANIFEST_MISMATCH`. A reused job is never touched on drift (intent-only marking). No path raw-deletes a job or rerolls the stored plan.
+
 ## Final verification evidence (cycle-13 closure)
 
 Task restatement: 16-scenario image-backed catalog, two-stage cartoon pipeline (qwen-image-3.0-pro still -> wan3.0-video STANDARD first_frame), scoped consent provenance, delivery-gap repair, host callable enqueue, pending-intent queue, explicit role mapping + situation tableaus.
