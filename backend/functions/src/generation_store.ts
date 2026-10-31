@@ -23,6 +23,16 @@ export interface GenerationStoreOptions {
   now?: () => Date;
 }
 
+export interface SeedProvenanceBinding {
+  seedId: string;
+  kind: string;
+}
+
+export interface CreateJobOptions {
+  /** Server-written seed binding (host path only; callers must never supply it). */
+  seedProvenance?: SeedProvenanceBinding;
+}
+
 export interface RequestGenerationResult {
   jobId: string;
   partyId: string;
@@ -142,7 +152,7 @@ export class FirestoreGenerationStore {
     this.now = options.now ?? (() => new Date());
   }
 
-  async requestGeneration(value: unknown): Promise<RequestGenerationResult> {
+  async requestGeneration(value: unknown, opts?: CreateJobOptions): Promise<RequestGenerationResult> {
     // Cartoon plans are server-assigned at job setup (auto-select from the
     // seeded RNG); callers must never supply a plan, prompt, scene, or
     // situation. The portrait auto-enqueue path (requestCartoonFromPortrait)
@@ -150,7 +160,32 @@ export class FirestoreGenerationStore {
     if (value && typeof value === "object" && !Array.isArray(value) && "cartoonPlan" in value) {
       throw new BackendError("INVALID_ARGUMENT", "Cartoon plans are assigned by the server; supply only the portrait submission.");
     }
-    return this.createJob(value, undefined);
+    // Seed provenance is server-written (host path via opts only); callers
+    // must never supply it.
+    if (value && typeof value === "object" && !Array.isArray(value) && "seedProvenance" in value) {
+      throw new BackendError("INVALID_ARGUMENT", "Seed provenance is assigned by the server.");
+    }
+    if (opts?.seedProvenance !== undefined) {
+      if (typeof opts.seedProvenance.seedId !== "string" || !opts.seedProvenance.seedId ||
+          opts.seedProvenance.kind !== "host") {
+        throw new BackendError("INVALID_ARGUMENT", "Seed provenance binding is invalid.");
+      }
+      validateId(opts.seedProvenance.seedId, "seedId");
+    }
+    return this.createJob(value, undefined, opts);
+  }
+
+  /**
+   * Shared server-side cartoon plan selection (fix-5a): the catalog
+   * scenario + compatible situation are selected deterministically from the
+   * stable submission id, so every caller (guest auto-enqueue, explicit
+   * portrait request, host seed request) derives the SAME immutable plan
+   * for the same portrait. Single helper, never duplicated.
+   */
+  private buildSharedCartoonPlan(guestMediaId: string): Record<string, unknown> {
+    const functionsRoot = resolveFunctionsRoot();
+    const { catalog, situations } = loadValidatedCatalogs(functionsRoot);
+    return buildAutoCartoonPlan({ submissionId: guestMediaId, catalog, situations }) as unknown as Record<string, unknown>;
   }
 
   /**
@@ -185,11 +220,9 @@ export class FirestoreGenerationStore {
     // withdrawal races fail closed.
     await assertGuestEligible(this.db, identity, guestMediaId, this.now().getTime());
     const rehearsalOnly = extractRehearsalOnly(value);
-    // Server-side auto-select: seeded by the stable submission id so retries
-    // reuse the same pair. Catalog compatibility is enforced by the selector.
-    const functionsRoot = resolveFunctionsRoot();
-    const { catalog, situations } = loadValidatedCatalogs(functionsRoot);
-    const cartoonPlan = buildAutoCartoonPlan({ submissionId: guestMediaId, catalog, situations });
+    // Server-side auto-select via the shared helper: retries reuse the same
+    // pair (same submission id -> same plan, never rerolled).
+    const cartoonPlan = this.buildSharedCartoonPlan(guestMediaId);
     const jobId = `cartoon-${guestMediaId}`;
     const idempotencyKey = `cartoon-${guestMediaId}`;
     const created = await this.createJob({
@@ -202,11 +235,59 @@ export class FirestoreGenerationStore {
       guestMediaId,
       ...(rehearsalOnly ? { rehearsalOnly: true as const } : {}),
     }, cartoonPlan as unknown as Record<string, unknown>);
-    return { ...created, scenarioId: cartoonPlan.scenarioId, situationId: cartoonPlan.situationId };
+    const plan = cartoonPlan as unknown as { scenarioId: string; situationId: string };
+    return { ...created, scenarioId: plan.scenarioId, situationId: plan.situationId };
+  }
+
+  /**
+   * Host seed cartoon request (fix-5a): the same shared server selection as
+   * requestCartoonFromPortrait (same plan for the same portrait), persisted
+   * on the host job `hv-{seedId}` with the server-written host seed binding.
+   * Shares ONE plan with the guest auto path per portrait; single-flight and
+   * idempotency reuse semantics are identical (same scope reuses, genuinely
+   * different scope surfaces BUDGET_EXCEEDED).
+   */
+  async requestHostCartoonJob(input: {
+    partyId: string;
+    deviceId: string;
+    channelId: string;
+    jobId: string;
+    idempotencyKey: string;
+    guestMediaId: string;
+    seedId: string;
+    rehearsalOnly?: true;
+  }): Promise<RequestGenerationResult & { scenarioId: string; situationId: string }> {
+    const partyId = validateId(input.partyId, "partyId");
+    const deviceId = validateId(input.deviceId, "deviceId");
+    const channelId = validateId(input.channelId, "channelId");
+    const jobId = validateId(input.jobId, "jobId");
+    const idempotencyKey = validateId(input.idempotencyKey, "idempotencyKey");
+    const guestMediaId = validateId(input.guestMediaId, "guestMediaId");
+    const seedId = validateId(input.seedId, "seedId");
+    if (input.rehearsalOnly !== undefined && input.rehearsalOnly !== true) {
+      throw new BackendError("INVALID_ARGUMENT", "rehearsalOnly must be true when present.");
+    }
+    if (!jobId.startsWith("hv-")) {
+      throw new BackendError("INVALID_ARGUMENT", "Host cartoon jobs use the hv- job scope.");
+    }
+    await assertGuestEligible(this.db, { partyId, deviceId, channelId }, guestMediaId, this.now().getTime());
+    const cartoonPlan = this.buildSharedCartoonPlan(guestMediaId);
+    const created = await this.createJob({
+      partyId,
+      deviceId,
+      channelId,
+      jobId,
+      idempotencyKey,
+      presetId: CHEAP_DEMO_PRESET.presetId,
+      guestMediaId,
+      ...(input.rehearsalOnly ? { rehearsalOnly: true as const } : {}),
+    }, cartoonPlan as unknown as Record<string, unknown>, { seedProvenance: { seedId, kind: "host" } });
+    const plan = cartoonPlan as unknown as { scenarioId: string; situationId: string };
+    return { ...created, scenarioId: plan.scenarioId, situationId: plan.situationId };
   }
 
   /** Shared creation path: requestGeneration (no plan) and the server auto path (server plan). */
-  private async createJob(value: unknown, cartoonPlan: Record<string, unknown> | undefined): Promise<RequestGenerationResult> {
+  private async createJob(value: unknown, cartoonPlan: Record<string, unknown> | undefined, opts?: CreateJobOptions): Promise<RequestGenerationResult> {
     const rehearsalOnly = extractRehearsalOnly(value);
     const sanitized = stripCartoonPlan(stripRehearsalOnly(value));
     validatePresetControls(sanitized);
@@ -242,10 +323,13 @@ export class FirestoreGenerationStore {
       if (existing.exists) {
         const old = existing.data()!;
         const newEffectiveGuestId = input.guestMediaId ?? (typeof cartoonPortraitId === "string" && cartoonPortraitId !== "" ? cartoonPortraitId : undefined);
+        const oldSeed = (old.seedProvenance ?? undefined) as Record<string, unknown> | undefined;
+        const newSeed = opts?.seedProvenance ? { seedId: opts.seedProvenance.seedId, kind: opts.seedProvenance.kind } : undefined;
         if (old.idempotencyKey !== input.idempotencyKey || old.deviceId !== input.deviceId || old.channelId !== input.channelId ||
             (old.guestMediaId ?? undefined) !== (newEffectiveGuestId ?? undefined) ||
             (old.rehearsalOnly === true) !== rehearsalOnly ||
-            !cartoonPlansEqual(old.cartoonPlan ?? undefined, cartoonPlan)) {
+            !cartoonPlansEqual(old.cartoonPlan ?? undefined, cartoonPlan) ||
+            JSON.stringify(oldSeed ?? null) !== JSON.stringify(newSeed ?? null)) {
           throw new BackendError("FORBIDDEN", "jobId is already bound to a different request.");
         }
         return {
@@ -321,6 +405,9 @@ export class FirestoreGenerationStore {
         // exists. Bound jobs carry guestMedia instead and never get it.
         ...(guestBinding ? {} : { kind: "text-only" as const }),
         ...(rehearsalOnly ? { rehearsalOnly: true as const } : {}),
+        // Server-written host seed binding (fix-5a): persisted atomically at
+        // creation so delivery/publish resolve it without prefix inference.
+        ...(opts?.seedProvenance ? { seedProvenance: { seedId: opts.seedProvenance.seedId, kind: opts.seedProvenance.kind } } : {}),
         ...(cartoonPlan ? { cartoonPlan } : {}),
         // Cartoon jobs begin with an empty chain; stages fill it in without
         // ever rewriting the immutable plan above.

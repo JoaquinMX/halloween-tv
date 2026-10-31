@@ -10,7 +10,11 @@ import {
   GUEST_MAX_IMAGE_BYTES,
   GUEST_UPLOAD_TTL_MS,
 } from "./config";
-import { BackendError, isHostSourceConsent, isSupportedConsent, requireIdentity, validateId } from "./contracts";
+import {
+  BackendError, GenerationQueueState, PendingCartoonIntentPlan, isHostSourceConsent, isSupportedConsent, pendingCartoonIntentPath, requireIdentity, validateId,
+} from "./contracts";
+import { buildAutoCartoonPlan } from "./cartoon_pipeline";
+import { loadValidatedCatalogs, resolveFunctionsRoot } from "./scenario_catalog";
 import {
   consentRevisionFor,
   GuestMediaDoc,
@@ -30,14 +34,18 @@ export interface GuestUploadServiceOptions {
   signUploadUrl?: (file: File, contentType: string, expiresAt: Date) => Promise<string>;
   deleteObject?: (file: File) => Promise<void>;
   /**
-   * Portrait-eligible hook (cycle-13 fix-3 auto-enqueue): invoked best-effort
-   * after a portrait becomes eligible (completion) and when finalization
-   * observes an already-eligible portrait (trigger/replay). Failures are
-   * swallowed so upload stays fully operational when generation is disabled
-   * or the queue is unavailable; the enqueue path itself is idempotent (one
+   * Portrait-eligible hook (cycle-13 fix-3 auto-enqueue + fix-5a durable
+   * intent): invoked best-effort after a portrait becomes eligible
+   * (completion) and when finalization observes an already-eligible portrait
+   * (trigger/replay). Failures never break upload; BUDGET_EXCEEDED leaves the
+   * durable pending intent for bounded server dispatch after capacity
+   * releases, while queue-admission failures mark the intent TERMINAL
+   * unavailable (surfaced via getGuestMediaStatus, never silent). Host-source
+   * portraits are skipped here: the explicit host seed request owns that
+   * scope's ONE job/plan. The enqueue path itself is idempotent (one
    * persisted plan, one job, no reroll/rebill).
    */
-  onPortraitEligible?: (info: { partyId: string; deviceId: string; channelId: string; submissionId: string }) => Promise<void>;
+  onPortraitEligible?: (info: { partyId: string; deviceId: string; channelId: string; submissionId: string; hostSource: boolean }) => Promise<void>;
 }
 
 export interface RequestGuestUploadResult {
@@ -59,6 +67,13 @@ export interface GuestMediaStatusResult {
   expiresAt: string;
   sha256?: string;
   sizeBytes?: number;
+  /** Durable queue state (fix-5a): pending/queued/ready/failed/unavailable. Absent when no intent/job exists. */
+  generation?: {
+    state: GenerationQueueState;
+    jobId?: string;
+    errorCode?: string;
+    plan?: PendingCartoonIntentPlan;
+  };
 }
 
 export interface WithdrawGuestMediaResult {
@@ -131,14 +146,55 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
   const onPortraitEligible = options.onPortraitEligible;
 
   /** Best-effort auto-enqueue: never breaks the upload path. */
-  async function notifyPortraitEligible(info: { partyId: string; deviceId: string; channelId: string; submissionId: string }): Promise<void> {
+  async function notifyPortraitEligible(info: { partyId: string; deviceId: string; channelId: string; submissionId: string; hostSource: boolean }): Promise<void> {
     if (!onPortraitEligible) return;
     try {
       await onPortraitEligible(info);
-    } catch {
+    } catch (error) {
       // Upload stays fully operational when generation is disabled,
-      // misconfigured, or the queue is unavailable.
+      // misconfigured, or the queue is unavailable. BUDGET_EXCEEDED keeps
+      // the durable pending intent for bounded dispatch after capacity
+      // releases; any other failure marks the intent TERMINAL unavailable
+      // (visible via getGuestMediaStatus, never silent eligible-forever).
+      if (error instanceof BackendError && error.errorCode === "BUDGET_EXCEEDED") return;
+      const code = error instanceof BackendError ? error.errorCode : "PROVIDER_UNAVAILABLE";
+      await db.doc(pendingCartoonIntentPath(info.partyId, info.submissionId)).update({
+        status: "unavailable",
+        errorCode: code,
+        updatedAt: FieldValue.serverTimestamp(),
+      }).catch(() => undefined);
+      return;
     }
+    // Successful dispatch (or idempotent reuse): reflect queued state
+    // best-effort so status readers see progress without polling the queue.
+    await db.doc(pendingCartoonIntentPath(info.partyId, info.submissionId)).update({
+      status: "queued",
+      updatedAt: FieldValue.serverTimestamp(),
+    }).catch(() => undefined);
+  }
+
+  /**
+   * Durable pending-intent selection (fix-5a): the same deterministic
+   * server selection as requestCartoonFromPortrait for the same portrait
+   * (shared helper buildAutoCartoonPlan, never duplicated logic), so the
+   * dispatched retry reuses the SAME immutable plan/version/seed (no reroll).
+   */
+  function planForSubmission(submissionId: string): PendingCartoonIntentPlan {
+    const { catalog, situations } = loadValidatedCatalogs(resolveFunctionsRoot());
+    const plan = buildAutoCartoonPlan({ submissionId, catalog, situations });
+    return {
+      scenarioId: plan.scenarioId,
+      situationId: plan.situationId,
+      portraitSubmissionId: submissionId,
+      stillPlanId: plan.stillPlanId,
+      videoPlanId: plan.videoPlanId,
+      version: plan.version,
+      seed: plan.seed,
+    };
+  }
+
+  function plansEqual(a: unknown, b: unknown): boolean {
+    return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
   }
 
   async function requestGuestUpload(value: unknown): Promise<RequestGuestUploadResult> {
@@ -293,13 +349,45 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
       throw new BackendError("INVALID_ARGUMENT", "Guest upload is not a JPEG or PNG image.");
     }
     const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const hostSource = isHostSourceConsent(doc.consent?.textVersion, doc.consent?.purpose);
     if (doc.status === "eligible") {
       if (doc.sourceHash !== sha256 || doc.sourceSizeBytes !== bytes.byteLength) {
         throw new BackendError("MANIFEST_MISMATCH", "Guest object changed after eligibility was recorded.");
       }
       // Replay-safe: an already-eligible completion still triggers the
-      // idempotent auto-enqueue exactly once downstream.
-      await notifyPortraitEligible({ partyId: identity.partyId, deviceId: identity.deviceId, channelId: identity.channelId, submissionId });
+      // idempotent auto-enqueue exactly once downstream. Host-source
+      // portraits skip the guest auto path (the explicit host seed request
+      // owns that scope's ONE job/plan); the intent is ensured here for
+      // guest portraits so a busy party persists pending intent.
+      if (!hostSource && onPortraitEligible) {
+        const replayPlan = (() => { try { return planForSubmission(submissionId); } catch { return undefined; } })();
+        if (replayPlan) {
+          const intentRef = db.doc(pendingCartoonIntentPath(identity.partyId, submissionId));
+          await db.runTransaction(async (transaction) => {
+            const [fresh, intentSnap] = await Promise.all([transaction.get(ref), transaction.get(intentRef)]);
+            if (!fresh.exists) return;
+            const current = fresh.data() as GuestMediaDoc;
+            if (current.status !== "eligible") return;
+            if ((current as GuestMediaDoc & { tombstone?: unknown }).tombstone === true || String(current.status) === "withdrawn") return;
+            if (!intentSnap.exists) {
+              transaction.create(intentRef, {
+                partyId: identity.partyId,
+                deviceId: identity.deviceId,
+                channelId: identity.channelId,
+                submissionId,
+                consentRevision: current.consentRevision,
+                sourceHash: sha256,
+                plan: replayPlan,
+                status: "pending",
+                attempts: 0,
+                createdAt: FieldValue.serverTimestamp(),
+                updatedAt: FieldValue.serverTimestamp(),
+              });
+            }
+          }).catch(() => undefined);
+        }
+      }
+      await notifyPortraitEligible({ partyId: identity.partyId, deviceId: identity.deviceId, channelId: identity.channelId, submissionId, hostSource });
       return {
         submissionId,
         partyId: doc.partyId,
@@ -327,11 +415,23 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
     const completionMs = now().getTime();
     const hardDeadline = hardDeleteMs(doc, completionMs + GUEST_INPUT_TTL_MS);
     const eligibleExpiresAt = new Date(Math.min(completionMs + GUEST_INPUT_TTL_MS, hardDeadline));
+    // Durable pending intent (fix-5a): computed before the transaction from
+    // the same deterministic selector (no reroll across retries). Created in
+    // the same transaction as eligibility below; host-source portraits and
+    // generation-disabled compositions never create one.
+    const completionHostSource = isHostSourceConsent(doc.consent?.textVersion, doc.consent?.purpose);
+    const completionPlan = (!completionHostSource && onPortraitEligible)
+      ? (() => { try { return planForSubmission(submissionId); } catch { return undefined; } })()
+      : undefined;
+    const intentRef = db.doc(pendingCartoonIntentPath(identity.partyId, submissionId));
     try {
       await db.runTransaction(async (transaction) => {
         const fresh = await transaction.get(ref);
         if (!fresh.exists) throw new BackendError("NOT_FOUND", "Guest media does not exist.");
         const current = fresh.data() as GuestMediaDoc;
+        // All transactional reads precede all writes (Firestore requires
+        // reads-before-writes): the intent snapshot is read here, before the
+        // eligibility update below.
         if (current.partyId !== identity.partyId || current.deviceId !== identity.deviceId || current.channelId !== identity.channelId) {
           throw new BackendError("FORBIDDEN", "Guest media is not bound to this party, device, and channel.");
         }
@@ -359,6 +459,7 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
           }
           return;
         }
+        const preIntentSnap = completionPlan ? await transaction.get(intentRef) : undefined;
         transaction.update(ref, {
           status: "eligible",
           sourceHash: sha256,
@@ -379,6 +480,35 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
             sourceHash: sha256,
           },
         });
+        // Same-transaction durable intent: bound to party+submission+consent
+        // revision with the immutable plan. Created once, never rerolled:
+        // an existing intent keeps its plan.
+        if (completionPlan) {
+          const intentSnap = preIntentSnap!;
+          if (!intentSnap.exists) {
+            transaction.create(intentRef, {
+              partyId: identity.partyId,
+              deviceId: identity.deviceId,
+              channelId: identity.channelId,
+              submissionId,
+              consentRevision: current.consentRevision,
+              sourceHash: sha256,
+              plan: completionPlan,
+              status: "pending",
+              attempts: 0,
+              createdAt: FieldValue.serverTimestamp(),
+              updatedAt: FieldValue.serverTimestamp(),
+            });
+          } else {
+            const kept = intentSnap.data() as Record<string, unknown>;
+            if (kept.status === "unavailable") {
+              // A terminal admission failure stays terminal: completion
+              // replays never resurrect it into pending.
+            } else if (!plansEqual(kept.plan, completionPlan)) {
+              // Catalog drift must never reroll the persisted plan: keep it.
+            }
+          }
+        }
       });
     } catch (error) {
       if (error instanceof BackendError && error.errorCode === "CLIP_EXPIRED" && doc.status !== "expired") {
@@ -388,7 +518,10 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
     }
     // Eligible-upload completion idempotently enqueues the backend-selected
     // two-stage cartoon generation (best-effort: never breaks completion).
-    await notifyPortraitEligible({ partyId: identity.partyId, deviceId: identity.deviceId, channelId: identity.channelId, submissionId });
+    // On a busy party the durable intent above persists pending and a bounded
+    // server dispatch queues it after capacity releases; the guest does
+    // nothing further.
+    await notifyPortraitEligible({ partyId: identity.partyId, deviceId: identity.deviceId, channelId: identity.channelId, submissionId, hostSource: completionHostSource });
     return {
       submissionId,
       partyId: identity.partyId,
@@ -430,6 +563,61 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
     };
     if (typeof doc.sourceHash === "string") result.sha256 = doc.sourceHash;
     if (typeof doc.sourceSizeBytes === "number") result.sizeBytes = doc.sourceSizeBytes;
+    // Durable queue state (fix-5a): intent first, then the deterministic job.
+    // Withdrawn/expired docs never carry queue state (the intent is cleaned
+    // up and never dispatches). A TERMINAL unavailable intent is surfaced
+    // here so the guest never polls eligible-forever after an unrecoverable
+    // queue admission failure.
+    if (doc.status === "eligible" || doc.status === "pending_upload") {
+      try {
+        const intentSnap = await db.doc(pendingCartoonIntentPath(identity.partyId, submissionId)).get();
+        const intent = intentSnap.exists ? (intentSnap.data() as Record<string, unknown>) : undefined;
+        if (intent && intent.status === "unavailable") {
+          result.generation = {
+            state: "unavailable",
+            ...(typeof intent.errorCode === "string" ? { errorCode: intent.errorCode } : { errorCode: "PROVIDER_UNAVAILABLE" }),
+            ...(intent.plan !== undefined ? { plan: intent.plan as PendingCartoonIntentPlan } : {}),
+          };
+          return result;
+        }
+        const jobId = `cartoon-${submissionId}`;
+        const jobSnap = await db.doc(`parties/${identity.partyId}/jobs/${jobId}`).get().catch(() => undefined);
+        const job = jobSnap?.exists ? (jobSnap.data() as Record<string, unknown>) : undefined;
+        if (job) {
+          const state = String(job.state ?? job.status ?? "queued");
+          const mapped: GenerationQueueState =
+            state === "ready" || state === "delivering" || state === "purged" ? "ready"
+            : state === "failed" || state === "expired" ? "failed"
+            : "queued";
+          result.generation = {
+            state: mapped,
+            jobId,
+            ...(typeof job.errorCode === "string" ? { errorCode: job.errorCode } : {}),
+            ...((job.cartoonPlan ?? intent?.plan) !== undefined
+              ? { plan: (job.cartoonPlan ?? intent?.plan) as PendingCartoonIntentPlan }
+              : {}),
+          };
+          return result;
+        }
+        if (intent && intent.status === "queued") {
+          result.generation = {
+            state: "queued",
+            jobId,
+            ...(intent.plan !== undefined ? { plan: intent.plan as PendingCartoonIntentPlan } : {}),
+          };
+          return result;
+        }
+        if (intent && intent.status === "pending") {
+          result.generation = {
+            state: "pending",
+            ...(intent.plan !== undefined ? { plan: intent.plan as PendingCartoonIntentPlan } : {}),
+          };
+          return result;
+        }
+      } catch {
+        // Status stays operational without queue detail.
+      }
+    }
     return result;
   }
 
@@ -492,6 +680,9 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
       pendingDeletions: [],
       updatedAt: FieldValue.serverTimestamp(),
     }, { merge: false });
+    // Withdrawn pending never dispatches: remove the durable intent first so
+    // a concurrent dispatch cannot queue it after the tombstone.
+    await db.doc(pendingCartoonIntentPath(identity.partyId, submissionId)).delete().catch(() => undefined);
     // Discard every attributable object: the source plus staged, delivered,
     // and generated derivatives of all bound jobs plus the published manifest
     // clips. Delivery eligibility is revoked immediately by deleting a current
@@ -700,9 +891,45 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
     // Ingest-finalization race: when the object arrives after (or is replayed
     // after) an eligible completion, enqueue idempotently exactly once
     // downstream. Pending uploads are left alone; explicit completion
-    // validates bytes before any eligibility change.
+    // validates bytes before any eligibility change. Host-source portraits
+    // skip the guest auto path (explicit host seed request owns that scope).
     if (doc.status === "eligible") {
-      await notifyPortraitEligible({ partyId: parsed.partyId, deviceId: parsed.deviceId, channelId: doc.channelId, submissionId: parsed.submissionId });
+      const hostSource = isHostSourceConsent(
+        (doc.consent as GuestMediaDoc["consent"] | undefined)?.textVersion,
+        (doc.consent as GuestMediaDoc["consent"] | undefined)?.purpose,
+      );
+      if (!hostSource && onPortraitEligible && typeof doc.sourceHash === "string") {
+        const finalizePlan = (() => { try { return planForSubmission(parsed.submissionId); } catch { return undefined; } })();
+        if (finalizePlan) {
+          const intentRef = db.doc(pendingCartoonIntentPath(parsed.partyId, parsed.submissionId));
+          await db.runTransaction(async (transaction) => {
+            const [fresh, intentSnap] = await Promise.all([
+              transaction.get(guestMediaRef(db, parsed.partyId, parsed.submissionId)),
+              transaction.get(intentRef),
+            ]);
+            if (!fresh.exists) return;
+            const current = fresh.data() as GuestMediaDoc;
+            if (current.status !== "eligible") return;
+            if ((current as GuestMediaDoc & { tombstone?: unknown }).tombstone === true || String(current.status) === "withdrawn") return;
+            if (!intentSnap.exists && typeof current.sourceHash === "string") {
+              transaction.create(intentRef, {
+                partyId: current.partyId,
+                deviceId: current.deviceId,
+                channelId: current.channelId,
+                submissionId: parsed.submissionId,
+                consentRevision: current.consentRevision,
+                sourceHash: current.sourceHash,
+                plan: finalizePlan,
+                status: "pending",
+                attempts: 0,
+                createdAt: FieldValue.serverTimestamp(),
+                updatedAt: FieldValue.serverTimestamp(),
+              });
+            }
+          }).catch(() => undefined);
+        }
+      }
+      await notifyPortraitEligible({ partyId: parsed.partyId, deviceId: parsed.deviceId, channelId: doc.channelId, submissionId: parsed.submissionId, hostSource });
     }
     return { handled: true, deleted: false };
   }

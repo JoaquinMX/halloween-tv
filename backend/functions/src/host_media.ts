@@ -28,6 +28,10 @@ export interface HostMediaServiceOptions {
   now?: () => Date;
   signPreviewUrl?: (file: File, expiresAt: Date) => Promise<string>;
   deleteObject?: (file: File) => Promise<void>;
+  /** Runtime task-queue dispatch (fix-5a): host requests enqueue exactly once. */
+  enqueueGeneration?: (task: { partyId: string; deviceId: string; channelId: string; jobId: string; idempotencyKey: string }) => Promise<void>;
+  /** When false, host generation refuses (upload stays operational). */
+  generationEnabled?: boolean;
 }
 
 /**
@@ -227,9 +231,15 @@ export function createHostMediaService(options: HostMediaServiceOptions): {
 
   async function generateHostVideo(value: unknown): Promise<GenerateHostVideoResult> {
     const input = parseGenerateHostVideoInput(value);
+    if (options.generationEnabled === false) {
+      throw new BackendError("PROVIDER_UNAVAILABLE", "Generation is not enabled.");
+    }
     const host = await assertRegisteredHostDevice(db, input);
     const jobId = jobIdForHostSeed(input.seedId);
     const ref = seedRef(db, host.partyId, input.seedId);
+    const enqueue = options.enqueueGeneration ?? (async () => {
+      throw new BackendError("PROVIDER_UNAVAILABLE", "Generation task queue is not configured.");
+    });
     const existing = await ref.get();
     if (existing.exists) {
       const old = existing.data()!;
@@ -240,40 +250,53 @@ export function createHostMediaService(options: HostMediaServiceOptions): {
         old.idempotencyKey !== input.idempotencyKey ||
         old.deviceId !== host.deviceId ||
         (old.guestMediaId ?? undefined) !== (input.guestMediaId ?? undefined) ||
+        (old.rehearsalOnly === true) !== (input.rehearsalOnly === true) ||
         old.presetId !== input.presetId
       ) {
         throw new BackendError("FORBIDDEN", "seedId is already bound to a different request.");
       }
-      const synced = await syncSeedStatus(host.partyId, existing);
+      // Failed-seed retry: the first attempt hit single-flight (BUDGET) or
+      // queue admission before any job existed. The identical retry re-attempts
+      // creation below instead of wedging on the failed marker.
       const jobSnap = await jobRef(db, host.partyId, jobId).get();
-      return {
-        seedId: input.seedId,
-        jobId,
-        state: jobSnap.exists ? String(jobSnap.data()?.state ?? synced?.status ?? "queued") : String(synced?.status ?? "queued"),
-        created: false,
-      };
+      if (!jobSnap.exists && (old.status === "failed" || old.status === "queued")) {
+        // Fall through to creation (seed doc already exists; reuse it).
+      } else {
+        const synced = await syncSeedStatus(host.partyId, existing);
+        return {
+          seedId: input.seedId,
+          jobId,
+          state: jobSnap.exists ? String(jobSnap.data()?.state ?? synced?.status ?? "queued") : String(synced?.status ?? "queued"),
+          created: false,
+        };
+      }
     }
     // Deletion/withdrawal races: a seed id bound to a deleted seed can never
     // be resurrected through generate (tombstone check below is best-effort;
     // the publish path rechecks transactionally).
     const createdAt = now();
     const expiresAt = new Date(createdAt.getTime() + HOST_PREVIEW_TTL_MS);
-    await ref.create({
-      seedId: input.seedId,
-      partyId: host.partyId,
-      deviceId: host.deviceId,
-      channelId: host.channelId,
-      jobId,
-      idempotencyKey: input.idempotencyKey,
-      presetId: input.presetId,
-      ...(input.guestMediaId ? { guestMediaId: input.guestMediaId } : {}),
-      status: "queued",
-      cameraIds: [...REQUIRED_CAMERA_IDS],
-      previewPaths: [],
-      createdAt: FieldValue.serverTimestamp(),
-      updatedAt: FieldValue.serverTimestamp(),
-      expiresAt: Timestamp.fromDate(expiresAt),
-    });
+    if (!existing.exists) {
+      await ref.create({
+        seedId: input.seedId,
+        partyId: host.partyId,
+        deviceId: host.deviceId,
+        channelId: host.channelId,
+        jobId,
+        idempotencyKey: input.idempotencyKey,
+        presetId: input.presetId,
+        ...(input.guestMediaId ? { guestMediaId: input.guestMediaId } : {}),
+        ...(input.rehearsalOnly ? { rehearsalOnly: true as const } : {}),
+        status: "queued",
+        cameraIds: [...REQUIRED_CAMERA_IDS],
+        previewPaths: [],
+        createdAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+        expiresAt: Timestamp.fromDate(expiresAt),
+      });
+    } else {
+      await ref.update({ status: "queued", updatedAt: FieldValue.serverTimestamp() }).catch(() => undefined);
+    }
     // Server-written host provenance binding: only this path
     // (generateHostVideo/jobIdForHostSeed, registered host device recorded
     // above) may produce the `{ seedId, kind: "host" }` binding. Delivery
@@ -283,25 +306,57 @@ export function createHostMediaService(options: HostMediaServiceOptions): {
     const seedBinding = { seedId: input.seedId, kind: "host" } as const;
     // Fixed-preset queue with the existing idempotency, budget, and consent
     // checks: host generation is a scoped entry point to the same pipeline,
-    // never a parallel one.
+    // never a parallel one. Portrait requests build the backend-selected
+    // two-stage cartoon plan through the shared server helper (same
+    // selection/persistence/idempotency as requestCartoonFromPortrait);
+    // legacy no-photo requests keep the fixed-preset queue byte-for-byte.
+    // Both enqueue exactly once via the runtime enqueue path.
     try {
-      const request = await store.requestGeneration({
-        partyId: host.partyId,
-        deviceId: host.deviceId,
-        channelId: host.channelId,
-        jobId,
-        idempotencyKey: input.idempotencyKey,
-        presetId: input.presetId,
-        ...(input.guestMediaId ? { guestMediaId: input.guestMediaId } : {}),
-      });
+      const request = input.guestMediaId
+        ? await store.requestHostCartoonJob({
+          partyId: host.partyId,
+          deviceId: host.deviceId,
+          channelId: host.channelId,
+          jobId,
+          idempotencyKey: input.idempotencyKey,
+          guestMediaId: input.guestMediaId,
+          seedId: input.seedId,
+          ...(input.rehearsalOnly ? { rehearsalOnly: input.rehearsalOnly } : {}),
+        })
+        : await store.requestGeneration({
+          partyId: host.partyId,
+          deviceId: host.deviceId,
+          channelId: host.channelId,
+          jobId,
+          idempotencyKey: input.idempotencyKey,
+          presetId: input.presetId,
+          ...(input.rehearsalOnly ? { rehearsalOnly: input.rehearsalOnly } : {}),
+        }, { seedProvenance: { ...seedBinding } });
       await ref.update({ status: request.state === "queued" ? "queued" : request.state, updatedAt: FieldValue.serverTimestamp() }).catch(() => undefined);
       // Persist the binding on the job so delivery/publish resolve it
       // without prefix inference. The unbound text-only marker (if any) is
-      // removed: this job is host-bound, never text-only.
+      // removed: this job is host-bound, never text-only. Best-effort: the
+      // binding is already atomic at creation; this covers pre-fix jobs.
       await jobRef(db, host.partyId, jobId).update({
         seedProvenance: { ...seedBinding },
         kind: FieldValue.delete(),
       }).catch(() => undefined);
+      if (request.created) {
+        const task = {
+          partyId: host.partyId,
+          deviceId: host.deviceId,
+          channelId: host.channelId,
+          jobId,
+          idempotencyKey: input.idempotencyKey,
+        };
+        try {
+          await enqueue(task);
+        } catch (error) {
+          await store.failEnqueue(task).catch(() => undefined);
+          await ref.update({ status: "failed", updatedAt: FieldValue.serverTimestamp() }).catch(() => undefined);
+          throw new BackendError("PROVIDER_UNAVAILABLE", "Generation task could not be queued.");
+        }
+      }
       return { seedId: input.seedId, jobId, state: request.state, created: request.created };
     } catch (error) {
       await ref.update({ status: "failed", updatedAt: FieldValue.serverTimestamp() }).catch(() => undefined);

@@ -424,3 +424,170 @@ test("offline fake stills never publish for non-rehearsal jobs", {
     await disposeEmulatorContext(app);
   }
 });
+
+test("fix-5a busy party: pending intent persists, dispatches once with identical plan, withdrawn never dispatches, admission failure visible", {
+  skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
+}, async () => {
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  const channelId = "main";
+  const enqueues: Array<Record<string, string>> = [];
+  class CountingVideo extends FakeVideoGenerationPort {
+    videoSubmits = 0;
+    override async submit(request: import("../src/video_generation_port").VideoGenerationRequest) {
+      this.videoSubmits += 1;
+      return super.submit(request);
+    }
+  }
+  const provider = new CountingVideo(FIXTURE_DIR);
+  const imagePort = new FakeImageGenerationPort();
+  const guest = (deviceId: string) => ({ partyId, deviceId, channelId });
+  const photoPath = resolve(__dirname, "fixtures/guest_photo.jpg");
+  try {
+    await seedParty(db, partyId, "p-busy-1", channelId);
+    await seedParty(db, partyId, "p-busy-2", channelId);
+    // Upload phase for guest 1 runs with generation disabled so the explicit
+    // rehearsal-marked occupier below keeps a clean budget. The occupier is
+    // created through the real explicit path (not a hand-written job doc).
+    const uploadOnly = createRuntimeServices({
+      db, bucket, generationEnabled: false, pollIntervalMs: 1, sleep: async () => undefined,
+      signGuestUploadUrl: async (file) => `https://upload.invalid/${encodeURIComponent(file.name)}`,
+      signReadUrl: async (file) => `https://signed.invalid/${encodeURIComponent(file.name)}`,
+    });
+    const services = createRuntimeServices({
+      db, bucket, generationEnabled: true, provider, imageProvider: imagePort,
+      fixtureDirectory: FIXTURE_DIR,
+      enqueueGeneration: async (task) => { enqueues.push({ ...task }); },
+      pollIntervalMs: 1, sleep: async () => undefined,
+      signGuestUploadUrl: async (file) => `https://upload.invalid/${encodeURIComponent(file.name)}`,
+      signReadUrl: async (file) => `https://signed.invalid/${encodeURIComponent(file.name)}`,
+    });
+    const photo = await readFile(photoPath);
+
+    // Guest 1 occupies capacity: eligible portrait + explicit rehearsal-marked
+    // cartoon job, created and enqueued but NOT run yet.
+    const req1 = await uploadOnly.requestGuestUpload({
+      ...guest("p-busy-1"),
+      consent: { accepted: true, textVersion: GUEST_CONSENT_TEXT_VERSION, purpose: GUEST_CONSENT_PURPOSE },
+      contentType: "image/jpeg",
+    });
+    await bucket.file(req1.objectPath).save(photo, { contentType: "image/jpeg" });
+    await uploadOnly.completeGuestUpload({ ...guest("p-busy-1"), submissionId: req1.submissionId });
+    const created1 = await services.requestCartoonFromPortrait({
+      ...guest("p-busy-1"), guestMediaId: req1.submissionId, rehearsalOnly: true,
+    });
+    assert.equal(created1.created, true);
+    const job1 = created1.jobId;
+    assert.equal(enqueues.length, 1);
+
+    // Guest 2 completes while the party is busy: the upload succeeds
+    // (eligible) and a durable pending intent persists — no job, no provider
+    // submit — with the guest doing nothing further.
+    const req2 = await services.requestGuestUpload({
+      ...guest("p-busy-2"),
+      consent: { accepted: true, textVersion: GUEST_CONSENT_TEXT_VERSION, purpose: GUEST_CONSENT_PURPOSE },
+      contentType: "image/jpeg",
+    });
+    await bucket.file(req2.objectPath).save(photo, { contentType: "image/jpeg" });
+    const completed2 = await services.completeGuestUpload({ ...guest("p-busy-2"), submissionId: req2.submissionId });
+    assert.equal(completed2.status, "eligible");
+    const intent2 = (await db.doc(`parties/${partyId}/pendingGenerations/${req2.submissionId}`).get()).data()!;
+    assert.equal(intent2.status, "pending");
+    assert.equal(intent2.submissionId, req2.submissionId);
+    assert.equal(intent2.consentRevision, req2.consentRevision);
+    assert.ok(intent2.plan && typeof intent2.plan.scenarioId === "string");
+    assert.equal((await db.doc(`parties/${partyId}/jobs/cartoon-${req2.submissionId}`).get()).exists, false);
+    assert.equal(provider.videoSubmits, 0, "no provider video submit while busy");
+    assert.equal(imagePort.submissions.length, 0, "no provider still submit while busy");
+    assert.equal(enqueues.length, 1, "no second enqueue while busy");
+    const statusPending = await services.getGuestMediaStatus({ ...guest("p-busy-2"), submissionId: req2.submissionId });
+    assert.equal(statusPending.status, "eligible");
+    assert.equal(statusPending.generation?.state, "pending");
+
+    // Guest 1 finishes and releases capacity through the real worker path:
+    // guest 2 is queued EXACTLY ONCE with the SAME immutable plan (no reroll).
+    const run1 = await services.runGeneration({
+      partyId, deviceId: "p-busy-1", channelId, jobId: job1, idempotencyKey: job1,
+    });
+    assert.equal(run1.state, "ready");
+    assert.equal(enqueues.length, 2, "exactly one dispatch for the pending guest");
+    const dispatched = enqueues[1];
+    assert.equal(dispatched.jobId, `cartoon-${req2.submissionId}`);
+    const job2 = (await db.doc(`parties/${partyId}/jobs/cartoon-${req2.submissionId}`).get()).data()!;
+    assert.equal(job2.state, "queued");
+    assert.deepEqual(job2.cartoonPlan, intent2.plan, "dispatched job must reuse the SAME immutable plan");
+    assert.equal(job2.cartoonPlan.version, intent2.plan.version);
+    assert.equal(job2.cartoonPlan.seed, intent2.plan.seed);
+    assert.equal(job2.cartoonPlan.scenarioId, intent2.plan.scenarioId);
+    assert.equal(job2.cartoonPlan.situationId, intent2.plan.situationId);
+    // Re-running the worker for guest 1 changes nothing for guest 2.
+    assert.equal((await db.collection(`parties/${partyId}/jobs`).get()).size, 2);
+    const statusQueued = await services.getGuestMediaStatus({ ...guest("p-busy-2"), submissionId: req2.submissionId });
+    assert.equal(statusQueued.generation?.state, "queued");
+    assert.equal(statusQueued.generation?.jobId, `cartoon-${req2.submissionId}`);
+
+    // Withdrawn pending never dispatches: occupy capacity again, queue a
+    // third guest, then withdraw before release.
+    await seedParty(db, partyId, "p-busy-3", channelId);
+    await seedParty(db, partyId, "p-busy-4", channelId);
+    const req3 = await uploadOnly.requestGuestUpload({
+      ...guest("p-busy-3"),
+      consent: { accepted: true, textVersion: GUEST_CONSENT_TEXT_VERSION, purpose: GUEST_CONSENT_PURPOSE },
+      contentType: "image/jpeg",
+    });
+    await bucket.file(req3.objectPath).save(photo, { contentType: "image/jpeg" });
+    await uploadOnly.completeGuestUpload({ ...guest("p-busy-3"), submissionId: req3.submissionId });
+    // Guest 2's job is still queued (never ran): the party is still busy, so
+    // guest 3's explicit occupier request must surface the typed busy outcome
+    // rather than wedge — use a fresh explicit job to prove single-flight.
+    await assert.rejects(
+      services.requestCartoonFromPortrait({ ...guest("p-busy-3"), guestMediaId: req3.submissionId }),
+      (e: unknown) => e instanceof BackendError && e.errorCode === "BUDGET_EXCEEDED",
+    );
+    const req4 = await services.requestGuestUpload({
+      ...guest("p-busy-4"),
+      consent: { accepted: true, textVersion: GUEST_CONSENT_TEXT_VERSION, purpose: GUEST_CONSENT_PURPOSE },
+      contentType: "image/jpeg",
+    });
+    await bucket.file(req4.objectPath).save(photo, { contentType: "image/jpeg" });
+    await services.completeGuestUpload({ ...guest("p-busy-4"), submissionId: req4.submissionId });
+    assert.equal((await db.doc(`parties/${partyId}/pendingGenerations/${req4.submissionId}`).get()).data()?.status, "pending");
+    const enqueuesBeforeWithdraw = enqueues.length;
+    await services.withdrawGuestMedia({ ...guest("p-busy-4"), submissionId: req4.submissionId });
+    assert.equal((await db.doc(`parties/${partyId}/pendingGenerations/${req4.submissionId}`).get()).exists, false);
+    assert.equal((await db.doc(`parties/${partyId}/jobs/cartoon-${req4.submissionId}`).get()).exists, false);
+    assert.equal(enqueues.length, enqueuesBeforeWithdraw, "withdrawn pending must never dispatch");
+
+    // Queue-admission failure is TERMINAL and visible in status (separate
+    // party with a queue that always rejects).
+    const partyQ = randomPartyId();
+    await seedParty(db, partyQ, "p-queue-fail", channelId);
+    const failing = createRuntimeServices({
+      db, bucket, generationEnabled: true, provider: new FakeVideoGenerationPort(FIXTURE_DIR),
+      imageProvider: new FakeImageGenerationPort(), fixtureDirectory: FIXTURE_DIR,
+      enqueueGeneration: async () => { throw new Error("injected queue outage"); },
+      pollIntervalMs: 1, sleep: async () => undefined,
+      signGuestUploadUrl: async (file) => `https://upload.invalid/${encodeURIComponent(file.name)}`,
+      signReadUrl: async (file) => `https://signed.invalid/${encodeURIComponent(file.name)}`,
+    });
+    const reqQ = await failing.requestGuestUpload({
+      partyId: partyQ, deviceId: "p-queue-fail", channelId,
+      consent: { accepted: true, textVersion: GUEST_CONSENT_TEXT_VERSION, purpose: GUEST_CONSENT_PURPOSE },
+      contentType: "image/jpeg",
+    });
+    await bucket.file(reqQ.objectPath).save(photo, { contentType: "image/jpeg" });
+    const completedQ = await failing.completeGuestUpload({
+      partyId: partyQ, deviceId: "p-queue-fail", channelId, submissionId: reqQ.submissionId,
+    });
+    assert.equal(completedQ.status, "eligible", "upload stays operational through a queue outage");
+    const statusQ = await failing.getGuestMediaStatus({
+      partyId: partyQ, deviceId: "p-queue-fail", channelId, submissionId: reqQ.submissionId,
+    });
+    assert.equal(statusQ.generation?.state, "unavailable");
+    assert.equal(statusQ.generation?.errorCode, "PROVIDER_UNAVAILABLE");
+    await clearParty(db, bucket, partyQ);
+  } finally {
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+  }
+});
