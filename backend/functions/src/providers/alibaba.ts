@@ -91,16 +91,18 @@ export function buildAlibabaSubmitBody(request: VideoGenerationRequest): {
     // to a short-lived signed https read URL (GCS v4 read signature, 15-min
     // TTL, in-flight API call only, never persisted) and the adapter sends it
     // as the wire-level `input.media` field, exactly as the r2v endpoint
-    // requires (`input: { prompt, media: <signed https URL> }`). The sha256
+    // requires (`input: { prompt, media: [<signed https URL>] }`). The sha256
     // stays on the VideoGenerationRequest / usage-ledger path for provenance
     // and is never part of the submitted JSON: live submits carrying
     // `input.reference_image` (+ sha256) fail at schedule time with
-    // InvalidParameter "Field required: input.media". Bare paths /
+    // InvalidParameter "Field required: input.media", and submits carrying
+    // `input.media` as a bare string fail with InvalidParameter
+    // "Input should be a valid list, input.media". Bare paths /
     // non-https / missing media are rejected by the fetchability gate below
     // before transport, so an unfetchable reference can never be submitted.
     // No objectPath/storage_ref is ever sent.
     validateFetchableReferenceImage(request.referenceImage);
-    input.media = request.referenceImage.url;
+    input.media = [request.referenceImage.url];
   }
   return {
     model: request.modelId,

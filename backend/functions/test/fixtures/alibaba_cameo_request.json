@@ -1,7 +1,9 @@
 {
   "body": {
     "input": {
-      "media": "https://signed.invalid/guest-photo.jpg",
+      "media": [
+        "https://signed.invalid/guest-photo.jpg"
+      ],
       "prompt": "Create a 5-second, fully 2D animated clip in the style of classic Scooby-Doo. Use the person in V2 as the character reference, preserving his glasses, hair, beard, and outfit, all fully drawn. In a spooky mansion hallway with crooked portraits, cobwebs, and flickering lamps, the terrified person runs left to right while a goofy, lumbering green monster chases close behind. Use one continuous side-tracking shot, keeping both characters visible. 0-2 seconds: The person sprints with exaggerated cartoon strides while the monster reaches toward him. 2-4 seconds: He glances backward, eyes widening, then accelerates with comically spinning legs. 4-5 seconds: Both race through an open doorway and disappear offscreen. Bold ink outlines, flat cel shading, hand-painted purple-and-teal backgrounds, expressive faces, elastic cartoon movement, and playful spooky slapstick. No photorealism, 3D rendering, gore, text, or changes to the person's identity."
     },
     "model": "happyhorse-1.1-r2v",
