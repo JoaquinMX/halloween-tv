@@ -246,3 +246,28 @@ test("fake two-stage rehearsal animates the generated still with zero Alibaba ca
     (globalThis as Record<string, unknown>).fetch = originalFetch;
   }
 });
+
+test("rollout-6 narrow classifier: only the pre-contact cartoon config error is definitive by identity", async () => {
+  // Zero live calls: pure classifier unit test over the REAL prod classifier.
+  const { CartoonImageProviderMissingError, isDefinitiveTerminalWorkerError } = await import("../src/generation");
+  // The dedicated pre-contact configuration failure is definitive.
+  assert.equal(isDefinitiveTerminalWorkerError(new CartoonImageProviderMissingError()), true);
+  assert.equal(
+    isDefinitiveTerminalWorkerError(new CartoonImageProviderMissingError("Cartoon image provider is not configured.")),
+    true,
+  );
+  // Generic PROVIDER_UNAVAILABLE stays non-definitive (never broadened).
+  assert.equal(isDefinitiveTerminalWorkerError(new BackendError("PROVIDER_UNAVAILABLE", "Cartoon image provider is not configured.")), false);
+  assert.equal(isDefinitiveTerminalWorkerError(new BackendError("PROVIDER_UNAVAILABLE", "Provider task failed.")), false);
+  assert.equal(
+    isDefinitiveTerminalWorkerError(new BackendError("PROVIDER_UNAVAILABLE", "Cartoon still polling timed out; task ID is retained for reconciliation.")),
+    false,
+  );
+  // Generic message matching stays excluded: same text as a plain Error or a
+  // FAILED-detail BackendError must not become definitive.
+  assert.equal(isDefinitiveTerminalWorkerError(new Error("Cartoon image provider is not configured.")), false);
+  assert.equal(
+    isDefinitiveTerminalWorkerError(new BackendError("PROVIDER_UNAVAILABLE", "Provider task failed (InvalidParameter: Field required).")),
+    false,
+  );
+});

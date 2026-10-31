@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import test from "node:test";
 import { createGenerationServices } from "../src/generation";
 import { GUEST_CONSENT_PURPOSE, GUEST_CONSENT_TEXT_VERSION, REQUIRED_CAMERA_IDS } from "../src/config";
 import { BackendError, HOST_SOURCE_CONSENT_PURPOSE, HOST_SOURCE_CONSENT_TEXT_VERSION } from "../src/contracts";
 import { FakeVideoGenerationPort } from "../src/providers/fake";
+import { FakeImageGenerationPort } from "../src/providers/fake_image";
+import { cartoonStillLedgerPath } from "../src/usage";
 import { ProviderResult, ProviderTaskStatus, VideoGenerationRequest } from "../src/video_generation_port";
 import { reconcileUsage, usageLedgerId } from "../src/usage";
 import { buildCheapDemoRequest, validateCheapDemoControls, validateFetchableReferenceImage, validateVideoGenerationRequest } from "../src/video_generation_port";
@@ -21,6 +24,39 @@ import {
 
 function expectCode(work: () => unknown, code: string): void {
   assert.throws(work, (error: unknown) => error instanceof BackendError && error.errorCode === code);
+}
+
+const CARTOON_ASSETS = resolve(__dirname, "../../../apps/tv_app/assets");
+
+/**
+ * Rollout-6 cartoon-path helper: consents + completes a real portrait
+ * through the guest upload service (no live calls), so the tests below
+ * drive requestCartoonFromPortrait + runGeneration on the REAL cartoon path.
+ */
+async function setupConsentedCartoonPortrait(
+  db: FirebaseFirestore.Firestore,
+  bucket: import("@google-cloud/storage").Bucket,
+  partyId: string,
+  deviceId: string,
+  channelId: string,
+) {
+  const { createGuestUploadService } = await import("../src/guest_upload");
+  const guestUpload = createGuestUploadService({
+    db,
+    bucket,
+    signUploadUrl: async (file: { name: string }) => `https://upload.invalid/${encodeURIComponent(file.name)}`,
+  });
+  const requested = await guestUpload.requestGuestUpload({
+    partyId,
+    deviceId,
+    channelId,
+    consent: { accepted: true, textVersion: GUEST_CONSENT_TEXT_VERSION, purpose: GUEST_CONSENT_PURPOSE },
+    contentType: "image/jpeg",
+  });
+  const photo = await readFile(resolve(__dirname, "fixtures/guest_photo.jpg"));
+  await bucket.file(requested.objectPath).save(photo, { contentType: "image/jpeg" });
+  await guestUpload.completeGuestUpload({ partyId, deviceId, channelId, submissionId: requested.submissionId });
+  return requested;
 }
 
 test("cheap_demo generation request is fixed to one Singapore 480P silent output", () => {
@@ -625,6 +661,358 @@ test("ambiguous timeout error releases the worker only and never fails the job",
     const budget = (await db.doc(`parties/${partyId}/generationBudget/active`).get()).data()!;
     assert.equal(budget.activeJobId, jobId, "ambiguous path must not release the budget");
     assert.equal(budget.state, "in_flight");
+  } finally {
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+  }
+});
+
+/**
+ * Rollout-6 (a): missing cartoon image config is definitive by identity.
+ * Real cartoon path (requestCartoonFromPortrait + runGeneration) with NO
+ * imageProvider and no rehearsal marker: pre-contact config failure must
+ * fail the claimed job (not wedge running), release the budget to idle,
+ * preserve evidence, and let an unrelated next request proceed. Zero live
+ * calls — the worker fails before any provider contact.
+ */
+test("rollout-6 cartoon missing image config fails closed and releases single-flight", {
+  skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
+}, async () => {
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  const deviceId = "tv-cartoon-missing-img";
+  const channelId = "main";
+  try {
+    await seedParty(db, partyId, deviceId, channelId);
+    const requested = await setupConsentedCartoonPortrait(db, bucket, partyId, deviceId, channelId);
+    const services = createGenerationServices({
+      db,
+      bucket,
+      provider: new FakeVideoGenerationPort(CARTOON_ASSETS),
+      pollIntervalMs: 1,
+      sleep: async () => undefined,
+      fixtureDirectory: CARTOON_ASSETS,
+    });
+    const created = await services.requestCartoonFromPortrait({
+      partyId, deviceId, channelId, guestMediaId: requested.submissionId,
+    });
+    assert.equal(created.created, true);
+    const jobId = created.jobId;
+    await assert.rejects(
+      services.runGeneration({ partyId, deviceId, channelId, jobId, idempotencyKey: jobId }),
+      (error: unknown) => error instanceof BackendError && error.errorCode === "PROVIDER_UNAVAILABLE",
+    );
+    const job = (await db.doc(`parties/${partyId}/jobs/${jobId}`).get()).data()!;
+    assert.equal(job.state, "failed", "pre-contact config failure must fail, not wedge running-with-no-lease");
+    assert.ok(job.failedAt, "job evidence must be preserved");
+    assert.equal(job.errorCode, "PROVIDER_UNAVAILABLE");
+    assert.equal(Number(job.workerLeaseUntilMs ?? 0), 0);
+    const budget = (await db.doc(`parties/${partyId}/generationBudget/active`).get()).data()!;
+    assert.equal(budget.state, "idle", "budget must release on definitive config failure");
+    assert.equal(budget.activeJobId, null);
+    const next = await services.requestGeneration({
+      partyId, deviceId, channelId, jobId: "job-after-cartoon-missing", idempotencyKey: "idem-after-cartoon-missing", presetId: "cheap_demo",
+    });
+    assert.equal(next.created, true, "unrelated next request must proceed after fail+release");
+  } finally {
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+  }
+});
+
+/**
+ * Rollout-6 (b): definite cartoon still FAILED takes fail+release.
+ * Real cartoon path with a stub still port whose task reports FAILED with
+ * a provider reason: usage failure row recorded, job failed with the
+ * sanitized provider reason, budget idle, next request proceeds.
+ */
+test("rollout-6 definite cartoon still FAILED fails the job and releases the budget", {
+  skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
+}, async () => {
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  const deviceId = "tv-cartoon-still-fail";
+  const channelId = "main";
+  class DefiniteFailStillPort {
+    submits = 0;
+    async submit(_request: unknown) {
+      this.submits += 1;
+      return { taskId: "still_definite000000000001" };
+    }
+    async getStatus(_taskId: string) {
+      return { state: "FAILED" as const, errorCode: "InvalidParameter", errorMessage: "Field required: input.messages" };
+    }
+    async getResult(_taskId: string): Promise<never> {
+      throw new BackendError("PROVIDER_UNAVAILABLE", "unreachable");
+    }
+    async generate(_request: unknown): Promise<never> {
+      throw new BackendError("PROVIDER_UNAVAILABLE", "unreachable");
+    }
+  }
+  try {
+    await seedParty(db, partyId, deviceId, channelId);
+    const requested = await setupConsentedCartoonPortrait(db, bucket, partyId, deviceId, channelId);
+    const imagePort = new DefiniteFailStillPort();
+    const services = createGenerationServices({
+      db,
+      bucket,
+      provider: new FakeVideoGenerationPort(CARTOON_ASSETS),
+      imageProvider: imagePort as unknown as import("../src/image_generation_port").ImageGenerationPort,
+      pollIntervalMs: 1,
+      sleep: async () => undefined,
+      fixtureDirectory: CARTOON_ASSETS,
+    });
+    const created = await services.requestCartoonFromPortrait({
+      partyId, deviceId, channelId, guestMediaId: requested.submissionId,
+    });
+    const jobId = created.jobId;
+    await assert.rejects(
+      services.runGeneration({ partyId, deviceId, channelId, jobId, idempotencyKey: jobId }),
+      (error: unknown) => error instanceof BackendError
+        && error.errorCode === "PROVIDER_UNAVAILABLE"
+        && /Cartoon still task failed/.test(error.message)
+        && /InvalidParameter/.test(error.message),
+    );
+    assert.equal(imagePort.submits, 1, "still must submit exactly once");
+    const job = (await db.doc(`parties/${partyId}/jobs/${jobId}`).get()).data()!;
+    assert.equal(job.state, "failed", "definite still FAILED must fail, not wedge running");
+    assert.ok(job.failedAt, "job evidence must be preserved");
+    assert.equal(job.errorCode, "PROVIDER_UNAVAILABLE");
+    assert.ok(
+      typeof job.providerErrorCode === "string" && job.providerErrorCode.includes("InvalidParameter"),
+      "sanitized provider reason must be preserved on the job",
+    );
+    assert.ok(!JSON.stringify(job).includes("https://"), "no URLs may leak onto the job doc");
+    const budget = (await db.doc(`parties/${partyId}/generationBudget/active`).get()).data()!;
+    assert.equal(budget.state, "idle", "budget must release on definitive still FAILED");
+    assert.equal(budget.activeJobId, null);
+    const stillLedger = (await db.doc(cartoonStillLedgerPath(partyId, jobId)).get()).data()!;
+    assert.equal(stillLedger.success, false, "still failure usage row must be recorded");
+    assert.equal(stillLedger.provider_task_id, "still_definite000000000001");
+    const next = await services.requestGeneration({
+      partyId, deviceId, channelId, jobId: "job-after-still-fail", idempotencyKey: "idem-after-still-fail", presetId: "cheap_demo",
+    });
+    assert.equal(next.created, true, "unrelated next request must proceed after fail+release");
+  } finally {
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+  }
+});
+
+/**
+ * Rollout-6 (c): definite cartoon video FAILED takes fail+release.
+ * Real cartoon path: offline-fake still succeeds, stub video port reports
+ * FAILED with a reason. Usage failure row recorded, job failed with the
+ * sanitized reason, budget idle, next request proceeds.
+ */
+test("rollout-6 definite cartoon video FAILED fails the job and releases the budget", {
+  skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
+}, async () => {
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  const deviceId = "tv-cartoon-video-fail";
+  const channelId = "main";
+  class DefiniteFailVideoPort {
+    submits = 0;
+    async submit(_request: VideoGenerationRequest) {
+      this.submits += 1;
+      return { taskId: "CAM-01__deffailvideo00000001" };
+    }
+    async getStatus(_taskId: string): Promise<ProviderTaskStatus> {
+      return { state: "FAILED", errorCode: "InvalidParameter", errorMessage: "Field required: input.media" };
+    }
+    async getResult(_taskId: string): Promise<ProviderResult> {
+      throw new BackendError("PROVIDER_UNAVAILABLE", "unreachable");
+    }
+  }
+  try {
+    await seedParty(db, partyId, deviceId, channelId);
+    const requested = await setupConsentedCartoonPortrait(db, bucket, partyId, deviceId, channelId);
+    const videoPort = new DefiniteFailVideoPort();
+    const services = createGenerationServices({
+      db,
+      bucket,
+      provider: videoPort,
+      imageProvider: new FakeImageGenerationPort(),
+      pollIntervalMs: 1,
+      sleep: async () => undefined,
+      fixtureDirectory: CARTOON_ASSETS,
+    });
+    const created = await services.requestCartoonFromPortrait({
+      partyId, deviceId, channelId, guestMediaId: requested.submissionId,
+    });
+    const jobId = created.jobId;
+    await assert.rejects(
+      services.runGeneration({ partyId, deviceId, channelId, jobId, idempotencyKey: jobId }),
+      (error: unknown) => error instanceof BackendError
+        && error.errorCode === "PROVIDER_UNAVAILABLE"
+        && /Provider task failed/.test(error.message)
+        && /InvalidParameter/.test(error.message),
+    );
+    assert.equal(videoPort.submits, 1, "video must submit exactly once");
+    const job = (await db.doc(`parties/${partyId}/jobs/${jobId}`).get()).data()!;
+    assert.equal(job.state, "failed", "definite video FAILED must fail, not wedge running");
+    assert.ok(job.failedAt, "job evidence must be preserved");
+    assert.equal(job.errorCode, "PROVIDER_UNAVAILABLE");
+    assert.ok(
+      typeof job.providerErrorCode === "string" && job.providerErrorCode.includes("InvalidParameter"),
+      "sanitized provider reason must be preserved on the job",
+    );
+    assert.ok(!JSON.stringify(job).includes("https://"), "no URLs may leak onto the job doc");
+    const budget = (await db.doc(`parties/${partyId}/generationBudget/active`).get()).data()!;
+    assert.equal(budget.state, "idle", "budget must release on definitive video FAILED");
+    assert.equal(budget.activeJobId, null);
+    const ledger = (await db.doc(`parties/${partyId}/costLogs/${usageLedgerId(jobId, "CAM-01")}`).get()).data()!;
+    assert.equal(ledger.success, false, "video failure usage row must be recorded");
+    assert.equal(ledger.provider_task_id, "CAM-01__deffailvideo00000001");
+    const next = await services.requestGeneration({
+      partyId, deviceId, channelId, jobId: "job-after-video-fail", idempotencyKey: "idem-after-video-fail", presetId: "cheap_demo",
+    });
+    assert.equal(next.created, true, "unrelated next request must proceed after fail+release");
+  } finally {
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+  }
+});
+
+/**
+ * Rollout-6 (d1): unknown cartoon still outcome keeps release-only.
+ * Real cartoon path with a still port that never resolves: the poll hits
+ * the deadline (unknown outcome, task ID retained for reconciliation), so
+ * the job must stay running with the lease released, the budget must stay
+ * in_flight, no second submit may occur, and the job must never fail.
+ */
+test("rollout-6 ambiguous cartoon still timeout never fails, never resubmits, budget stays in_flight", {
+  skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
+}, async () => {
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  const deviceId = "tv-cartoon-still-unknown";
+  const channelId = "main";
+  class HangingStillPort {
+    submits = 0;
+    async submit(_request: unknown) {
+      this.submits += 1;
+      return { taskId: "still_hanging000000000001" };
+    }
+    async getStatus(_taskId: string) {
+      return { state: "PENDING" as const };
+    }
+    async getResult(_taskId: string): Promise<never> {
+      throw new BackendError("PROVIDER_UNAVAILABLE", "unreachable");
+    }
+    async generate(_request: unknown): Promise<never> {
+      throw new BackendError("PROVIDER_UNAVAILABLE", "unreachable");
+    }
+  }
+  try {
+    await seedParty(db, partyId, deviceId, channelId);
+    const requested = await setupConsentedCartoonPortrait(db, bucket, partyId, deviceId, channelId);
+    const imagePort = new HangingStillPort();
+    const services = createGenerationServices({
+      db,
+      bucket,
+      provider: new FakeVideoGenerationPort(CARTOON_ASSETS),
+      imageProvider: imagePort as unknown as import("../src/image_generation_port").ImageGenerationPort,
+      pollIntervalMs: 1,
+      sleep: async () => undefined,
+      providerTimeoutMs: 50,
+      fixtureDirectory: CARTOON_ASSETS,
+    });
+    const created = await services.requestCartoonFromPortrait({
+      partyId, deviceId, channelId, guestMediaId: requested.submissionId,
+    });
+    const jobId = created.jobId;
+    await assert.rejects(
+      services.runGeneration({ partyId, deviceId, channelId, jobId, idempotencyKey: jobId }),
+      (error: unknown) => error instanceof BackendError
+        && error.errorCode === "PROVIDER_UNAVAILABLE"
+        && /timed out/.test(error.message),
+    );
+    assert.equal(imagePort.submits, 1);
+    // Second attempt must not resubmit the still and must not fail the job.
+    await assert.rejects(
+      services.runGeneration({ partyId, deviceId, channelId, jobId, idempotencyKey: jobId }),
+      (error: unknown) => error instanceof BackendError && error.errorCode === "PROVIDER_UNAVAILABLE",
+    );
+    assert.equal(imagePort.submits, 1, "unknown still outcome must never resubmit");
+    const job = (await db.doc(`parties/${partyId}/jobs/${jobId}`).get()).data()!;
+    assert.notEqual(job.state, "failed", "ambiguous still timeout must never fail the job");
+    assert.equal(job.state, "running");
+    assert.equal(Number(job.workerLeaseUntilMs ?? 0), 0, "worker lease must be released");
+    assert.equal(job.errorCode, undefined, "ambiguous path must not stamp a terminal error code");
+    const budget = (await db.doc(`parties/${partyId}/generationBudget/active`).get()).data()!;
+    assert.equal(budget.state, "in_flight", "ambiguous path must not clear the budget");
+    assert.equal(budget.activeJobId, jobId);
+  } finally {
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+  }
+});
+
+/**
+ * Rollout-6 (d2): unknown cartoon video outcome keeps release-only.
+ * Real cartoon path: offline-fake still succeeds, video port never
+ * resolves. The job must stay running with the lease released, the budget
+ * must stay in_flight, the video must never resubmit, never fail.
+ */
+test("rollout-6 ambiguous cartoon video timeout never fails, never resubmits, budget stays in_flight", {
+  skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
+}, async () => {
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  const deviceId = "tv-cartoon-video-unknown";
+  const channelId = "main";
+  class HangingVideoPort {
+    submits = 0;
+    async submit(_request: VideoGenerationRequest) {
+      this.submits += 1;
+      return { taskId: "CAM-01__hangingvideo00000001" };
+    }
+    async getStatus(_taskId: string): Promise<ProviderTaskStatus> {
+      return { state: "RUNNING" };
+    }
+    async getResult(_taskId: string): Promise<ProviderResult> {
+      throw new BackendError("PROVIDER_UNAVAILABLE", "unreachable");
+    }
+  }
+  try {
+    await seedParty(db, partyId, deviceId, channelId);
+    const requested = await setupConsentedCartoonPortrait(db, bucket, partyId, deviceId, channelId);
+    const videoPort = new HangingVideoPort();
+    const services = createGenerationServices({
+      db,
+      bucket,
+      provider: videoPort,
+      imageProvider: new FakeImageGenerationPort(),
+      pollIntervalMs: 1,
+      sleep: async () => undefined,
+      providerTimeoutMs: 50,
+      fixtureDirectory: CARTOON_ASSETS,
+    });
+    const created = await services.requestCartoonFromPortrait({
+      partyId, deviceId, channelId, guestMediaId: requested.submissionId,
+    });
+    const jobId = created.jobId;
+    await assert.rejects(
+      services.runGeneration({ partyId, deviceId, channelId, jobId, idempotencyKey: jobId }),
+      (error: unknown) => error instanceof BackendError
+        && error.errorCode === "PROVIDER_UNAVAILABLE"
+        && /timed out/.test(error.message),
+    );
+    assert.equal(videoPort.submits, 1);
+    await assert.rejects(
+      services.runGeneration({ partyId, deviceId, channelId, jobId, idempotencyKey: jobId }),
+      (error: unknown) => error instanceof BackendError && error.errorCode === "PROVIDER_UNAVAILABLE",
+    );
+    assert.equal(videoPort.submits, 1, "unknown video outcome must never resubmit");
+    const job = (await db.doc(`parties/${partyId}/jobs/${jobId}`).get()).data()!;
+    assert.notEqual(job.state, "failed", "ambiguous video timeout must never fail the job");
+    assert.equal(job.state, "running");
+    assert.equal(Number(job.workerLeaseUntilMs ?? 0), 0, "worker lease must be released");
+    const budget = (await db.doc(`parties/${partyId}/generationBudget/active`).get()).data()!;
+    assert.equal(budget.state, "in_flight", "ambiguous path must not clear the budget");
+    assert.equal(budget.activeJobId, jobId);
   } finally {
     await clearParty(db, bucket, partyId);
     await disposeEmulatorContext(app);
