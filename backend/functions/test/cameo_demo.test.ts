@@ -155,10 +155,25 @@ function servicesFor(db: Firestore, bucket: Bucket, provider: TrackingFakeProvid
 }
 
 async function eligibleGuestMedia(services: ReturnType<typeof createRuntimeServices>, db: Firestore, bucket: Bucket, partyId: string, deviceId: string, channelId: string) {
-  const requested = await services.requestGuestUpload({ partyId, deviceId, channelId, consent: CONSENT, contentType: "image/jpeg" });
+  // Upload phase runs with generation disabled: eligible completion stays
+  // fully operational without auto-enqueueing the backend-selected cartoon
+  // job, so the explicit cameo_demo requestGeneration path under test keeps
+  // a clean single-flight budget. Auto-enqueue is covered by dedicated tests
+  // (guest_upload_e2e); these tests' explicit purpose is the manual cameo
+  // request path, which is why auto-enqueue is scoped out here.
+  const upload = createRuntimeServices({
+    db,
+    bucket,
+    generationEnabled: false,
+    pollIntervalMs: 1,
+    sleep: async () => undefined,
+    signGuestUploadUrl: async (file) => `https://upload.invalid/${encodeURIComponent(file.name)}`,
+    signReadUrl: async (file) => `https://signed.invalid/${encodeURIComponent(file.name)}`,
+  });
+  const requested = await upload.requestGuestUpload({ partyId, deviceId, channelId, consent: CONSENT, contentType: "image/jpeg" });
   const photo = await readFile(resolve(__dirname, "fixtures/guest_photo.jpg"));
   await bucket.file(requested.objectPath).save(photo, { contentType: "image/jpeg" });
-  const completed = await services.completeGuestUpload({ partyId, deviceId, channelId, submissionId: requested.submissionId });
+  const completed = await upload.completeGuestUpload({ partyId, deviceId, channelId, submissionId: requested.submissionId });
   assert.equal(completed.status, "eligible");
   return { requested, completed, photoHash: createHash("sha256").update(photo).digest("hex") };
 }
