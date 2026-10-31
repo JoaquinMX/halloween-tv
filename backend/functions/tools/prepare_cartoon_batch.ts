@@ -24,6 +24,7 @@
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { CARTOON_CATALOG_SCENARIOS, CARTOON_STILL_PRESET, CARTOON_VIDEO_PRESET } from "../src/contracts";
+import { loadValidatedCatalogs, resolveFunctionsRoot } from "../src/scenario_catalog";
 
 function argument(name: string): string | undefined {
   const prefix = `--${name}=`;
@@ -58,13 +59,26 @@ async function main(): Promise<void> {
   }
   const portraitPrefix = argument("portrait-prefix") ?? "gsub-cartoon-portrait";
 
-  const rows = CARTOON_CATALOG_SCENARIOS.map((scenario) => {
+  // Identity linkage: planner slots cross-check the real image-backed
+  // catalog records (record ids, versions, reference digests) so the 16
+  // rows are bound to hashed catalog bytes, not synthetic slot ids.
+  const functionsRoot = resolveFunctionsRoot(resolve(__dirname, "../src"));
+  const { catalog } = loadValidatedCatalogs(functionsRoot);
+  if (catalog.records.length !== CARTOON_CATALOG_SCENARIOS.length) {
+    fail(`Catalog record count (${catalog.records.length}) does not match planner slots (${CARTOON_CATALOG_SCENARIOS.length}).`);
+  }
+  const rows = CARTOON_CATALOG_SCENARIOS.map((scenario, index) => {
+    const record = catalog.records[index];
+    if (!record) fail(`Catalog record is missing for planner slot ${scenario.scenarioId}.`);
     const portraitSubmissionId = `${portraitPrefix}-${scenario.scenarioId}`;
     if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(portraitSubmissionId)) {
       fail(`Derived portrait submission ID is invalid for ${scenario.scenarioId}.`);
     }
     return {
       scenarioId: scenario.scenarioId,
+      catalogRecordId: record.id,
+      catalogRecordVersion: catalog.version,
+      catalogReference: { sourceFilename: record.sourceFilename, sha256: record.sha256, sizeBytes: record.sizeBytes },
       portrait: {
         submissionId: portraitSubmissionId,
         binding: "consent-bound (guest v1/guest_cameo or host host_source_v1/host_source; verified at request/worker/publication)",

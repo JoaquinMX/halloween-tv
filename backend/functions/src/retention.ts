@@ -30,6 +30,20 @@ function addJobPaths(target: Set<string>, job: FirebaseFirestore.DocumentData): 
     const single = (job as Record<string, unknown>)[key];
     if (typeof single === "string" && single.startsWith("parties/")) target.add(single);
   }
+  // Cartoon still nested at job.cartoonChain.stillPath (see generation_store
+  // recordStillResult); top-level keys never reach it.
+  const chain = (job as Record<string, unknown>).cartoonChain;
+  if (chain && typeof chain === "object") {
+    const record = chain as Record<string, unknown>;
+    if (typeof record.stillPath === "string" && (record.stillPath as string).startsWith("parties/")) {
+      target.add(record.stillPath as string);
+    }
+    if (Array.isArray(record.stillPaths)) {
+      for (const item of record.stillPaths as unknown[]) {
+        if (typeof item === "string" && item.startsWith("parties/")) target.add(item);
+      }
+    }
+  }
 }
 
 /** A manifest is revoked when its job is bound to a withdrawn submission. */
@@ -42,7 +56,13 @@ function isRevokedManifest(
     if (jobDoc.id !== jobId) continue;
     const job = jobDoc.data() as Record<string, unknown>;
     const guest = job.guestMedia as Record<string, unknown> | undefined;
-    return typeof guest?.submissionId === "string" && withdrawnSubmissions.has(guest.submissionId);
+    if (typeof guest?.submissionId === "string" && withdrawnSubmissions.has(guest.submissionId)) return true;
+    // Cartoon jobs bind their portrait chain-only (cartoonChain.
+    // portraitSubmissionId, no top-level guestMedia): a portrait withdrawal
+    // revokes those manifests too.
+    const chain = job.cartoonChain as Record<string, unknown> | undefined;
+    const portrait = chain && typeof chain.portraitSubmissionId === "string" ? chain.portraitSubmissionId : undefined;
+    if (typeof portrait === "string" && withdrawnSubmissions.has(portrait)) return true;
   }
   return false;
 }

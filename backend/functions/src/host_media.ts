@@ -274,6 +274,13 @@ export function createHostMediaService(options: HostMediaServiceOptions): {
       updatedAt: FieldValue.serverTimestamp(),
       expiresAt: Timestamp.fromDate(expiresAt),
     });
+    // Server-written host provenance binding: only this path
+    // (generateHostVideo/jobIdForHostSeed, registered host device recorded
+    // above) may produce the `{ seedId, kind: "host" }` binding. Delivery
+    // and publish require this persisted binding plus the seed's own
+    // host-device evidence; provenance is never derived from a jobId prefix
+    // at read time.
+    const seedBinding = { seedId: input.seedId, kind: "host" } as const;
     // Fixed-preset queue with the existing idempotency, budget, and consent
     // checks: host generation is a scoped entry point to the same pipeline,
     // never a parallel one.
@@ -288,6 +295,13 @@ export function createHostMediaService(options: HostMediaServiceOptions): {
         ...(input.guestMediaId ? { guestMediaId: input.guestMediaId } : {}),
       });
       await ref.update({ status: request.state === "queued" ? "queued" : request.state, updatedAt: FieldValue.serverTimestamp() }).catch(() => undefined);
+      // Persist the binding on the job so delivery/publish resolve it
+      // without prefix inference. The unbound text-only marker (if any) is
+      // removed: this job is host-bound, never text-only.
+      await jobRef(db, host.partyId, jobId).update({
+        seedProvenance: { ...seedBinding },
+        kind: FieldValue.delete(),
+      }).catch(() => undefined);
       return { seedId: input.seedId, jobId, state: request.state, created: request.created };
     } catch (error) {
       await ref.update({ status: "failed", updatedAt: FieldValue.serverTimestamp() }).catch(() => undefined);

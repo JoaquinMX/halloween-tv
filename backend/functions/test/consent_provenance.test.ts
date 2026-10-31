@@ -239,3 +239,26 @@ test("malformed provenance records are rejected, never trusted", () => {
     assert.equal(canGenerateFromPortrait(bad as ProvenanceRecord, { partyId: "party-1", nowMs: NOW }), false);
   }
 });
+
+test("channel-scoped grants never match a channel-less scope", () => {
+  const scope = { partyId: "party-1", channelId: undefined as unknown as string, deviceId: "guest-1", nowMs: NOW };
+  assert.equal(canGenerateFromPortrait(guestProvenance(), scope), false);
+  assert.equal(canDeliverSeedArtifact(legacyApproved(), { partyId: "party-1", nowMs: NOW }), false);
+});
+
+test("production delivery gate refuses unapproved legacy seeds (deliveryApproved=false)", async () => {
+  const { evaluateDeliveryProvenance } = await import("../src/contracts");
+  const nowMs = NOW;
+  const job = { partyId: "party-1", channelId: "main", jobId: "job-legacy-unapproved", seedProvenance: { seedId: "legacy-2", kind: "legacy" } };
+  const seed = { partyId: "party-1", channelId: "main", seedId: "legacy-2", status: "ready" };
+  assert.throws(
+    () => evaluateDeliveryProvenance({ job, seed, nowMs }),
+    (e: unknown) => e instanceof BackendError && (e.errorCode === "FORBIDDEN" || e.errorCode === "MANIFEST_MISMATCH"),
+  );
+  // The standalone provenance gate agrees: unapproved delivery is refused.
+  const unapproved = provenanceFromSeedEntry(
+    { partyId: "party-1", channelId: "main", seedId: "legacy-2", status: "ready" },
+    { deliveryApproved: false, evidenceSource: "server:seed_catalog", recordedAtIso: new Date(NOW).toISOString() },
+  );
+  assert.equal(canDeliverSeedArtifact(unapproved, { partyId: "party-1", channelId: "main", nowMs }), false);
+});

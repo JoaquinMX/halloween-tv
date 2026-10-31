@@ -2,7 +2,7 @@
 import { deleteApp, initializeApp } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
 import { REQUIRED_CAMERA_IDS } from "../src/config";
-import { reconcileUsage, usageLedgerId } from "../src/usage";
+import { cartoonStillLedgerPath, reconcileUsage, usageLedgerId } from "../src/usage";
 
 function argument(name: string): string | undefined {
   const prefix = `--${name}=`;
@@ -66,6 +66,33 @@ async function main(): Promise<void> {
             ? "unknown"
             : synthetic ? "synthetic_zero" : "recorded_value_unverified",
         });
+      }
+      // Cartoon still-stage ledger row rides alongside the camera rows.
+      if ((job as Record<string, unknown>).cartoonPlan !== undefined) {
+        const stillSnapshot: FirebaseFirestore.DocumentSnapshot = await db.doc(
+          cartoonStillLedgerPath(String(job.partyId), String(job.jobId)),
+        ).get().catch(() => ({ exists: false }) as unknown as FirebaseFirestore.DocumentSnapshot);
+        const chain = (job as Record<string, unknown>).cartoonChain as Record<string, unknown> | undefined;
+        const stillTaskId = chain && typeof chain.stillTaskId === "string" ? String(chain.stillTaskId) : null;
+        if (!stillSnapshot.exists) {
+          fieldIssues.push({ partyId: job.partyId, jobId: job.jobId, cameraId: "CAM-01", code: "MISSING_STILL_LEDGER" });
+        } else {
+          const stillRow: FirebaseFirestore.DocumentData = (stillSnapshot as unknown as { data(): FirebaseFirestore.DocumentData }).data()!;
+          if (typeof stillTaskId === "string" && stillRow.provider_task_id !== stillTaskId) {
+            fieldIssues.push({ partyId: job.partyId, jobId: job.jobId, cameraId: "CAM-01", code: "STILL_TASK_ID_MISMATCH" });
+          }
+          details.push({
+            partyId: job.partyId,
+            jobId: job.jobId,
+            state: job.state,
+            cameraId: "still",
+            providerTaskId: stillTaskId,
+            ledgerTaskId: stillRow.provider_task_id ?? null,
+            success: stillRow.success === true,
+            credits: stillRow.credits_charged ?? null,
+            creditStatus: stillRow.credits_charged === null || stillRow.credits_charged === undefined ? "unknown" : "recorded_value_unverified",
+          });
+        }
       }
     }
     const issues = [...initialIssues, ...fieldIssues];

@@ -731,6 +731,10 @@ test("delivery verification downloads, ACKs, purges, and keeps retained files", 
   try {
     const seeded = runTool("tools/seed_pilot.ts", ["--target=emulator", "--apply"], emulatorEnv(partyId));
     assert.equal(seeded.status, 0, seeded.stderr);
+    // Server-written unbound marker for the legacy seeded fixture (the
+    // seeder plants no consent/seed binding; the scoped gate requires the
+    // positive marker to deliver it).
+    await db.doc(`parties/${partyId}/jobs/pilot-fixture-v1`).update({ kind: "text-only" });
     const verified = runTool("tools/verify_delivery.ts", ["--target=emulator", "--emulator-service-substitute", "--ack-and-purge",
       `--project=${PROJECT_ID}`, `--bucket=${BUCKET}`, `--party=${partyId}`, "--device=tv-pilot",
       "--channel=haunted_surveillance", `--output-dir=${outputDirectory}`], emulatorEnv(partyId));
@@ -769,6 +773,7 @@ test("delivery verification exits nonzero when downloaded bytes do not match the
   try {
     const seeded = runTool("tools/seed_pilot.ts", ["--target=emulator", "--apply"], emulatorEnv(partyId));
     assert.equal(seeded.status, 0, seeded.stderr);
+    await db.doc(`parties/${partyId}/jobs/pilot-fixture-v1`).update({ kind: "text-only" });
     const manifestRef = db.doc(`parties/${partyId}/manifests/current_haunted_surveillance`);
     const manifest = (await manifestRef.get()).data()!;
     const tampered = structuredClone(manifest);
@@ -890,7 +895,7 @@ test("fake dry run proves delivery, purge, retention, and cost-log reconciliatio
   }
 });
 
-test("cartoon batch planner is preview-only with a mandatory credit gate and zero live submits", () => {
+test("cartoon batch planner is preview-only with a mandatory credit gate and zero live submits", async () => {
   // Missing owner ceiling is refused (mandatory budget gate).
   const missing = runTool("tools/prepare_cartoon_batch.ts", ["--party=pilot", "--device=tv-pilot", "--channel=main"], cleanEnv());
   assert.notEqual(missing.status, 0);
@@ -926,6 +931,17 @@ test("cartoon batch planner is preview-only with a mandatory credit gate and zer
     assert.equal(row.delivery.nonBillableFixtureSlots, 3);
     assert.ok(row.budgetInputs.ownerMaxCredits === 10);
   }
+  // Identity linkage: planner rows bind the real image-backed catalog
+  // record ids (not just synthetic slot ids).
+  const { loadValidatedCatalogs, resolveFunctionsRoot } = await import("../src/scenario_catalog");
+  const { catalog } = loadValidatedCatalogs(resolveFunctionsRoot(resolve(PACKAGE_ROOT, "src")));
+  const recordIds = new Set(catalog.records.map((record) => record.id));
+  for (const row of plan.rows as Array<Record<string, any>>) {
+    assert.ok(typeof row.catalogRecordId === "string" && recordIds.has(row.catalogRecordId),
+      `planner row ${row.scenarioId} must cite a real catalog record id`);
+    assert.match(String(row.catalogReference.sha256), /^[a-f0-9]{64}$/);
+  }
+  assert.equal(new Set((plan.rows as Array<Record<string, any>>).map((row) => row.catalogRecordId)).size, 16);
   // No Token Plan price is invented by the planner.
   assert.ok(!/\$0\.05|\$0\.10|US\$/.test(JSON.stringify(plan)));
 });

@@ -817,9 +817,10 @@ test("withdrawal deletes stills, intermediates, delivery objects, and previews, 
     const deliveryPath = `parties/${partyId}/channels/main/delivery/3/CAM-02.mp4`;
     const generatedPath = `parties/${partyId}/channels/main/generated/job-still-lifecycle.mp4`;
     const stillPath = `parties/${partyId}/stills/cartoon-final.png`;
+    const nestedStillPath = `parties/${partyId}/cartoonStills/${jobId}/still.png`;
     const intermediatePath = `parties/${partyId}/intermediates/diffuse-1.bin`;
     const previewPath = `parties/${partyId}/hostPreviews/seed-still/CAM-01.mp4`;
-    for (const path of [stagedPath, deliveryPath, generatedPath, stillPath, intermediatePath, previewPath]) {
+    for (const path of [stagedPath, deliveryPath, generatedPath, stillPath, nestedStillPath, intermediatePath, previewPath]) {
       await bucket.file(path).save(Buffer.from(`bytes-for-${path.slice(-8)}`));
     }
     await db.doc(`parties/${partyId}/jobs/${jobId}`).set({
@@ -832,6 +833,7 @@ test("withdrawal deletes stills, intermediates, delivery objects, and previews, 
       stillPaths: [stillPath],
       intermediatePaths: [intermediatePath],
       cartoonStillPath: stillPath,
+      cartoonChain: { stillPath: nestedStillPath, stillPaths: [nestedStillPath], portraitSubmissionId: requested.submissionId },
     });
     await db.doc(`parties/${partyId}/seedVideos/seed-still`).set({
       seedId: "seed-still", partyId, deviceId: "p-guest-1", channelId: "main",
@@ -839,7 +841,7 @@ test("withdrawal deletes stills, intermediates, delivery objects, and previews, 
     });
     const withdrawn = await services.withdrawGuestMedia({ partyId, deviceId: "p-guest-1", channelId: "main", submissionId: requested.submissionId });
     assert.equal(withdrawn.status, "withdrawn");
-    for (const path of [requested.objectPath, stagedPath, deliveryPath, generatedPath, stillPath, intermediatePath, previewPath]) {
+    for (const path of [requested.objectPath, stagedPath, deliveryPath, generatedPath, stillPath, nestedStillPath, intermediatePath, previewPath]) {
       assert.ok(withdrawn.deletedObjects.includes(path), `${path} must be reported deleted at withdrawal`);
       assert.equal((await bucket.file(path).exists())[0], false, `${path} must be absent after withdrawal`);
     }

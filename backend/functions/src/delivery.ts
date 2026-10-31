@@ -209,15 +209,11 @@ async function assertManifestProvenanceLive(db: Firestore, partyId: string, jobI
       throw deliveryFailure("authorization", "INTERNAL", "Seed authorization evidence is unreadable; failing closed.");
     }
     if (!seed) {
-      // No job doc and no seed catalog entry: a server-seeded legacy wall
-      // manifest (manifests/seeds are callable-only; clients cannot plant
-      // them). Pre-cycle-13 delivery served these (the consent gate no-op'd
-      // without a guest binding), and the fixed QR-join wire contract still
-      // requires a pre-seeded legacy guest to read the seeded valid manifest.
-      // Expiry is still enforced by the caller; any binding that DOES resolve
-      // is strictly evaluated above/below, so withdrawn/deleted/expired/
-      // unknown-seed-with-binding denials are unchanged.
-      return;
+      // No job doc and no seed catalog entry: authorization evidence is
+      // missing and delivery is refused fail-closed (NOT_FOUND). The only
+      // exception is an explicitly allowlisted legacy wall seed resolved
+      // below; absence alone never authorizes.
+      throw deliveryFailure("authorization", "NOT_FOUND", "Job authorization evidence is missing; delivery is refused.");
     }
     // Synthesize the minimal job binding the seed catalog entry implies so
     // the scoped evaluator can distinguish explicitly supported artifacts
@@ -263,17 +259,9 @@ async function assertManifestProvenanceLive(db: Firestore, partyId: string, jobI
       if (error instanceof BackendError) throw error;
       seedReadError = error;
     }
-  } else if (typeof job.jobId === "string" && job.jobId.startsWith("hv-")) {
-    try {
-      const snapshot = await db.doc(`parties/${partyId}/seedVideos/${job.jobId.slice("hv-".length)}`).get();
-      if (snapshot.exists) {
-        seed = snapshot.data() as Record<string, unknown>;
-        (job as Record<string, unknown>).seedProvenance = { seedId: String((seed as Record<string, unknown>).seedId ?? job.jobId.slice("hv-".length)), kind: "host" };
-      }
-    } catch (error) {
-      if (error instanceof BackendError) throw error;
-      seedReadError = error;
-    }
+  // Server-persisted seed binding only: provenance is never derived from a
+  // jobId prefix at read time. Jobs without a persisted binding fall through
+  // to the scoped evaluator, which fails closed.
   }
   evaluateDeliveryProvenance({
     job: job as Record<string, unknown>,

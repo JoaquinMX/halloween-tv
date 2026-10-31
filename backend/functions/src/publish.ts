@@ -124,18 +124,13 @@ async function readProvenanceDocs(
     } catch (error) {
       seedReadError = error;
     }
-  } else if (typeof job.jobId === "string" && job.jobId.startsWith("hv-")) {
-    // Host-seed jobs carry their authorization in the seed catalog entry.
-    const seedId = job.jobId.slice("hv-".length);
-    try {
-      const snapshot = await store.db.doc(`parties/${partyId}/seedVideos/${seedId}`).get();
-      if (snapshot.exists) {
-        seedDoc = snapshot.data() as Record<string, unknown>;
-        (job as Record<string, unknown>).seedProvenance = { seedId, kind: "host" };
-      }
-    } catch (error) {
-      seedReadError = error;
-    }
+  } else if (false) {
+    // Removed: provenance was previously derived from the `hv-` jobId prefix
+    // at read time (self-asserted from a client-chosen string). Host
+    // provenance now requires the server-persisted binding written at
+    // creation (generateHostVideo/jobIdForHostSeed with the registered host
+    // device recorded); jobs without it fail closed in the evaluator below.
+    void job;
   }
   // Cartoon portrait bindings resolve through the same scoped gate: when the
   // chain cites a guest portrait, load that guest doc for evaluation.
@@ -167,21 +162,27 @@ export async function publishManifest(
   if ((job as Record<string, unknown>).hostDeleted === true) {
     throw new BackendError("FORBIDDEN", "Seed video was deleted; publication is refused.");
   }
-  if (typeof job.jobId === "string" && job.jobId.startsWith("hv-")) {
-    const seedId = job.jobId.slice("hv-".length);
-    let seedSnap: FirebaseFirestore.DocumentSnapshot | undefined;
-    try {
-      seedSnap = await store.db.doc(`parties/${partyId}/seedVideos/${seedId}`).get();
-    } catch {
-      throw new BackendError("INTERNAL", "[authorization] Seed authorization evidence is unreadable; failing closed.");
-    }
-    if (seedSnap?.exists && (seedSnap.data() as Record<string, unknown>).status === "deleted") {
-      throw new BackendError("FORBIDDEN", "[authorization] Seed video was deleted; publication is refused.");
-    }
-  }
+  // No jobId-prefix inference: host authorization requires the persisted
+  // server-written binding (see readProvenanceDocs) plus the seed's own
+  // host-device evidence, enforced in the scoped gate below.
   if (job.publishedManifest) return job.publishedManifest as DeliveryManifest;
   const provenance = await readProvenanceDocs(store, partyId, job);
   assertScopedPublishProvenance(job, provenance.guest, provenance.guestReadError, provenance.seed, provenance.seedReadError, Date.now());
+  const cartoonChain = (job as Record<string, unknown>).cartoonChain as Record<string, unknown> | undefined;
+  if (cartoonChain) {
+    const stillPath = cartoonChain.stillPath;
+    const stillSha = cartoonChain.stillSha256;
+    if (typeof stillPath !== "string" || !stillPath.startsWith(`parties/${partyId}/cartoonStills/${jobId}/`) ||
+        typeof stillSha !== "string" || !/^[a-f0-9]{64}$/.test(stillSha)) {
+      throw new BackendError("MANIFEST_MISMATCH", "Cartoon still path or hash is malformed.");
+    }
+    const [stillExists] = await store.bucket.file(stillPath).exists();
+    if (!stillExists) throw new BackendError("MANIFEST_MISMATCH", "Cartoon still is missing from storage.");
+    const [stillBytes] = await store.bucket.file(stillPath).download();
+    if (createHash("sha256").update(stillBytes).digest("hex") !== stillSha) {
+      throw new BackendError("MANIFEST_MISMATCH", "Cartoon still bytes do not match the recorded hash.");
+    }
+  }
   const guest = guestMediaOf(job);
   const staged = job.stagedOutputs && typeof job.stagedOutputs === "object"
     ? job.stagedOutputs as Record<string, unknown>

@@ -204,6 +204,27 @@ export async function reconcileUsage(db: Firestore): Promise<UsageReconciliation
         issues.push({ partyId: job.partyId, jobId: job.jobId, cameraId, code: "SUBMISSION_OUTCOME_UNKNOWN" });
       }
     }
+    // Cartoon still-stage ledger: jobs with a cartoonPlan must carry the
+    // still intent/outcome row alongside the per-camera video rows.
+    if ((job as Record<string, unknown>).cartoonPlan !== undefined) {
+      const stillLedger = await db.doc(cartoonStillLedgerPath(String(job.partyId), String(job.jobId))).get();
+      if (!stillLedger.exists) {
+        issues.push({ partyId: job.partyId, jobId: job.jobId, cameraId: "CAM-01", code: "MISSING_LEDGER" });
+      } else {
+        const data = stillLedger.data()!;
+        const requiredStill = ["model_id", "preset_id", "credits_charged", "provider_task_id", "success", "jobId", "stage"];
+        if (requiredStill.some((field) => !(field in data))) {
+          issues.push({ partyId: job.partyId, jobId: job.jobId, cameraId: "CAM-01", code: "INCOMPLETE_LEDGER" });
+        }
+        const chain = (job as Record<string, unknown>).cartoonChain as Record<string, unknown> | undefined;
+        const stillTaskId = chain && typeof chain.stillTaskId === "string" ? chain.stillTaskId : undefined;
+        if (typeof stillTaskId === "string" && data.provider_task_id !== stillTaskId) {
+          issues.push({ partyId: job.partyId, jobId: job.jobId, cameraId: "CAM-01", code: "TASK_ID_MISMATCH" });
+        } else if (chain?.stillStatus === "completed" && data.success !== true) {
+          issues.push({ partyId: job.partyId, jobId: job.jobId, cameraId: "CAM-01", code: "MISSING_SUCCESS_OUTCOME" });
+        }
+      }
+    }
   }
   return issues;
 }

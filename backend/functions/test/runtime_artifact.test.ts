@@ -141,10 +141,10 @@ test("packaged-path gate rejects host-absolute and escaping scenario paths", () 
   }
 });
 
-test("prepared runtime packages all 16 scenario references when present", () => {
+test("prepared runtime packages all 16 scenario references when present", (t) => {
   const manifestPath = join(PACKAGE_ROOT, "runtime", "runtime-manifest.json");
   if (!existsSync(manifestPath)) {
-    console.warn("runtime manifest not prepared; scenario packaging check skipped (run npm run runtime:prepare).");
+    t.skip("runtime manifest not prepared; run npm run runtime:prepare first (explicit skip, not a silent pass)");
     return;
   }
   const manifest = readRuntimeManifest(manifestPath);
