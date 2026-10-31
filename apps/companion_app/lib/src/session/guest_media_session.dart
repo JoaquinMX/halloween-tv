@@ -13,6 +13,11 @@ import 'package:companion_app/src/data/guest_media_client.dart';
 /// per device via SharedPreferences ([receiptsKey]); the legacy single-slot
 /// [receiptKey] is kept in sync with the latest id for backward
 /// compatibility with installs that predate multi-receipt support.
+///
+/// Host source-photo uploads reuse this exact workflow (same
+/// [GuestMediaClient] capability calls, same affirmative-consent gate) but
+/// pass host-namespaced [receiptsKey]/[receiptKey] values so host upload
+/// receipts never share storage with guest receipts.
 final class GuestMediaSession {
   GuestMediaSession({
     required this.client,
@@ -21,14 +26,28 @@ final class GuestMediaSession {
     required this.channelId,
     Future<SharedPreferences> Function()? preferences,
     Future<Directory> Function()? tempDirectory,
+    String? receiptsKey,
+    String? receiptKey,
   }) : _preferences = preferences ?? SharedPreferences.getInstance,
-       _tempDirectory = tempDirectory ?? getTemporaryDirectory;
+       _tempDirectory = tempDirectory ?? getTemporaryDirectory,
+       _receiptsKey = receiptsKey ?? GuestMediaSession.receiptsKey,
+       _receiptKey = receiptKey ?? GuestMediaSession.receiptKey;
   final GuestMediaClient client;
   final String partyId, deviceId, channelId;
   final Future<SharedPreferences> Function() _preferences;
   final Future<Directory> Function() _tempDirectory;
+  final String _receiptsKey;
+  final String _receiptKey;
   static const receiptKey = 'companion.guest_media_receipt.v1';
   static const receiptsKey = 'companion.guest_media_receipts.v1';
+
+  /// Host-namespaced receipt keys for optional host source-photo uploads.
+  ///
+  /// Host uploads reuse the same capability/consent workflow but persist
+  /// under these keys so host receipts never share storage with (and can
+  /// never strand) guest receipts.
+  static const hostReceiptKey = 'companion.host_media_receipt.v1';
+  static const hostReceiptsKey = 'companion.host_media_receipts.v1';
 
   /// Outstanding (not yet withdrawn/expired) submission ids, oldest first.
   final List<String> submissionIds = <String>[];
@@ -38,8 +57,7 @@ final class GuestMediaSession {
   final Map<String, String> statuses = <String, String>{};
 
   /// Latest outstanding submission, or null when none is outstanding.
-  String? get submissionId =>
-      submissionIds.isEmpty ? null : submissionIds.last;
+  String? get submissionId => submissionIds.isEmpty ? null : submissionIds.last;
 
   /// Last known status of the latest outstanding submission.
   String? get status =>
@@ -63,8 +81,7 @@ final class GuestMediaSession {
     busy = true;
     File? staged;
     try {
-      final String extension =
-          contentType == 'image/png' ? '.png' : '.jpg';
+      final String extension = contentType == 'image/png' ? '.png' : '.jpg';
       final directory = await _tempDirectory();
       staged = File(
         '${directory.path}/guest-upload-${DateTime.now().microsecondsSinceEpoch}$extension',
@@ -105,7 +122,7 @@ final class GuestMediaSession {
   Future<void> recover() async {
     final prefs = await _preferences();
     final List<String> stored =
-        prefs.getStringList(receiptsKey) ?? _legacyReceipt(prefs);
+        prefs.getStringList(_receiptsKey) ?? _legacyReceipt(prefs);
     submissionIds
       ..clear()
       ..addAll(stored);
@@ -164,15 +181,15 @@ final class GuestMediaSession {
   Future<void> retryWithdrawal({String? submissionId}) =>
       withdraw(submissionId: submissionId);
 
-  static List<String> _legacyReceipt(SharedPreferences prefs) {
-    final String? legacy = prefs.getString(receiptKey);
+  List<String> _legacyReceipt(SharedPreferences prefs) {
+    final String? legacy = prefs.getString(_receiptKey);
     return legacy == null || legacy.isEmpty ? <String>[] : <String>[legacy];
   }
 
   Future<void> _persistReceipts() async {
     final prefs = await _preferences();
     if (!await prefs.setStringList(
-      receiptsKey,
+      _receiptsKey,
       List<String>.unmodifiable(submissionIds),
     )) {
       throw StateError('Could not save submission receipts');
@@ -180,9 +197,9 @@ final class GuestMediaSession {
     // Legacy single-slot key mirrors the latest id (or is cleared when no
     // submission is outstanding) for pre-multi-receipt installs.
     if (submissionIds.isEmpty) {
-      await prefs.remove(receiptKey);
+      await prefs.remove(_receiptKey);
     } else {
-      if (!await prefs.setString(receiptKey, submissionIds.last)) {
+      if (!await prefs.setString(_receiptKey, submissionIds.last)) {
         throw StateError('Could not save submission receipt');
       }
     }

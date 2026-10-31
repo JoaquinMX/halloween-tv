@@ -26,6 +26,7 @@ library;
 
 import 'package:companion_app/src/companion_app.dart';
 import 'package:companion_app/src/join/qr_scan_screen.dart';
+import 'package:companion_app/src/ui/host_entry_screen.dart';
 import 'package:companion_app/src/ui/join_screen.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
@@ -47,6 +48,10 @@ void main() {
     SharedPreferences.setMockInitialValues(<String, Object>{});
     await tester.pumpWidget(const CompanionApp());
     await _settle(tester);
+    // Host-first boot: take the explicit guest route before scanning.
+    expect(find.byKey(HostEntryScreen.joinAsGuestKey), findsOneWidget);
+    await tester.tap(find.byKey(HostEntryScreen.joinAsGuestKey));
+    await _settle(tester);
     expect(find.byKey(JoinScreen.scanKey), findsOneWidget);
 
     await tester.ensureVisible(find.byKey(JoinScreen.scanKey));
@@ -65,7 +70,9 @@ void main() {
     expect(find.byKey(JoinScreen.scanKey), findsOneWidget);
   });
 
-  testWidgets('device: pasted join data joins the seeded party', (tester) async {
+  testWidgets('device: pasted join data joins the seeded party', (
+    tester,
+  ) async {
     if (_devicePartyId.isEmpty || _deviceChannelId.isEmpty) {
       // ignore: avoid_print
       print(
@@ -76,6 +83,8 @@ void main() {
     }
     SharedPreferences.setMockInitialValues(<String, Object>{});
     await tester.pumpWidget(const CompanionApp());
+    await _settle(tester);
+    await tester.tap(find.byKey(HostEntryScreen.joinAsGuestKey));
     await _settle(tester);
 
     await tester.enterText(

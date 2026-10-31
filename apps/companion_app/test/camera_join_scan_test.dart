@@ -6,6 +6,7 @@ import 'package:companion_app/src/join/device_identity_store.dart';
 import 'package:companion_app/src/join/guest_join_data.dart';
 import 'package:companion_app/src/join/join_payload_scanner.dart';
 import 'package:companion_app/src/join/qr_scan_screen.dart';
+import 'package:companion_app/src/ui/host_entry_screen.dart';
 import 'package:companion_app/src/ui/join_screen.dart';
 import 'package:core_foundation/core_foundation.dart';
 import 'package:core_playlist/core_playlist.dart';
@@ -730,10 +731,17 @@ void main() {
     Future<void> pumpShippedApp(WidgetTester tester) async {
       SharedPreferences.setMockInitialValues(<String, Object>{
         DeviceIdentityStore.storageKey: _kDeviceId,
+        DeviceIdentityStore.hostStorageKey:
+            'p-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
       });
       await tester.pumpWidget(
         CompanionApp(manifestSource: source, clock: const SystemClock()),
       );
+      await _flush(tester);
+      // Host-first boot: take the explicit guest route before scanning.
+      await tester.ensureVisible(find.byKey(HostEntryScreen.joinAsGuestKey));
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.tap(find.byKey(HostEntryScreen.joinAsGuestKey));
       await _flush(tester);
     }
 

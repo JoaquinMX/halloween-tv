@@ -21,4 +21,26 @@ void main() {
     final id = await DeviceIdentityStore(random: Random(5)).getDeviceId();
     expect(id, matches(RegExp(r'^p-[0-9a-f]{32}$'))); expect((await SharedPreferences.getInstance()).getString(DeviceIdentityStore.storageKey), id);
   });
+  test('host identity is separate and never overwrites the guest identity', () async {
+    SharedPreferences.setMockInitialValues({});
+    final store = DeviceIdentityStore(random: Random(7));
+    final guest = await store.getDeviceId();
+    final host = await store.getHostDeviceId();
+    expect(host, matches(RegExp(r'^p-[0-9a-f]{32}$')));
+    expect(host, isNot(guest));
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getString(DeviceIdentityStore.storageKey), guest);
+    expect(prefs.getString(DeviceIdentityStore.hostStorageKey), host);
+    // Repeat reads reuse both identities; switching roles keeps each key.
+    expect(await DeviceIdentityStore().getDeviceId(), guest);
+    expect(await DeviceIdentityStore().getHostDeviceId(), host);
+  });
+  test('corrupt host storage is replaced without touching the guest key', () async {
+    SharedPreferences.setMockInitialValues({DeviceIdentityStore.storageKey: 'p-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', DeviceIdentityStore.hostStorageKey: 'bad'});
+    final host = await DeviceIdentityStore(random: Random(9)).getHostDeviceId();
+    expect(host, matches(RegExp(r'^p-[0-9a-f]{32}$')));
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getString(DeviceIdentityStore.storageKey), 'p-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+    expect(prefs.getString(DeviceIdentityStore.hostStorageKey), host);
+  });
 }
