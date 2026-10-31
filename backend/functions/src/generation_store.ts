@@ -2,10 +2,10 @@ import { Bucket } from "@google-cloud/storage";
 import { FieldValue, Firestore, Timestamp } from "firebase-admin/firestore";
 import { assertRegisteredPartyDevice } from "./auth";
 import { BackendError, parseRequestGeneration, RequestGenerationInput, validateId } from "./contracts";
-import { CHEAP_DEMO_PRESET, MEDIA_RETENTION_MS, REQUIRED_CAMERA_IDS } from "./config";
+import { CAMEO_DEMO_PRESET, CHEAP_DEMO_PRESET, MEDIA_RETENTION_MS, REQUIRED_CAMERA_IDS } from "./config";
 import { assertGuestEligible, GuestMediaDoc } from "./guest_media";
 import { usageIntentDocument, usageLedgerPath } from "./usage";
-import { CameraId, ProviderResult, ProviderTaskStatus, validateCheapDemoControls } from "./video_generation_port";
+import { CameraId, ProviderResult, ProviderTaskStatus, validatePresetControls } from "./video_generation_port";
 
 export interface GenerationTask {
   partyId: string;
@@ -69,9 +69,10 @@ export class FirestoreGenerationStore {
   }
 
   async requestGeneration(value: unknown): Promise<RequestGenerationResult> {
-    validateCheapDemoControls(value);
+    validatePresetControls(value);
     if (value && typeof value === "object" && !Array.isArray(value) && "prompt" in value) {
-      throw new BackendError("INVALID_ARGUMENT", "Generation prompts are fixed server-side for cheap_demo.");
+      const presetId = (value as Record<string, unknown>).presetId === CAMEO_DEMO_PRESET.presetId ? "cameo_demo" : "cheap_demo";
+      throw new BackendError("INVALID_ARGUMENT", `Generation prompts are fixed server-side for ${presetId}.`);
     }
     const input = parseRequestGeneration(value);
     const registered = await assertRegisteredPartyDevice(this.db, input);
@@ -152,10 +153,12 @@ export class FirestoreGenerationStore {
         timestamp,
         createdAt: timestamp,
         idempotencyKey: input.idempotencyKey,
-        presetId: "cheap_demo",
-        modelId: "wan3.0-video",
+        presetId: input.presetId,
+        modelId: input.presetId === CAMEO_DEMO_PRESET.presetId ? CAMEO_DEMO_PRESET.modelId : CHEAP_DEMO_PRESET.modelId,
         ...(guestBinding ? { guestMedia: guestBinding, guestMediaId: input.guestMediaId } : {}),
-        costEstimate: { modelId: CHEAP_DEMO_PRESET.modelId, presetId: CHEAP_DEMO_PRESET.presetId, secondsOut: CHEAP_DEMO_PRESET.secondsOut },
+        costEstimate: input.presetId === CAMEO_DEMO_PRESET.presetId
+          ? { modelId: CAMEO_DEMO_PRESET.modelId, presetId: CAMEO_DEMO_PRESET.presetId, secondsOut: CAMEO_DEMO_PRESET.secondsOut }
+          : { modelId: CHEAP_DEMO_PRESET.modelId, presetId: CHEAP_DEMO_PRESET.presetId, secondsOut: CHEAP_DEMO_PRESET.secondsOut },
         expiresAt: Timestamp.fromDate(new Date(this.now().getTime() + MEDIA_RETENTION_MS)),
         cameraAttempts,
         providerTasks: {},
@@ -183,7 +186,7 @@ export class FirestoreGenerationStore {
           idempotencyKey: input.idempotencyKey,
           jobId: input.jobId,
           cameraId,
-        }, timestamp));
+        }, timestamp, input.presetId === CAMEO_DEMO_PRESET.presetId ? CAMEO_DEMO_PRESET : CHEAP_DEMO_PRESET));
       }
       return { state: "queued", created: true, manifestVersion, timestamp };
     });
@@ -211,8 +214,11 @@ export class FirestoreGenerationStore {
   async getGenerationStatus(value: unknown): Promise<Record<string, unknown>> {
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new BackendError("INVALID_ARGUMENT", "Status query must be an object.");
     const query = value as Record<string, unknown>;
-    validateCheapDemoControls(query);
-    if ("prompt" in query) throw new BackendError("INVALID_ARGUMENT", "Generation prompts are fixed server-side for cheap_demo.");
+    validatePresetControls(query);
+    if ("prompt" in query) {
+      const presetId = query.presetId === CAMEO_DEMO_PRESET.presetId ? "cameo_demo" : "cheap_demo";
+      throw new BackendError("INVALID_ARGUMENT", `Generation prompts are fixed server-side for ${presetId}.`);
+    }
     const input: RequestGenerationInput = parseRequestGeneration({ ...query, presetId: query.presetId ?? "cheap_demo" });
     const registered = await assertRegisteredPartyDevice(this.db, input);
     if (registered.channel.status !== "active") throw new BackendError("FORBIDDEN", "Channel is not active for this party.");
@@ -415,6 +421,7 @@ export class FirestoreGenerationStore {
     jobId: string,
     cameraId: CameraId,
     staged: Record<string, unknown>,
+    secondsOut = 2,
   ): Promise<void> {
     const ref = jobRef(this.db, partyId, jobId);
     await this.db.runTransaction(async (transaction) => {
@@ -425,7 +432,7 @@ export class FirestoreGenerationStore {
         stagedOutputs: { ...(job.stagedOutputs ?? {}), [cameraId]: staged },
         cameraResults: {
           ...(job.cameraResults ?? {}),
-          [cameraId]: { secondsOut: 2, secondsIn: 0, creditsCharged: null, providerState: "FIXTURE" },
+          [cameraId]: { secondsOut, secondsIn: 0, creditsCharged: null, providerState: "FIXTURE" },
         },
         timestamp: FieldValue.serverTimestamp(),
       });

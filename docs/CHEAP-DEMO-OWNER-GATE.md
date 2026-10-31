@@ -192,3 +192,42 @@ present under `docs/`; no code/config/credential files touched
 (`git status --short` shows only the two new docs); no provider,
 credential, or live-mode strings added; approval text above is the text
 quoted in the delivery summary.*
+
+---
+
+## Appendix A — STEP 2 owner-approved cameo batch (separate preset, same gate discipline)
+
+**Status: GATE DOCUMENT APPENDIX ONLY. Nothing was generated, no provider
+was called, no credentials were read or changed, live mode was NOT enabled,
+and no message was sent.** Owner approval for STEP 2 (Joaquin, Telegram
+2026-10-30 ~23:55 CST, fresh spend approval up to 5 attempts for this probe)
+covers exactly one guest-bound 5-second reference-image cartoon clip; every
+billable attempt is logged with realized console credits per §8, and attempts
+beyond the ceiling need a fresh approval per §1.
+
+- **Separate server preset `cameo_demo` — `cheap_demo` is never altered.**
+  `cameo_demo` is `happyhorse-1.1-r2v`, 480p (`480P`), 5 seconds, silent
+  (`audio: false`), 1 output (`outputs: 1`), no retry (`maxAttempts: 1`),
+  reference-image input only. Text-only requests for this preset are rejected;
+  it exists solely for the consented-reference batch.
+- **Model choice + why.** `happyhorse-1.1-r2v` (reference-image-to-video) was
+  chosen over `wan3.0-video` because the checked-in adapter performs no
+  per-model capability validation and the repo carries no offline
+  documentation establishing that `wan3.0-video` accepts a `reference_image`
+  input at a 5-second duration. Verified offline via serialization fixtures
+  only; no provider network call was made.
+- **Billing caveat (surfaced, never estimated).** Reference inputs can bill
+  input duration — the adapter surfaces the provider's realized
+  `usage.input_video_duration` as `secondsIn`, and Token Plan Credits may
+  differ from list prices. Only realized console Credits are billable truth;
+  no estimate is recorded anywhere.
+- **Fixed server prompt.** The STEP 2 approved prompt is baked in as the
+  server constant `CAMEO_DEMO_PRESET`/`CAMEO_DEMO_PROMPT` exactly as approved
+  (never caller-supplied, never logged).
+- **Same execution shape as a guest-bound cheap job:** exactly ONE
+  provider-generated camera slot (`CAM-01`, bound to the validated guest
+  photo) plus three locally prepared fixture slots; guest-bound only
+  (eligible `guestMediaId` required, consent rechecked at request, worker
+  submission, and publication; tombstone/withdrawal races fail closed);
+  fake provider reports the 5s shape offline for emulator proof; spend guard
+  unchanged (fake under the rehearsal marker, configured provider otherwise).
