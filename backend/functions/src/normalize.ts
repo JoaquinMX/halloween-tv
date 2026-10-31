@@ -123,3 +123,56 @@ export async function normalizeProviderVideo(
 export async function removeNormalizedVideo(video: NormalizedVideo): Promise<void> {
   await rm(dirname(video.path), { recursive: true, force: true });
 }
+
+/**
+ * Cartoon still-to-video chain provenance (cycle-13).
+ *
+ * A cartoon video stage is only valid when it animates the exact still the
+ * image stage generated: the still SHA-256 cited by the video stage must
+ * equal the completed still's SHA-256, and both stages must cite the same
+ * separately identified portrait and scene/style references. The delivery
+ * profile stays pinned to the proven 2s H.264/yuv420p/24fps/854x480
+ * envelope; stills are image bytes and never pass through this transcoder.
+ */
+export interface CartoonStageProvenance {
+  stillSha256: string;
+  videoStillSha256: string;
+  portraitSubmissionId?: string;
+  portraitSourceHash?: string;
+  sceneReference?: string;
+  stillStatus: string;
+  videoStatus?: string;
+}
+
+const CARTOON_HEX_RE = /^[a-f0-9]{64}$/;
+
+export function assertCartoonStageProvenance(stages: CartoonStageProvenance): void {
+  if (!CARTOON_HEX_RE.test(stages.stillSha256)) {
+    throw new Error("Cartoon still hash is missing or malformed.");
+  }
+  if (stages.stillStatus !== "completed") {
+    throw new Error("Cartoon still stage is not completed.");
+  }
+  if (stages.videoStatus !== undefined && stages.videoStatus !== "completed" && stages.videoStatus !== "staged") {
+    throw new Error("Cartoon video stage is not completed.");
+  }
+  if (stages.videoStillSha256 !== stages.stillSha256) {
+    throw new Error("Cartoon video stage does not animate the generated still.");
+  }
+  if (typeof stages.portraitSubmissionId === "string" && stages.portraitSubmissionId !== "" &&
+      (typeof stages.portraitSourceHash !== "string" || !CARTOON_HEX_RE.test(stages.portraitSourceHash))) {
+    throw new Error("Cartoon portrait reference hash is missing or malformed.");
+  }
+  if (typeof stages.sceneReference === "string" && stages.sceneReference.trim() === "") {
+    throw new Error("Cartoon scene/style reference is empty.");
+  }
+}
+
+/** Delivery-profile guard shared by the emulator cartoon integration test. */
+export function isDeliveryProfileMedia(metadata: {
+  codec_name?: string; pix_fmt?: string; r_frame_rate?: string; width?: number; height?: number; durationMs?: number;
+}): boolean {
+  return metadata.codec_name === "h264" && metadata.pix_fmt === "yuv420p" &&
+    metadata.r_frame_rate === "24/1" && metadata.width === 854 &&
+    metadata.height === 480 && metadata.durationMs === 2000;
+}

@@ -861,3 +861,43 @@ test("fake dry run proves delivery, purge, retention, and cost-log reconciliatio
     rmSync(outputDirectory, { recursive: true, force: true });
   }
 });
+
+test("cartoon batch planner is preview-only with a mandatory credit gate and zero live submits", () => {
+  // Missing owner ceiling is refused (mandatory budget gate).
+  const missing = runTool("tools/prepare_cartoon_batch.ts", ["--party=pilot", "--device=tv-pilot", "--channel=main"], cleanEnv());
+  assert.notEqual(missing.status, 0);
+  assert.match(missing.stderr, /--max-credits/);
+  // Live flags are refused: preview-only, never submits.
+  const live = runTool("tools/prepare_cartoon_batch.ts", ["--party=pilot", "--device=tv-pilot", "--channel=main", "--max-credits=10", "--live"], cleanEnv());
+  assert.notEqual(live.status, 0);
+  assert.match(live.stderr, /preview-only/);
+  // Valid preview: 16 rows, 16 stills + 16 2s videos = 32s, 48 fixture slots, zero billable.
+  const preview = runTool("tools/prepare_cartoon_batch.ts", ["--party=pilot", "--device=tv-pilot", "--channel=main", "--max-credits=10"], cleanEnv());
+  assert.equal(preview.status, 0, preview.stderr);
+  const plan = lastJson(preview.stdout);
+  assert.equal(plan.preview, true);
+  assert.equal(plan.writes, false);
+  assert.equal(plan.liveSubmits, 0);
+  assert.equal(plan.networkGenerationCalls, 0);
+  assert.equal(plan.billableCalls, 0);
+  assert.equal(plan.scenarios, 16);
+  assert.equal(plan.stillSubmissions, 16);
+  assert.equal(plan.videoSubmissions, 16);
+  assert.equal(plan.generatedVideoSeconds, 32);
+  assert.equal(plan.nonBillableFixtureSlots, 48);
+  assert.equal(plan.rows.length, 16);
+  assert.equal(plan.ownerMaxCredits, 10);
+  assert.match(String(plan.providerPolicy), /Alibaba Singapore/);
+  assert.match(String(plan.stillModel), /qwen-image-3\.0-pro/);
+  assert.match(String(plan.videoModel), /wan3\.0-video.*STANDARD/);
+  for (const row of plan.rows as Array<Record<string, any>>) {
+    assert.match(String(row.scenarioId), /^cartoon-\d{2}$/);
+    assert.equal(row.video.seconds, 2);
+    assert.equal(row.video.submissions, 1);
+    assert.equal(row.still.submissions, 1);
+    assert.equal(row.delivery.nonBillableFixtureSlots, 3);
+    assert.ok(row.budgetInputs.ownerMaxCredits === 10);
+  }
+  // No Token Plan price is invented by the planner.
+  assert.ok(!/\$0\.05|\$0\.10|US\$/.test(JSON.stringify(plan)));
+});

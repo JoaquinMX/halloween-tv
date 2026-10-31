@@ -1,0 +1,87 @@
+{
+  "description": "Legacy-seed wall-delivery reproduction fixture (cycle-13 p4). An operator-approved legacy seed artifact whose wall delivery stalled: the manifest is well-formed (1/2/4 first-N prefix, canonical scope/version/hash) but pre-fix delivery required fabricated mobile consent. Post-fix the scoped provenance gate delivers it without mobile consent.",
+  "partyId": "legacy-wall-party",
+  "deviceId": "tv-legacy-wall",
+  "channelId": "main",
+  "jobId": "job-legacy-seed-wall",
+  "seedId": "legacy-seed-wall-01",
+  "manifestVersion": 1,
+  "cameraClips": [
+    {
+      "cameraId": "CAM-01",
+      "objectPath": "parties/legacy-wall-party/channels/main/delivery/1/CAM-01.mp4",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "sizeBytes": 12345,
+      "durationMs": 2000,
+      "expiresAt": "2030-11-29T15:00:00.000Z"
+    },
+    {
+      "cameraId": "CAM-02",
+      "objectPath": "parties/legacy-wall-party/channels/main/delivery/1/CAM-02.mp4",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "sizeBytes": 12346,
+      "durationMs": 2000,
+      "expiresAt": "2030-11-29T15:00:00.000Z"
+    },
+    {
+      "cameraId": "CAM-03",
+      "objectPath": "parties/legacy-wall-party/channels/main/delivery/1/CAM-03.mp4",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "sizeBytes": 12347,
+      "durationMs": 2000,
+      "expiresAt": "2030-11-29T15:00:00.000Z"
+    },
+    {
+      "cameraId": "CAM-04",
+      "objectPath": "parties/legacy-wall-party/channels/main/delivery/1/CAM-04.mp4",
+      "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "sizeBytes": 12348,
+      "durationMs": 2000,
+      "expiresAt": "2030-11-29T15:00:00.000Z"
+    }
+  ],
+  "seedProvenance": {
+    "seedId": "legacy-seed-wall-01",
+    "kind": "legacy",
+    "operatorApproved": true,
+    "approvedAt": "2026-10-29T15:00:00.000Z",
+    "approvedBy": "owner"
+  },
+  "seedDoc": {
+    "seedId": "legacy-seed-wall-01",
+    "partyId": "legacy-wall-party",
+    "channelId": "main",
+    "jobId": "job-legacy-seed-wall",
+    "status": "ready",
+    "operatorApproved": true,
+    "expiresAt": "2030-11-29T15:00:00.000Z"
+  },
+  "expectedAuthorization": "deliverable (explicitly supported legacy artifact; no mobile consent fabricated)",
+  "negativeControls": [
+    {
+      "case": "withdrawn",
+      "mutation": { "seedDoc.status": "withdrawn" },
+      "expectedError": "FORBIDDEN"
+    },
+    {
+      "case": "expired",
+      "mutation": { "seedDoc.expiresAt": "2020-01-01T00:00:00.000Z" },
+      "expectedError": "CLIP_EXPIRED"
+    },
+    {
+      "case": "deleted",
+      "mutation": { "seedDoc.status": "deleted" },
+      "expectedError": "NOT_FOUND"
+    },
+    {
+      "case": "unknown",
+      "mutation": { "seedDoc": null },
+      "expectedError": "NOT_FOUND"
+    },
+    {
+      "case": "unauthorized",
+      "mutation": { "seedDoc.partyId": "other-party" },
+      "expectedError": "FORBIDDEN"
+    }
+  ]
+}

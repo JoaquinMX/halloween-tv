@@ -162,3 +162,13 @@ test("deletion racing the worker blocks publication through the real pipeline", 
     await disposeEmulatorContext(app);
   }
 });
+
+test("host seed provenance authorizes delivery without fabricated mobile consent", async () => {
+  const { evaluateDeliveryProvenance } = await import("../src/contracts");
+  const job = { partyId: "p", channelId: "main", jobId: "hv-seed-9", seedProvenance: { seedId: "seed-9", kind: "host" } };
+  const seed = { seedId: "seed-9", partyId: "p", channelId: "main", status: "ready", operatorApproved: true, expiresAt: "2030-01-01T00:00:00.000Z" };
+  assert.equal(evaluateDeliveryProvenance({ job, seed, nowMs: Date.now() }), "host");
+  const deleted = { ...seed, status: "deleted" };
+  assert.throws(() => evaluateDeliveryProvenance({ job, seed: deleted, nowMs: Date.now() }),
+    (e: unknown) => e instanceof BackendError && (e.errorCode === "NOT_FOUND" || e.errorCode === "FORBIDDEN"));
+});

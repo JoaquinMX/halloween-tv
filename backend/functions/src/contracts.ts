@@ -475,3 +475,347 @@ export function parseRevokeHostDeviceInput(value: unknown): RevokeHostDeviceInpu
   }
   return { ...identity, targetDeviceId: validateId(value.targetDeviceId, "targetDeviceId") };
 }
+
+// ---------------------------------------------------------------------------
+// Cartoon catalog pipeline (cycle-13, backend-owned).
+//
+// Backend-owned cartoon pipeline on the Alibaba Singapore Token Plan ONLY:
+// stills via `qwen-image-3.0-pro`, video via `wan3.0-video` STANDARD.
+// Never Google/Veo/Imagen. Proven cheap_demo video controls stay pinned
+// (2s/480P/silent/no-watermark/prompt_extend false); cheap_demo + cameo_demo
+// preset locks are never altered or silently upgraded by this section.
+// Cartoon constants live here (not config.ts) so this partition integrates
+// shared contract changes exclusively without touching other partitions.
+// ---------------------------------------------------------------------------
+
+/** Image-stage preset: cartoon still from portrait + scene/style references. */
+export const CARTOON_STILL_PRESET = Object.freeze({
+  presetId: "cartoon_still" as const,
+  modelId: "qwen-image-3.0-pro" as const,
+  region: "singapore" as const,
+  provider: "alibaba" as const,
+});
+
+/** Video-stage preset: animate the generated still (STANDARD control). */
+export const CARTOON_VIDEO_PRESET = Object.freeze({
+  presetId: "cartoon_video" as const,
+  modelId: "wan3.0-video" as const,
+  region: "singapore" as const,
+  resolution: "480P" as const,
+  secondsOut: 2 as const,
+  aspectRatio: "16:9" as const,
+  audio: false as const,
+  outputs: 1 as const,
+  autoUpscale: false as const,
+  promptExtend: false as const,
+  watermark: false as const,
+  videoControl: "STANDARD" as const,
+});
+
+/** Sixteen image-backed catalog scenarios, fixed plan IDs/versions/seeds. */
+export interface CartoonScenario {
+  scenarioId: string;
+  stillPlanId: string;
+  videoPlanId: string;
+  version: number;
+  seed: number;
+}
+
+export const CARTOON_CATALOG_SCENARIOS: readonly CartoonScenario[] = Object.freeze(
+  Array.from({ length: 16 }, (_, index) => {
+    const slot = String(index + 1).padStart(2, "0");
+    return Object.freeze({
+      scenarioId: `cartoon-${slot}`,
+      stillPlanId: `cartoon-still-plan-${slot}`,
+      videoPlanId: `cartoon-video-plan-${slot}`,
+      version: 1,
+      seed: 130100 + index,
+    });
+  }),
+);
+
+/** Scoped provenance kinds for wall delivery authorization. */
+export type DeliveryProvenanceKind =
+  | "guest"
+  | "operator"
+  | "host"
+  | "legacy"
+  | "cartoon-chain"
+  | "text-only";
+
+/** Delivery diagnostics stage: failures carry an explicit `[stage]` prefix. */
+export type DeliveryFailureStage =
+  | "manifest"
+  | "authorization"
+  | "signing"
+  | "download"
+  | "hash"
+  | "ack";
+
+/** Prefixes a backend error message with its diagnostics stage. */
+export function deliveryFailure(stage: DeliveryFailureStage, errorCode: ErrorCode, message: string): BackendError {
+  return new BackendError(errorCode, `[${stage}] ${message}`);
+}
+
+/**
+ * Scoped provenance evaluation for wall delivery.
+ *
+ * Replaces blanket guest-consent assumptions: approved legacy / operator /
+ * host seed artifacts are deliverable WITHOUT fabricated mobile consent,
+ * while withdrawn, expired, deleted, changed-source, unknown, or
+ * unauthorized bindings receive explicit errors. Database read failures
+ * fail CLOSED (INTERNAL) and are never treated as "no consent needed".
+ */
+export interface ProvenanceEvaluationInput {
+  job: Record<string, unknown>;
+  guest?: Record<string, unknown> | undefined;
+  guestReadError?: unknown;
+  seed?: Record<string, unknown> | undefined;
+  seedReadError?: unknown;
+  nowMs: number;
+}
+
+function provenanceExpiryMs(value: unknown): number | undefined {
+  if (value && typeof value === "object" && "toDate" in value &&
+      typeof (value as { toDate?: unknown }).toDate === "function") {
+    return ((value as { toDate: () => Date }).toDate()).getTime();
+  }
+  if (value instanceof Date) return value.getTime();
+  if (typeof value === "string") {
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
+}
+
+function guestBindingOf(job: Record<string, unknown>): {
+  submissionId: string;
+  sourceHash: string;
+  consentRevision: string;
+} | undefined {
+  const guest = job.guestMedia as Record<string, unknown> | undefined;
+  if (!guest || typeof guest.submissionId !== "string" ||
+      typeof guest.sourceHash !== "string" || typeof guest.consentRevision !== "string") {
+    return undefined;
+  }
+  return { submissionId: guest.submissionId, sourceHash: guest.sourceHash, consentRevision: guest.consentRevision };
+}
+
+function seedBindingOf(job: Record<string, unknown>): {
+  seedId: string;
+  kind: string;
+} | undefined {
+  const seed = job.seedProvenance as Record<string, unknown> | undefined;
+  if (!seed || typeof seed.seedId !== "string" || typeof seed.kind !== "string") return undefined;
+  return { seedId: seed.seedId, kind: seed.kind };
+}
+
+/** True only for an explicitly supported legacy/operator/host seed artifact. */
+export function isExplicitlySupportedLegacyArtifact(
+  job: Record<string, unknown>,
+  seed: Record<string, unknown> | undefined,
+): boolean {
+  if (!seed) return false;
+  const binding = seedBindingOf(job);
+  if (!binding) return false;
+  if (!["legacy", "operator", "host"].includes(binding.kind)) return false;
+  if (seed.seedId !== binding.seedId) return false;
+  if (seed.partyId !== job.partyId || seed.channelId !== job.channelId) return false;
+  if (seed.status === "deleted") return false;
+  if (seed.status === "failed" || seed.status === "expired" || seed.status === "withdrawn") return false;
+  if (seed.status !== "ready" && seed.status !== "approved") return false;
+  if (seed.operatorApproved !== true && (seed as Record<string, unknown>).approved !== true) return false;
+  return true;
+}
+
+/**
+ * Requires a completed still-to-video chain with matching stage provenance
+ * before a cartoon job may publish. Throws MANIFEST_MISMATCH otherwise.
+ */
+export function assertCartoonChainComplete(job: Record<string, unknown>): void {
+  const chain = job.cartoonChain as Record<string, unknown> | undefined;
+  if (!chain) {
+    throw deliveryFailure("manifest", "MANIFEST_MISMATCH", "Cartoon job is missing its still-to-video chain provenance.");
+  }
+  if (chain.stillStatus !== "completed") {
+    throw deliveryFailure("manifest", "MANIFEST_MISMATCH", "Cartoon still stage is not completed.");
+  }
+  if (chain.videoStatus !== undefined && chain.videoStatus !== "completed" && chain.videoStatus !== "staged") {
+    throw deliveryFailure("manifest", "MANIFEST_MISMATCH", "Cartoon video stage is not completed.");
+  }
+  if (typeof chain.stillSha256 !== "string" || !/^[a-f0-9]{64}$/.test(chain.stillSha256)) {
+    throw deliveryFailure("manifest", "MANIFEST_MISMATCH", "Cartoon still hash is missing or malformed.");
+  }
+  if (chain.videoStillSha256 !== undefined && chain.videoStillSha256 !== chain.stillSha256) {
+    throw deliveryFailure("manifest", "MANIFEST_MISMATCH", "Cartoon video stage does not match the generated still.");
+  }
+  if (typeof chain.portraitSubmissionId === "string" && chain.portraitSubmissionId !== "" &&
+      (typeof chain.portraitSourceHash !== "string" || typeof chain.portraitConsentRevision !== "string")) {
+    throw deliveryFailure("manifest", "MANIFEST_MISMATCH", "Cartoon portrait stage provenance is incomplete.");
+  }
+}
+
+/** Scoped provenance gate shared by publish-time and pre-URL checks. */
+export function evaluateDeliveryProvenance(input: ProvenanceEvaluationInput): DeliveryProvenanceKind {
+  const { job, nowMs } = input;
+  if ((job as Record<string, unknown>).hostDeleted === true) {
+    throw deliveryFailure("authorization", "FORBIDDEN", "Seed video was deleted; delivery is refused.");
+  }
+  // New cartoon jobs: completed still-to-video chain + matching provenance.
+  if ((job as Record<string, unknown>).cartoonChain !== undefined) {
+    assertCartoonChainComplete(job);
+    const chain = (job as Record<string, unknown>).cartoonChain as Record<string, unknown>;
+    // The portrait side of the chain keeps scoped consent: when the chain
+    // cites a guest portrait, that binding is evaluated exactly like a
+    // guest job; operator/host portraits pass on their seed approval.
+    if (typeof chain.portraitSubmissionId === "string" && chain.portraitSubmissionId !== "") {
+      if (input.guestReadError) {
+        throw deliveryFailure("authorization", "INTERNAL", "Portrait consent evidence is unreadable; failing closed.");
+      }
+      const guest = input.guest;
+      if (!guest) {
+        throw deliveryFailure("authorization", "FORBIDDEN", "Cartoon portrait consent is no longer eligible for delivery.");
+      }
+      assertGuestProvenance(job, guest, String(chain.portraitSubmissionId), nowMs);
+    }
+    return "cartoon-chain";
+  }
+  const guestBinding = guestBindingOf(job);
+  const seedBinding = seedBindingOf(job);
+  if (guestBinding) {
+    if (input.guestReadError) {
+      throw deliveryFailure("authorization", "INTERNAL", "Guest consent evidence is unreadable; failing closed.");
+    }
+    const guest = input.guest;
+    if (!guest) {
+      throw deliveryFailure("authorization", "FORBIDDEN", "Guest consent is no longer eligible for delivery.");
+    }
+    assertGuestProvenance(job, guest, guestBinding.submissionId, nowMs);
+    return "guest";
+  }
+  if (seedBinding) {
+    if (input.seedReadError) {
+      throw deliveryFailure("authorization", "INTERNAL", "Seed authorization evidence is unreadable; failing closed.");
+    }
+    const seed = input.seed;
+    if (!seed) {
+      throw deliveryFailure("authorization", "NOT_FOUND", `Seed artifact ${seedBinding.seedId} is unknown; delivery is refused.`);
+    }
+    assertSeedProvenance(job, seed, nowMs);
+    return seedBinding.kind as DeliveryProvenanceKind;
+  }
+  // Text-only jobs carry no consent binding and remain deliverable.
+  return "text-only";
+}
+
+function assertGuestProvenance(
+  job: Record<string, unknown>,
+  guest: Record<string, unknown>,
+  submissionId: string,
+  nowMs: number,
+): void {
+  const binding = guestBindingOf(job);
+  if (guest.submissionId !== undefined && guest.submissionId !== submissionId) {
+    throw deliveryFailure("authorization", "FORBIDDEN", "Guest media binding is not authorized for this job.");
+  }
+  if ((guest as Record<string, unknown>).tombstone === true || guest.status === "withdrawn") {
+    throw deliveryFailure("authorization", "FORBIDDEN", "Guest consent was withdrawn; this manifest is revoked.");
+  }
+  if (guest.status === "expired") {
+    throw deliveryFailure("authorization", "CLIP_EXPIRED", "Guest consent window has expired.");
+  }
+  if (guest.status !== "eligible") {
+    throw deliveryFailure("authorization", "FORBIDDEN", "Guest consent is no longer eligible for delivery.");
+  }
+  const consent = guest.consent as Record<string, unknown> | undefined;
+  if (!consent || consent.accepted !== true ||
+      !isSupportedConsent(consent.textVersion, consent.purpose)) {
+    throw deliveryFailure("authorization", "FORBIDDEN", "Guest consent is not recorded for delivery.");
+  }
+  if (binding && (guest.sourceHash !== binding.sourceHash || guest.consentRevision !== binding.consentRevision)) {
+    throw deliveryFailure("authorization", "FORBIDDEN", "Guest media changed while the job was running.");
+  }
+  if (guest.partyId !== undefined && guest.partyId !== job.partyId) {
+    throw deliveryFailure("authorization", "FORBIDDEN", "Guest media is not authorized for this party and channel.");
+  }
+  if (guest.channelId !== undefined && guest.channelId !== job.channelId) {
+    throw deliveryFailure("authorization", "FORBIDDEN", "Guest media is not authorized for this party and channel.");
+  }
+  const expiry = provenanceExpiryMs(guest.expiresAt);
+  if (!Number.isFinite(expiry) || (expiry as number) <= nowMs) {
+    throw deliveryFailure("authorization", "FORBIDDEN", "Guest consent window has expired.");
+  }
+}
+
+function assertSeedProvenance(
+  job: Record<string, unknown>,
+  seed: Record<string, unknown>,
+  nowMs: number,
+): void {
+  const binding = seedBindingOf(job);
+  if (!binding) {
+    throw deliveryFailure("authorization", "FORBIDDEN", "Seed binding is missing; delivery is refused.");
+  }
+  if (seed.seedId !== binding.seedId) {
+    throw deliveryFailure("authorization", "FORBIDDEN", "Seed artifact is not authorized for this job.");
+  }
+  if (seed.partyId !== job.partyId || seed.channelId !== job.channelId) {
+    throw deliveryFailure("authorization", "FORBIDDEN", "Seed video is outside the registered party and channel.");
+  }
+  if (seed.status === "deleted") {
+    throw deliveryFailure("authorization", "NOT_FOUND", "Seed video does not exist.");
+  }
+  if (seed.status === "withdrawn") {
+    throw deliveryFailure("authorization", "FORBIDDEN", "Seed consent was withdrawn; delivery is refused.");
+  }
+  if (seed.status === "failed" || seed.status === "expired") {
+    throw deliveryFailure("authorization", "NOT_FOUND", "Seed video is no longer available.");
+  }
+  const expiry = provenanceExpiryMs(seed.expiresAt);
+  if (Number.isFinite(expiry) && (expiry as number) <= nowMs) {
+    throw deliveryFailure("authorization", "CLIP_EXPIRED", "Seed video has expired.");
+  }
+  if (!isExplicitlySupportedLegacyArtifact(job, seed)) {
+    throw deliveryFailure("authorization", "FORBIDDEN", "Seed artifact is not an explicitly supported legacy authorization.");
+  }
+}
+
+/**
+ * Pins the cartoon video controls to the proven cheap_demo envelope plus the
+ * provider's STANDARD video control. Any deviation is rejected so historical
+ * jobs are never silently upgraded and the Token Plan surface stays fixed.
+ */
+export function validateCartoonVideoControls(value: unknown): void {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new BackendError("INVALID_ARGUMENT", "Cartoon video controls must be an object.");
+  }
+  const controls = value as Record<string, unknown>;
+  const expected: Record<string, unknown> = {
+    modelId: CARTOON_VIDEO_PRESET.modelId,
+    region: CARTOON_VIDEO_PRESET.region,
+    resolution: CARTOON_VIDEO_PRESET.resolution,
+    secondsOut: CARTOON_VIDEO_PRESET.secondsOut,
+    aspectRatio: CARTOON_VIDEO_PRESET.aspectRatio,
+    audio: CARTOON_VIDEO_PRESET.audio,
+    outputs: CARTOON_VIDEO_PRESET.outputs,
+    autoUpscale: CARTOON_VIDEO_PRESET.autoUpscale,
+  };
+  for (const [field, want] of Object.entries(expected)) {
+    if (field in controls && controls[field] !== want) {
+      throw new BackendError("INVALID_ARGUMENT", `Unsupported cartoon video ${field}; only the fixed cartoon preset is allowed.`);
+    }
+  }
+  if ("promptExtend" in controls && controls.promptExtend !== false) {
+    throw new BackendError("INVALID_ARGUMENT", "Prompt extension is disabled for cartoon video.");
+  }
+  if ("watermark" in controls && controls.watermark !== false) {
+    throw new BackendError("INVALID_ARGUMENT", "Watermarks are disabled for cartoon video.");
+  }
+  if ("videoControl" in controls && controls.videoControl !== CARTOON_VIDEO_PRESET.videoControl) {
+    throw new BackendError("INVALID_ARGUMENT", "Only the STANDARD cartoon video control is supported.");
+  }
+  if ("modelId" in controls && typeof controls.modelId === "string" &&
+      /google|veo|imagen/i.test(controls.modelId)) {
+    throw new BackendError("INVALID_ARGUMENT", "Only the Alibaba Singapore Token Plan models are supported.");
+  }
+}
