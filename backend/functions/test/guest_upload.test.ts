@@ -46,6 +46,24 @@ function servicesFor(db: Firestore, bucket: Bucket, overrides: {
   });
 }
 
+/**
+ * Upload-phase services with generation disabled: eligible completion stays
+ * fully operational and never auto-enqueues, so tests that drive the explicit
+ * requestGeneration path afterward keep a clean budget. Auto-enqueue itself
+ * is covered by dedicated tests (guest_upload_e2e).
+ */
+function uploadServices(db: Firestore, bucket: Bucket) {
+  return createRuntimeServices({
+    db,
+    bucket,
+    generationEnabled: false,
+    pollIntervalMs: 1,
+    sleep: async () => undefined,
+    signGuestUploadUrl: async (file) => `https://upload.invalid/${encodeURIComponent(file.name)}`,
+    signReadUrl: async (file) => `https://signed.invalid/${encodeURIComponent(file.name)}`,
+  });
+}
+
 test("requestGuestUpload refuses missing consent, bad consent, and caller-supplied paths", {
   skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
 }, async () => {
@@ -326,11 +344,12 @@ test("withdrawal revokes delivery: absent everywhere and no new URLs issuable", 
   try {
     await seedParty(db, partyId, deviceId, channelId);
     const services = fullServices(db, bucket);
-    const requested = await services.requestGuestUpload({
+    const upload = uploadServices(db, bucket);
+    const requested = await upload.requestGuestUpload({
       partyId, deviceId, channelId, consent: CONSENT, contentType: "image/jpeg",
     });
     await bucket.file(requested.objectPath).save(await photoBytes(), { contentType: "image/jpeg" });
-    await services.completeGuestUpload({ partyId, deviceId, channelId, submissionId: requested.submissionId });
+    await upload.completeGuestUpload({ partyId, deviceId, channelId, submissionId: requested.submissionId });
     const jobId = "job-revoke-delivery";
     const idempotencyKey = "idem-revoke-delivery";
     await services.requestGeneration({ partyId, deviceId, channelId, jobId, idempotencyKey, presetId: "cheap_demo", guestMediaId: requested.submissionId });
@@ -498,11 +517,12 @@ test("withdrawal releases the party budget pointer like failForWithdrawnConsent"
   try {
     await seedParty(db, partyId, "p-guest-1", "main");
     const services = fullServices(db, bucket);
-    const requested = await services.requestGuestUpload({
+    const upload = uploadServices(db, bucket);
+    const requested = await upload.requestGuestUpload({
       partyId, deviceId: "p-guest-1", channelId: "main", consent: CONSENT, contentType: "image/jpeg",
     });
     await bucket.file(requested.objectPath).save(await photoBytes(), { contentType: "image/jpeg" });
-    await services.completeGuestUpload({ partyId, deviceId: "p-guest-1", channelId: "main", submissionId: requested.submissionId });
+    await upload.completeGuestUpload({ partyId, deviceId: "p-guest-1", channelId: "main", submissionId: requested.submissionId });
     const jobId = "job-budget-release";
     await services.requestGeneration({
       partyId, deviceId: "p-guest-1", channelId: "main", jobId, idempotencyKey: "idem-budget-release", presetId: "cheap_demo", guestMediaId: requested.submissionId,
@@ -568,11 +588,12 @@ test("withdrawal revokes delivery: absent everywhere and no new URLs issuable", 
   try {
     await seedParty(db, partyId, deviceId, channelId);
     const services = fullServices(db, bucket);
-    const requested = await services.requestGuestUpload({
+    const upload = uploadServices(db, bucket);
+    const requested = await upload.requestGuestUpload({
       partyId, deviceId, channelId, consent: CONSENT, contentType: "image/jpeg",
     });
     await bucket.file(requested.objectPath).save(await photoBytes(), { contentType: "image/jpeg" });
-    await services.completeGuestUpload({ partyId, deviceId, channelId, submissionId: requested.submissionId });
+    await upload.completeGuestUpload({ partyId, deviceId, channelId, submissionId: requested.submissionId });
     const jobId = "job-revoke-delivery";
     const idempotencyKey = "idem-revoke-delivery";
     await services.requestGeneration({ partyId, deviceId, channelId, jobId, idempotencyKey, presetId: "cheap_demo", guestMediaId: requested.submissionId });

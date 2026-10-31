@@ -904,7 +904,7 @@ test("cartoon batch planner is preview-only with a mandatory credit gate and zer
   const live = runTool("tools/prepare_cartoon_batch.ts", ["--party=pilot", "--device=tv-pilot", "--channel=main", "--max-credits=10", "--live"], cleanEnv());
   assert.notEqual(live.status, 0);
   assert.match(live.stderr, /preview-only/);
-  // Valid preview: 16 rows, 16 stills + 16 2s videos = 32s, 48 fixture slots, zero billable.
+  // Valid preview: 3 distinct cases, 3 stills + 3 2s videos = 6s, 9 fixture slots, zero billable.
   const preview = runTool("tools/prepare_cartoon_batch.ts", ["--party=pilot", "--device=tv-pilot", "--channel=main", "--max-credits=10"], cleanEnv());
   assert.equal(preview.status, 0, preview.stderr);
   const plan = lastJson(preview.stdout);
@@ -913,35 +913,59 @@ test("cartoon batch planner is preview-only with a mandatory credit gate and zer
   assert.equal(plan.liveSubmits, 0);
   assert.equal(plan.networkGenerationCalls, 0);
   assert.equal(plan.billableCalls, 0);
-  assert.equal(plan.scenarios, 16);
-  assert.equal(plan.stillSubmissions, 16);
-  assert.equal(plan.videoSubmissions, 16);
-  assert.equal(plan.generatedVideoSeconds, 32);
-  assert.equal(plan.nonBillableFixtureSlots, 48);
-  assert.equal(plan.rows.length, 16);
+  assert.equal(plan.cases, 3);
+  assert.equal(plan.stillSubmissions, 3);
+  assert.equal(plan.videoSubmissions, 3);
+  assert.equal(plan.generatedVideoSeconds, 6);
+  assert.equal(plan.nonBillableFixtureSlots, 9);
+  assert.equal(plan.rows.length, 3);
   assert.equal(plan.ownerMaxCredits, 10);
   assert.match(String(plan.providerPolicy), /Alibaba Singapore/);
   assert.match(String(plan.stillModel), /qwen-image-3\.0-pro/);
   assert.match(String(plan.videoModel), /wan3\.0-video.*STANDARD/);
+  const pairs = new Set<string>();
   for (const row of plan.rows as Array<Record<string, any>>) {
-    assert.match(String(row.scenarioId), /^cartoon-\d{2}$/);
     assert.equal(row.video.seconds, 2);
     assert.equal(row.video.submissions, 1);
     assert.equal(row.still.submissions, 1);
     assert.equal(row.delivery.nonBillableFixtureSlots, 3);
     assert.ok(row.budgetInputs.ownerMaxCredits === 10);
+    assert.equal(row.budgetInputs.stillStage.creditsCharged, null, "still credits stay UNKNOWN");
+    assert.equal(row.budgetInputs.videoStage.creditsCharged, null, "video credits stay UNKNOWN");
+    pairs.add(`${String(row.scenario.id)}:${String(row.situation.id)}`);
   }
-  // Identity linkage: planner rows bind the real image-backed catalog
-  // record ids (not just synthetic slot ids).
-  const { loadValidatedCatalogs, resolveFunctionsRoot } = await import("../src/scenario_catalog");
-  const { catalog } = loadValidatedCatalogs(resolveFunctionsRoot(resolve(PACKAGE_ROOT, "src")));
-  const recordIds = new Set(catalog.records.map((record) => record.id));
+  assert.equal(pairs.size, 3, "the 3 preview cases must be DISTINCT scenario+situation pairs");
+  // Identity linkage: every row resolves to real validated catalog records
+  // with matching hashes (never synthetic slot ids).
+  const { loadValidatedCatalogs, resolveFunctionsRoot, selectScenarioSituation, readScenarioReferenceBytes, getScenario } = await import("../src/scenario_catalog");
+  const { catalog, situations } = loadValidatedCatalogs(resolveFunctionsRoot(resolve(PACKAGE_ROOT, "src")));
+  const { composeCartoonPromptsFromPair } = await import("../src/cartoon_prompts");
   for (const row of plan.rows as Array<Record<string, any>>) {
-    assert.ok(typeof row.catalogRecordId === "string" && recordIds.has(row.catalogRecordId),
-      `planner row ${row.scenarioId} must cite a real catalog record id`);
-    assert.match(String(row.catalogReference.sha256), /^[a-f0-9]{64}$/);
+    assert.equal(row.scenario.version, 1);
+    assert.equal(row.situation.version, 1);
+    assert.ok(typeof row.selectionSeed === "string" && row.selectionSeed.length > 0);
+    const { scenario, situation } = selectScenarioSituation(
+      catalog, situations, String(row.scenario.id), String(row.situation.id));
+    // Both repo-relative reference paths resolve on disk; the style bytes
+    // hash-match the pinned catalog record.
+    for (const key of ["subjectIdentity", "styleScene"] as const) {
+      const repoPath = String(row.referencePaths[key]);
+      assert.ok(!repoPath.startsWith("/") && !repoPath.includes(".."), `${key} must be repo-relative`);
+      assert.ok(existsSync(resolve(PACKAGE_ROOT, repoPath)), `${key} must resolve on disk (${repoPath})`);
+    }
+    assert.equal(row.referencePaths.styleScene, scenario.referencePath);
+    const styleBytes = readScenarioReferenceBytes(getScenario(catalog, String(row.scenario.id)), resolveFunctionsRoot(resolve(PACKAGE_ROOT, "src")));
+    assert.equal(createHash("sha256").update(styleBytes).digest("hex"), String(row.catalogReference.sha256));
+    assert.equal(row.catalogReference.sha256, scenario.sha256, "row hash must match the catalog record hash");
+    // EXACT composed prompts: the row carries the byte-identical composer output.
+    const prompts = composeCartoonPromptsFromPair(scenario, situation);
+    assert.equal(row.stillPrompt, prompts.still);
+    assert.equal(row.videoPrompt, prompts.motion);
+    assert.equal(row.negativePrompt, prompts.negative);
+    // Model pins ride every row.
+    assert.equal(row.still.modelId, "qwen-image-3.0-pro");
+    assert.equal(row.video.modelId, "wan3.0-video");
   }
-  assert.equal(new Set((plan.rows as Array<Record<string, any>>).map((row) => row.catalogRecordId)).size, 16);
   // No Token Plan price is invented by the planner.
   assert.ok(!/\$0\.05|\$0\.10|US\$/.test(JSON.stringify(plan)));
 });

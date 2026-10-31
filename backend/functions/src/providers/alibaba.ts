@@ -123,10 +123,16 @@ export function buildAlibabaSubmitBody(request: VideoGenerationRequest): {
 /**
  * Pure cartoon video serialization (offline, zero network): wan3.0-video
  * STANDARD cheap_demo envelope (2s/480P/silent/no-watermark/prompt_extend
- * false, locked camera) animating the exact generated still as first_frame.
- * The still sha256 stays on the request/ledger path for chain provenance and
- * never enters the submitted JSON; only the provider-fetchable signed https
- * URL is sent as `input.first_frame`.
+ * false) animating the exact generated still as first_frame.
+ *
+ * Verified wire shape (owner-approved v2 manifests): the still travels as an
+ * in-process data URI inside `input.media` as
+ * `{ type: "first_frame", url: <data:image/...;base64> }` — never as
+ * `input.first_frame`, never as hosted bytes. The still sha256 stays on the
+ * request/ledger path for chain provenance and never enters the submitted
+ * JSON. The motion prompt is used verbatim: no suffix is appended here, so a
+ * situation's own camera language (e.g. a side-tracking shot) is never
+ * globally negated.
  */
 export function buildAlibabaCartoonVideoBody(request: VideoGenerationRequest): {
   model: string;
@@ -139,6 +145,9 @@ export function buildAlibabaCartoonVideoBody(request: VideoGenerationRequest): {
   }
   validateCartoonFirstFrame(request.firstFrame);
   validateFetchableCartoonFirstFrame(request.firstFrame);
+  if (typeof request.firstFrame.url !== "string" || !/^data:image\/(jpeg|png);base64,[A-Za-z0-9+/=]+$/.test(request.firstFrame.url)) {
+    throw new Error("Cartoon video first frame must be an in-process data URI; hosted bytes are never submitted.");
+  }
   if (request.modelId !== CARTOON_VIDEO_PRESET.modelId ||
       request.resolution !== CARTOON_VIDEO_PRESET.resolution ||
       request.secondsOut !== CARTOON_VIDEO_PRESET.secondsOut ||
@@ -151,8 +160,8 @@ export function buildAlibabaCartoonVideoBody(request: VideoGenerationRequest): {
   return {
     model: request.modelId,
     input: {
-      prompt: `${request.prompt} Locked camera, no cuts.`,
-      first_frame: request.firstFrame.url,
+      prompt: request.prompt,
+      media: [{ type: "first_frame", url: request.firstFrame.url }],
     },
     parameters: {
       resolution: request.resolution,

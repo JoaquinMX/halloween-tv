@@ -54,10 +54,6 @@ export interface GenerationServiceOptions {
    * persist it; the URL is used in-flight only.
    */
   signReferenceUrl?: (objectPath: string) => Promise<string>;
-  /** Override for still-bytes URL resolution (image-stage provider inputs). */
-  resolveImageUrl?: (bytes: Uint8Array, contentType: string, digest: string) => Promise<string>;
-  /** Override for still first-frame URL signing (video-stage input). */
-  signStillUrl?: (objectPath: string) => Promise<string>;
 }
 
 /** Short-lived reference read capability: 15-min TTL is plenty for submit. */
@@ -65,6 +61,7 @@ export const REFERENCE_READ_URL_TTL_MS = 15 * 60 * 1000;
 
 export interface GenerationServices {
   requestGeneration(value: unknown): ReturnType<FirestoreGenerationStore["requestGeneration"]>;
+  requestCartoonFromPortrait(value: unknown): ReturnType<FirestoreGenerationStore["requestCartoonFromPortrait"]>;
   getGenerationStatus(value: unknown): ReturnType<FirestoreGenerationStore["getGenerationStatus"]>;
   failEnqueue(task: GenerationTask): Promise<void>;
   runGeneration(task: GenerationTask): Promise<{ jobId: string; state: string; manifestVersion?: number }>;
@@ -558,18 +555,17 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
         }
       }
       const motion = buildCartoonMotionPrompt({ scenarioId: plan.scenarioId, situationId: plan.situationId, catalog, situations });
-      const signStill = options.signStillUrl
-        ?? (async (objectPath: string) => {
-          const [url] = await options.bucket.file(objectPath).getSignedUrl({
-            action: "read", version: "v4", expires: new Date(now().getTime() + REFERENCE_READ_URL_TTL_MS),
-          });
-          return url;
-        });
-      const stillUrl = await signStill(stillPath!);
-      if (typeof stillUrl !== "string" || !/^https:\/\//.test(stillUrl)) {
-        throw new BackendError("PROVIDER_UNAVAILABLE", "Cartoon still URL signing did not return a fetchable https URL.");
+      // The exact generated still travels as an in-process data URI
+      // (verified against the chain hash); no public/signed hosting.
+      const [stillBytes] = await options.bucket.file(stillPath!).download().catch(() => [undefined] as unknown as [Buffer | undefined]);
+      if (!stillBytes || stillBytes.byteLength === 0) {
+        throw new BackendError("MANIFEST_MISMATCH", "Cartoon still bytes are not available for the video stage.");
       }
-      const videoRequest = buildCartoonVideoRequest(validTask.jobId, validTask.idempotencyKey, "CAM-01", motion, { url: stillUrl, sha256: stillSha! });
+      if (createHash("sha256").update(stillBytes).digest("hex") !== stillSha!) {
+        throw new BackendError("MANIFEST_MISMATCH", "Cartoon still bytes do not match the recorded hash.");
+      }
+      const stillDataUri = `data:image/png;base64,${Buffer.from(stillBytes).toString("base64")}`;
+      const videoRequest = buildCartoonVideoRequest(validTask.jobId, validTask.idempotencyKey, "CAM-01", motion, { url: stillDataUri, sha256: stillSha! });
       job = await store.getJob(validTask.partyId, validTask.jobId);
       const stagedCam01 = (job.stagedOutputs ?? {})["CAM-01"] as Record<string, unknown> | undefined;
       if (!stagedCam01) {
@@ -863,6 +859,7 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
 
   return {
     requestGeneration: (value) => store.requestGeneration(value),
+    requestCartoonFromPortrait: (value) => store.requestCartoonFromPortrait(value),
     getGenerationStatus: (value) => store.getGenerationStatus(value),
     failEnqueue: (task) => store.failEnqueue(task),
     runGeneration,

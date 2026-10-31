@@ -292,18 +292,29 @@ export function validateCartoonFirstFrame(value: unknown): asserts value is Cart
   if (typeof frame.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(frame.sha256)) {
     throw new BackendError("INVALID_ARGUMENT", "Cartoon first-frame hash is invalid.");
   }
-  if (frame.url !== undefined && (typeof frame.url !== "string" || !/^https:\/\//.test(frame.url))) {
-    throw new BackendError("INVALID_ARGUMENT", "Cartoon first frame URL must be a signed https URL.");
+  if (frame.url !== undefined && !isCartoonFirstFrameUrl(frame.url)) {
+    throw new BackendError("INVALID_ARGUMENT", "Cartoon first frame URL must be a data URI or signed https URL.");
   }
 }
 
-/** Provider-bound gate: the still must resolve to a signed https URL before transport. */
+/**
+ * Provider-bound gate: the still must resolve to an in-flight data URI or a
+ * signed https URL before transport. Data URIs are preferred (in-process
+ * bytes, no public/signed hosting); https URLs remain accepted for fixture
+ * and rehearsal paths.
+ */
 export function validateFetchableCartoonFirstFrame(value: unknown): asserts value is CartoonFirstFrame {
   validateCartoonFirstFrame(value);
   const frame = value as CartoonFirstFrame;
-  if (typeof frame.url !== "string" || !/^https:\/\//.test(frame.url)) {
-    throw new BackendError("INVALID_ARGUMENT", "Cartoon first frame must resolve to a signed https URL for provider submission.");
+  if (typeof frame.url !== "string" || !isCartoonFirstFrameUrl(frame.url)) {
+    throw new BackendError("INVALID_ARGUMENT", "Cartoon first frame must resolve to a data URI or signed https URL for provider submission.");
   }
+}
+
+/** Accepts in-process data URIs (jpeg/png base64) and signed https URLs. */
+function isCartoonFirstFrameUrl(value: unknown): boolean {
+  return typeof value === "string" &&
+    (/^data:image\/(jpeg|png);base64,[A-Za-z0-9+/=]+$/.test(value) || /^https:\/\//.test(value));
 }
 
 /**
