@@ -6,7 +6,7 @@ import { onSchedule } from "firebase-functions/v2/scheduler";
 import { setGlobalOptions } from "firebase-functions/v2/options";
 import { resolve } from "node:path";
 import { BackendError } from "./contracts";
-import { ErrorCode, isGenerationEnabled, REGION } from "./config";
+import { ErrorCode, isGenerationEnabled, GENERATION_WORKER_MEMORY, REGION } from "./config";
 import { getAdminApp, getAdminBucket, getAdminFirestore } from "./firebase";
 import { GenerationTask } from "./delivery";
 import { createRetentionService } from "./retention";
@@ -74,7 +74,10 @@ export const requestGeneration = onCall({ maxInstances: 2 }, (request) =>
 export const runGeneration = onTaskDispatched({
   // Fixed 900s deadline: must equal GENERATION_WORKER_TIMEOUT_SECONDS (default).
   // Preflight compares this literal against the configured env and fails on drift.
+  // Explicit 1GiB headroom (GENERATION_WORKER_MEMORY): ffmpeg normalization plus
+  // the packaged runtime plus frame buffers OOMs at the default 256MiB.
   timeoutSeconds: 900,
+  memory: GENERATION_WORKER_MEMORY,
   retryConfig: { maxAttempts: 1, minBackoffSeconds: 60, maxBackoffSeconds: 60 },
   rateLimits: { maxConcurrentDispatches: 1, maxDispatchesPerSecond: 1 },
 }, async (request) => { await getServices().runGeneration(request.data as GenerationTask); });

@@ -1,5 +1,13 @@
 export const REGION = "us-central1";
 export const SCHEMA_VERSION = 1;
+/**
+ * Generation task worker memory headroom for ffmpeg normalization.
+ * Linux ffmpeg plus the ~147MB packaged runtime plus frame buffers OOM at the
+ * default 256MiB ("Memory limit of 256 MiB exceeded"); 1GiB gives the worker
+ * explicit headroom. Referenced by runGeneration in src/index.ts and floored
+ * (>= 512MiB) by tools/deploy_preflight.ts.
+ */
+export const GENERATION_WORKER_MEMORY = "1GiB" as const;
 export const DELIVERY_URL_TTL_SECONDS = 15 * 60;
 export const MEDIA_RETENTION_MS = 24 * 60 * 60 * 1000;
 export const REQUIRED_CAMERA_IDS = ["CAM-01", "CAM-02", "CAM-03", "CAM-04"] as const;
