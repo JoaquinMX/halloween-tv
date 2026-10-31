@@ -14,10 +14,13 @@ import { BackendError, isHostSourceConsent, isSupportedConsent, requireIdentity,
 import {
   consentRevisionFor,
   GuestMediaDoc,
+  collectJobDerivativePaths,
   guestMediaRef,
   guestObjectPath,
+  guestProvenanceFromDoc,
   parseGuestObjectPath,
 } from "./guest_media";
+import { markProvenanceWithdrawn, PROVENANCE_VERSION } from "./consent_provenance";
 
 export interface GuestUploadServiceOptions {
   db: Firestore;
@@ -162,6 +165,24 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
     // visible expiry but must never extend retention past creation + 24h.
     const deleteAt = new Date(acceptedAt.getTime() + GUEST_INPUT_TTL_MS);
     const ref = guestMediaRef(db, identity.partyId, submissionId);
+    // Server-derived guest_mobile provenance, stamped at the authenticated
+    // request path (no source hash yet — bytes are unverified until
+    // completion, so this record alone never grants generation).
+    const requestProvenance = {
+      version: PROVENANCE_VERSION,
+      origin: "guest_mobile",
+      actorRole: hostCaller ? "host" : "guest",
+      actorDeviceId: identity.deviceId,
+      evidenceSource: "server:guest_upload",
+      recordedAt: acceptedAtIso,
+      partyId: identity.partyId,
+      channelId: identity.channelId,
+      purposes: [`${String(consent.textVersion)}:${String(consent.purpose)}`],
+      revision: hostCaller
+        ? `${String(consent.textVersion)}:${acceptedAtIso}`
+        : consentRevisionFor(acceptedAtIso),
+      expiresAt: expiresAt.toISOString(),
+    } as const;
     await ref.create({
       submissionId,
       partyId: identity.partyId,
@@ -186,6 +207,7 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
         role: hostCaller ? "host" : "guest",
       },
       consentRevision,
+      provenance: { ...requestProvenance },
       objectPath,
       contentType,
       expiresAt: Timestamp.fromDate(expiresAt),
@@ -321,6 +343,17 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
           completedAt: FieldValue.serverTimestamp(),
           expiresAt: Timestamp.fromDate(eligibleExpiresAt),
           updatedAt: FieldValue.serverTimestamp(),
+          // Refresh server-derived provenance with the verified source hash
+          // so the generation gate binds to measured bytes (never
+          // self-asserted). Original evidence (consent, revision, actor) is
+          // preserved, only the hash binding is added.
+          provenance: {
+            ...((guestProvenanceFromDoc(
+              { ...current, sourceHash: sha256 } as GuestMediaDoc,
+              "server:guest_upload",
+            ) ?? (current as unknown as Record<string, unknown>).provenance) as Record<string, unknown>),
+            sourceHash: sha256,
+          },
         });
       });
     } catch (error) {
@@ -398,6 +431,18 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
     // tombstone rewrite so retention still bounds the (now deleted) input.
     const existingDeleteAt = (doc as unknown as Record<string, unknown>).deleteAt;
     // Revoke eligibility first so concurrent submissions and publication fail closed.
+    // Provenance is preserved, never erased: the original evidence
+    // (actor, consent pair, revision, hashes) is retained and only marked
+    // withdrawn, so audits keep the full history.
+    const existingProvenance = (doc as unknown as Record<string, unknown>).provenance;
+    let withdrawnProvenance: unknown;
+    try {
+      const base = guestProvenanceFromDoc(doc, "server:guest_upload") ??
+        (existingProvenance as Parameters<typeof markProvenanceWithdrawn>[0]);
+      withdrawnProvenance = markProvenanceWithdrawn(base, withdrawnAtIso);
+    } catch {
+      withdrawnProvenance = existingProvenance;
+    }
     await ref.set({
       submissionId,
       partyId: identity.partyId,
@@ -406,6 +451,10 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
       status: "withdrawn",
       consent: doc.consent,
       consentRevision: doc.consentRevision,
+      ...((doc as unknown as Record<string, unknown>).attestation !== undefined
+        ? { attestation: (doc as unknown as Record<string, unknown>).attestation }
+        : {}),
+      ...(withdrawnProvenance !== undefined ? { provenance: withdrawnProvenance } : {}),
       objectPath,
       contentType: doc.contentType,
       expiresAt: doc.expiresAt,
@@ -427,17 +476,11 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
     for (const jobDoc of jobs.docs) {
       boundJobIds.push(jobDoc.id);
       const job = jobDoc.data() as Record<string, unknown>;
-      const staged = (job.stagedOutputs && typeof job.stagedOutputs === "object" ? job.stagedOutputs : {}) as Record<string, unknown>;
-      for (const clip of Object.values(staged)) {
-        if (clip && typeof clip === "object" && typeof (clip as Record<string, unknown>).objectPath === "string") {
-          const path = (clip as Record<string, unknown>).objectPath as string;
-          if (path.startsWith("parties/")) attributable.add(path);
-        }
-      }
-      for (const key of ["deliveryPaths", "generatedPaths"] as const) {
-        const list = job[key];
-        if (Array.isArray(list)) for (const item of list) if (typeof item === "string" && item.startsWith("parties/")) attributable.add(item);
-      }
+      // Shared collector covers staged outputs, delivery + generated paths,
+      // cartoon stills, intermediate outputs, and delivery objects under both
+      // current and historical field names. Audit/accounting rows are never
+      // paths and are never collected.
+      for (const path of collectJobDerivativePaths(job)) attributable.add(path);
     }
     // Host seed catalog integration: previews retained for bound jobs are
     // attributable derivatives too. They are queued for deletion here and
@@ -449,9 +492,15 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
       for (const seedDoc of seeds.docs) {
         const seed = seedDoc.data() as Record<string, unknown>;
         if (typeof seed.jobId !== "string" || !boundJobIds.includes(seed.jobId)) continue;
-        const previews = seed.previewPaths;
-        if (Array.isArray(previews)) {
-          for (const item of previews) if (typeof item === "string" && item.startsWith("parties/")) attributable.add(item);
+        for (const key of ["previewPaths", "stillPaths", "intermediatePaths"] as const) {
+          const listed = seed[key];
+          if (Array.isArray(listed)) {
+            for (const item of listed) if (typeof item === "string" && item.startsWith("parties/")) attributable.add(item);
+          }
+        }
+        for (const key of ["cartoonStillPath", "stillPath"] as const) {
+          const single = seed[key];
+          if (typeof single === "string" && single.startsWith("parties/")) attributable.add(single);
         }
         if (seed.status !== "deleted") {
           await seedDoc.ref.update({

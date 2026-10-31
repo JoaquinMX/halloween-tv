@@ -16,6 +16,22 @@ function addPaths(target: Set<string>, value: unknown): void {
   if (Array.isArray(value)) for (const item of value) if (typeof item === "string" && item.startsWith("parties/")) target.add(item);
 }
 
+function addJobPaths(target: Set<string>, job: FirebaseFirestore.DocumentData): void {
+  addPaths(target, job.deliveryPaths);
+  addPaths(target, job.generatedPaths);
+  // Cartoon pipeline derivatives: generated stills, intermediate outputs,
+  // and separately referenced previews share the same lifetime as delivery
+  // bytes. Historical field names are covered alongside current ones.
+  addPaths(target, job.stillPaths);
+  addPaths(target, job.intermediatePaths);
+  addPaths(target, job.previewPaths);
+  addPaths(target, job.deliveryObjects);
+  for (const key of ["cartoonStillPath", "stillPath", "intermediatePath"] as const) {
+    const single = (job as Record<string, unknown>)[key];
+    if (typeof single === "string" && single.startsWith("parties/")) target.add(single);
+  }
+}
+
 /** A manifest is revoked when its job is bound to a withdrawn submission. */
 function isRevokedManifest(
   jobId: string,
@@ -38,6 +54,22 @@ export interface RetentionResult {
   expiredGuestInputs: number;
 }
 
+/** Test-visible projection of the object paths a job doc keeps alive or purges. */
+export function retentionPathsForJob(job: Record<string, unknown>): string[] {
+  const paths = new Set<string>();
+  addJobPaths(paths, job as FirebaseFirestore.DocumentData);
+  const staged = (job as Record<string, unknown>).stagedOutputs;
+  if (staged && typeof staged === "object") {
+    for (const clip of Object.values(staged as Record<string, unknown>)) {
+      if (clip && typeof clip === "object" && typeof (clip as Record<string, unknown>).objectPath === "string" &&
+          ((clip as Record<string, unknown>).objectPath as string).startsWith("parties/")) {
+        paths.add((clip as Record<string, unknown>).objectPath as string);
+      }
+    }
+  }
+  return [...paths];
+}
+
 /** Scheduled TTL transition plus orphan cleanup; object deletion is idempotent. */
 export async function sweepExpiredMedia(
   db: Firestore,
@@ -51,8 +83,7 @@ export async function sweepExpiredMedia(
   for (const snapshot of expiredSnapshot.docs) {
     const job = snapshot.data();
     const paths = new Set<string>();
-    addPaths(paths, job.deliveryPaths);
-    addPaths(paths, job.generatedPaths);
+    addJobPaths(paths, job);
     // Staged camera outputs of a dead job are temporary: purge them here so
     // they do not linger past expiry (live staged outputs are protected by
     // the references set below, never by this block).
@@ -180,11 +211,28 @@ export async function sweepExpiredMedia(
   let deletedSeedPreviews = 0;
   for (const seedDoc of (seedVideos as { docs: Array<{ data(): FirebaseFirestore.DocumentData; ref: FirebaseFirestore.DocumentReference }> }).docs) {
     const seed = seedDoc.data() as Record<string, unknown>;
+    // Cartoon stills + intermediate outputs recorded outside the job doc share
+    // the seed's lifetime: live seeds protect them, expired/deleted seeds
+    // purge them. Shared catalog references stay protected via `references`.
+    const seedExtra: string[] = [];
+    for (const key of ["stillPaths", "intermediatePaths"] as const) {
+      const listed = seed[key];
+      if (Array.isArray(listed)) {
+        for (const item of listed) {
+          if (typeof item === "string" && item.startsWith("parties/")) seedExtra.push(item);
+        }
+      }
+    }
+    for (const key of ["cartoonStillPath", "stillPath"] as const) {
+      const single = seed[key];
+      if (typeof single === "string" && single.startsWith("parties/")) seedExtra.push(single);
+    }
     const previews = Array.isArray(seed.previewPaths) ? seed.previewPaths.filter((p): p is string => typeof p === "string" && p.startsWith("parties/")) : [];
+    const allSeedPaths = [...previews, ...seedExtra];
     const expiry = expiryDate(seed.expiresAt);
     const liveSeed = seed.status !== "deleted" && seed.status !== "failed" && expiry !== undefined && expiry > now;
     if (liveSeed) {
-      for (const path of previews) references.add(path);
+      for (const path of allSeedPaths) references.add(path);
       continue;
     }
     if ((seed.status !== "deleted" && seed.status !== "expired") && expiry !== undefined && expiry <= now) {
@@ -194,7 +242,7 @@ export async function sweepExpiredMedia(
       }).catch(() => undefined);
     }
     if (seed.status === "deleted" || seed.status === "expired" || (expiry !== undefined && expiry <= now)) {
-      for (const path of previews) {
+      for (const path of allSeedPaths) {
         try {
           const [exists] = await bucket.file(path).exists();
           if (!exists) continue;
@@ -205,7 +253,7 @@ export async function sweepExpiredMedia(
         }
       }
     } else {
-      for (const path of previews) references.add(path);
+      for (const path of allSeedPaths) references.add(path);
     }
   }
   for (const manifestDoc of manifests.docs) {
@@ -241,8 +289,7 @@ export async function sweepExpiredMedia(
     if (expiry && expiry > now && !["expired", "purged", "failed"].includes(String(job.state))) {
       const pairParty = jobDoc.ref.parent.parent?.id ?? "";
       if (typeof jobDoc.id === "string" && jobDoc.id && pairParty) liveJobPairs.add(`${pairParty}/${jobDoc.id}`);
-      addPaths(references, job.deliveryPaths);
-      addPaths(references, job.generatedPaths);
+      addJobPaths(references, job);
       // Staged camera outputs live only in job.stagedOutputs until publish;
       // without this the orphan pass deletes a running job's clips.
       const staged = job.stagedOutputs;

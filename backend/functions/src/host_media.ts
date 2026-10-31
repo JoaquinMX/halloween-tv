@@ -12,6 +12,7 @@ import {
   parseGetHostVideoPreviewInput,
   parseListHostVideosInput,
 } from "./contracts";
+import { collectJobDerivativePaths } from "./guest_media";
 import {
   DELIVERY_URL_TTL_SECONDS,
   HOST_PREVIEW_TTL_MS,
@@ -442,10 +443,27 @@ export function createHostMediaService(options: HostMediaServiceOptions): {
       }
       const jobSnap = await jobRef(db, host.partyId, outcome.jobId).get().catch(() => undefined);
       const job = jobSnap?.exists ? jobSnap.data()! : undefined;
-      for (const key of ["deliveryPaths", "generatedPaths"] as const) {
-        const list = job?.[key];
-        if (Array.isArray(list)) {
-          for (const item of list) if (typeof item === "string" && item.startsWith("parties/")) doomedObjects.add(item);
+      if (job) {
+        // Shared collector covers delivery + generated paths, cartoon
+        // stills, intermediate outputs, and delivery objects under both
+        // current and historical field names (in addition to the staged
+        // outputs above). Accounting records are never paths and are never
+        // collected here.
+        for (const path of collectJobDerivativePaths(job as Record<string, unknown>)) doomedObjects.add(path);
+      }
+      // Seed-level still/intermediate/preview paths recorded outside the job.
+      const seedSnap = await ref.get().catch(() => undefined);
+      const seedData = seedSnap?.exists ? (seedSnap.data() as Record<string, unknown>) : undefined;
+      if (seedData) {
+        for (const key of ["stillPaths", "intermediatePaths", "previewPaths"] as const) {
+          const listed = seedData[key];
+          if (Array.isArray(listed)) {
+            for (const item of listed) if (typeof item === "string" && item.startsWith("parties/")) doomedObjects.add(item);
+          }
+        }
+        for (const key of ["cartoonStillPath", "stillPath"] as const) {
+          const single = seedData[key];
+          if (typeof single === "string" && single.startsWith("parties/")) doomedObjects.add(single);
         }
       }
     }

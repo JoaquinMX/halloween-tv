@@ -2,6 +2,12 @@
  * Safe pilot fixture seeder. It writes real playable fixture MP4 bytes only;
  * no generation provider is constructed or called.
  *
+ * Consent guarantee: this seeder NEVER creates guest consent. It writes only
+ * party/device/channel/manifest/job fixture docs plus delivery bytes. It
+ * never writes to the guestMedia collection, never records consent text or
+ * purpose, and never mints provenance. The CREATES_GUEST_CONSENT export is
+ * asserted false by the consent-migration test suite.
+ *
  * Default is a read-only preview. Cloud writes require --target=cloud,
  * --project=..., --bucket=..., and --apply, plus operator ADC/IAM.
  */
@@ -22,6 +28,18 @@ const PILOT_JOB_ID = "pilot-fixture-v1";
 const SEED_KEY = "pilot-fixture-v1";
 const RETENTION_MS = 24 * 60 * 60 * 1000;
 type Target = "emulator" | "cloud";
+
+/** This seeder never creates guest consent (asserted by tests). */
+export const CREATES_GUEST_CONSENT = false as const;
+
+/** Firestore collections this seeder may write. guestMedia is never in scope. */
+export const SEED_PILOT_WRITABLE_COLLECTIONS = [
+  "parties",
+  "devices",
+  "channels",
+  "manifests",
+  "jobs",
+] as const;
 type Fixture = { cameraId: (typeof REQUIRED_CAMERA_IDS)[number]; sha256: string; sizeBytes: number; durationMs: number; path: string };
 
 interface Options {

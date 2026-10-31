@@ -4,6 +4,12 @@
  * under `parties/{party}/devices/{code}`, and merges `role: "tv"` onto the
  * existing TV device so the host-only listPartyDevices callable accepts it.
  *
+ * Consent guarantee: device registration seeding NEVER creates guest
+ * consent. This tool writes only device docs (partyId/deviceId/label/role/
+ * status/registeredAt) — never guestMedia docs, never consent records, never
+ * provenance. The CREATES_GUEST_CONSENT export is asserted false by the
+ * consent-migration test suite.
+ *
  * Default is a read-only preview that prints the host code sheet. Writes
  * require --apply. Cloud targets require explicit --party/--channel/
  * --tv-device and refuse guessable explicit codes; omit --codes to generate
@@ -19,6 +25,9 @@ const DEFAULT_CHANNEL = "haunted_surveillance";
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 type Target = "emulator" | "cloud";
+
+/** Device registration never creates guest consent (asserted by tests). */
+export const CREATES_GUEST_CONSENT = false as const;
 
 interface Options {
   target: Target;
@@ -157,7 +166,9 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((error: unknown) => {
-  console.error(`seed_guests failed: ${error instanceof Error ? error.message : String(error)}`);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((error: unknown) => {
+    console.error(`seed_guests failed: ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  });
+}

@@ -7,7 +7,7 @@ import type { Bucket, File } from "@google-cloud/storage";
 import type { Firestore } from "firebase-admin/firestore";
 import { BackendError, HOST_SOURCE_CONSENT_PURPOSE, HOST_SOURCE_CONSENT_TEXT_VERSION } from "../src/contracts";
 import { GUEST_CONSENT_PURPOSE, GUEST_CONSENT_TEXT_VERSION, GUEST_MAX_IMAGE_BYTES } from "../src/config";
-import { assertGuestEligible } from "../src/guest_media";
+import { assertGuestEligible, collectJobDerivativePaths } from "../src/guest_media";
 import { createRuntimeServices } from "../src/runtime";
 import { FakeVideoGenerationPort } from "../src/providers/fake";
 import { sweepExpiredMedia } from "../src/retention";
@@ -762,6 +762,140 @@ test("eligibility gate accepts guest + host pairs, rejects mismatched/unknown pa
       sourceHash: "b".repeat(64), sourceSizeBytes: 100,
     });
     await assert.rejects(assertGuestEligible(db, { partyId, deviceId: "p-guest-1", channelId: "main" }, unknownId, Date.now()),
+      (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN");
+  } finally {
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+  }
+});
+
+test("derivative collector covers stills, intermediates, delivery, and previews (excludes accounting)", async () => {
+  const job = {
+    stagedOutputs: {
+      "CAM-01": { cameraId: "CAM-01", objectPath: "parties/p/channels/c/delivery/1/CAM-01.mp4", sha256: "a".repeat(64) },
+    },
+    deliveryPaths: ["parties/p/channels/c/delivery/1/CAM-02.mp4"],
+    generatedPaths: ["parties/p/channels/c/generated/x.mp4"],
+    stillPaths: ["parties/p/stills/cartoon-1.png"],
+    intermediatePaths: ["parties/p/intermediates/diffuse-1.bin"],
+    previewPaths: ["parties/p/hostPreviews/seed-1/CAM-01.mp4"],
+    cartoonStillPath: "parties/p/stills/cartoon-final.png",
+    costLogs: ["costLogs/row-1"],
+    usage: [{ ledger: true }],
+  };
+  const collected = collectJobDerivativePaths(job);
+  for (const expected of [
+    "parties/p/channels/c/delivery/1/CAM-01.mp4",
+    "parties/p/channels/c/delivery/1/CAM-02.mp4",
+    "parties/p/channels/c/generated/x.mp4",
+    "parties/p/stills/cartoon-1.png",
+    "parties/p/intermediates/diffuse-1.bin",
+    "parties/p/hostPreviews/seed-1/CAM-01.mp4",
+    "parties/p/stills/cartoon-final.png",
+  ]) {
+    assert.ok(collected.includes(expected), `${expected} must be collected for withdrawal cleanup`);
+  }
+  assert.ok(!collected.includes("costLogs/row-1"), "accounting rows must never be collected as deletable paths");
+  assert.ok(!collected.some((p) => !p.startsWith("parties/")));
+});
+
+test("withdrawal deletes stills, intermediates, delivery objects, and previews, and stays idempotent", {
+  skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
+}, async () => {
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  try {
+    await seedParty(db, partyId, "p-guest-1", "main");
+    const services = servicesFor(db, bucket);
+    const requested = await services.requestGuestUpload({
+      partyId, deviceId: "p-guest-1", channelId: "main", consent: CONSENT, contentType: "image/jpeg",
+    });
+    await bucket.file(requested.objectPath).save(await photoBytes(), { contentType: "image/jpeg" });
+    await services.completeGuestUpload({ partyId, deviceId: "p-guest-1", channelId: "main", submissionId: requested.submissionId });
+    const jobId = "job-still-lifecycle";
+    const stagedPath = `parties/${partyId}/channels/main/delivery/3/CAM-01.mp4`;
+    const deliveryPath = `parties/${partyId}/channels/main/delivery/3/CAM-02.mp4`;
+    const generatedPath = `parties/${partyId}/channels/main/generated/job-still-lifecycle.mp4`;
+    const stillPath = `parties/${partyId}/stills/cartoon-final.png`;
+    const intermediatePath = `parties/${partyId}/intermediates/diffuse-1.bin`;
+    const previewPath = `parties/${partyId}/hostPreviews/seed-still/CAM-01.mp4`;
+    for (const path of [stagedPath, deliveryPath, generatedPath, stillPath, intermediatePath, previewPath]) {
+      await bucket.file(path).save(Buffer.from(`bytes-for-${path.slice(-8)}`));
+    }
+    await db.doc(`parties/${partyId}/jobs/${jobId}`).set({
+      jobId, partyId, deviceId: "p-guest-1", channelId: "main", state: "running",
+      manifestVersion: 3, idempotencyKey: "idem-still-lifecycle",
+      guestMedia: { submissionId: requested.submissionId },
+      stagedOutputs: { "CAM-01": { cameraId: "CAM-01", objectPath: stagedPath, sha256: "a".repeat(64) } },
+      deliveryPaths: [deliveryPath],
+      generatedPaths: [generatedPath],
+      stillPaths: [stillPath],
+      intermediatePaths: [intermediatePath],
+      cartoonStillPath: stillPath,
+    });
+    await db.doc(`parties/${partyId}/seedVideos/seed-still`).set({
+      seedId: "seed-still", partyId, deviceId: "p-guest-1", channelId: "main",
+      jobId, status: "running", previewPaths: [previewPath],
+    });
+    const withdrawn = await services.withdrawGuestMedia({ partyId, deviceId: "p-guest-1", channelId: "main", submissionId: requested.submissionId });
+    assert.equal(withdrawn.status, "withdrawn");
+    for (const path of [requested.objectPath, stagedPath, deliveryPath, generatedPath, stillPath, intermediatePath, previewPath]) {
+      assert.ok(withdrawn.deletedObjects.includes(path), `${path} must be reported deleted at withdrawal`);
+      assert.equal((await bucket.file(path).exists())[0], false, `${path} must be absent after withdrawal`);
+    }
+    // Repeated withdrawal after the race is idempotent and never resurrects.
+    const repeated = await services.withdrawGuestMedia({ partyId, deviceId: "p-guest-1", channelId: "main", submissionId: requested.submissionId });
+    assert.equal(repeated.status, "withdrawn");
+    const tombstone = (await db.doc(`parties/${partyId}/guestMedia/${requested.submissionId}`).get()).data()!;
+    assert.equal(tombstone.status, "withdrawn");
+    assert.equal(tombstone.tombstone, true);
+  } finally {
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+  }
+});
+
+test("late results after mid-stage withdrawal are cleaned by repeated sweeps", {
+  skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
+}, async () => {
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  try {
+    await seedParty(db, partyId, "p-guest-1", "main");
+    const services = servicesFor(db, bucket);
+    const requested = await services.requestGuestUpload({
+      partyId, deviceId: "p-guest-1", channelId: "main", consent: CONSENT, contentType: "image/jpeg",
+    });
+    await bucket.file(requested.objectPath).save(await photoBytes(), { contentType: "image/jpeg" });
+    await services.completeGuestUpload({ partyId, deviceId: "p-guest-1", channelId: "main", submissionId: requested.submissionId });
+    const jobId = "job-late-result";
+    const lateStill = `parties/${partyId}/stills/late-cartoon.png`;
+    await db.doc(`parties/${partyId}/jobs/${jobId}`).set({
+      jobId, partyId, deviceId: "p-guest-1", channelId: "main", state: "running",
+      manifestVersion: 1, idempotencyKey: "idem-late-result",
+      guestMedia: { submissionId: requested.submissionId },
+      stillPaths: [lateStill],
+    });
+    // Withdrawal lands mid-stage (both provider stages pending): the still is
+    // collected even though its bytes have not arrived yet.
+    const withdrawn = await services.withdrawGuestMedia({ partyId, deviceId: "p-guest-1", channelId: "main", submissionId: requested.submissionId });
+    assert.ok(withdrawn.deletedObjects.includes(requested.objectPath));
+    // A late worker result lands after withdrawal (the race): bytes appear at
+    // a path recorded in pendingDeletions or the withdrawn source binding.
+    await bucket.file(lateStill).save(Buffer.from("late-still-bytes"));
+    assert.equal((await bucket.file(lateStill).exists())[0], true);
+    const first = await sweepExpiredMedia(db, bucket, new Date());
+    assert.equal((await bucket.file(lateStill).exists())[0], false, "late still must be cleaned on the first sweep");
+    assert.ok(first.deletedOrphanObjects >= 1);
+    // Repeat the sweep: cleanup is stable and the tombstone never flips.
+    await bucket.file(lateStill).save(Buffer.from("late-still-bytes-again"));
+    const second = await sweepExpiredMedia(db, bucket, new Date());
+    assert.equal((await bucket.file(lateStill).exists())[0], false, "repeated cleanup must stay effective");
+    assert.ok(second.deletedOrphanObjects >= 1);
+    const tombstone = (await db.doc(`parties/${partyId}/guestMedia/${requested.submissionId}`).get()).data()!;
+    assert.equal(tombstone.status, "withdrawn");
+    assert.equal(tombstone.tombstone, true);
+    await assert.rejects(services.completeGuestUpload({ partyId, deviceId: "p-guest-1", channelId: "main", submissionId: requested.submissionId }),
       (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN");
   } finally {
     await clearParty(db, bucket, partyId);

@@ -3,6 +3,12 @@ import { BackendError, Identity, isSupportedConsent } from "./contracts";
 import {
   GUEST_CONSENT_TEXT_VERSION,
 } from "./config";
+import {
+  GUEST_MOBILE_PURPOSE,
+  HOST_SOURCE_PURPOSE,
+  ProvenanceRecord,
+  provenanceFromGuestMediaDoc,
+} from "./consent_provenance";
 
 export const GUEST_MEDIA_COLLECTION = "guestMedia";
 
@@ -119,3 +125,65 @@ export async function readGuestMediaDoc(
   if (!snapshot.exists) return undefined;
   return snapshot.data() as GuestMediaDoc;
 }
+
+/**
+ * Derives versioned guest_mobile provenance from a server-read guestMedia
+ * document. Pure read of recorded evidence: returns undefined when the doc
+ * carries no accepted supported consent (never fabricates acceptance).
+ * Usable with transaction-snapshot reads from p2/p4 paths.
+ */
+export function guestProvenanceFromDoc(
+  doc: GuestMediaDoc,
+  evidenceSource = "server:guest_upload",
+): ProvenanceRecord | undefined {
+  const recordedAt = typeof doc.consent?.acceptedAt === "string" && Number.isFinite(Date.parse(doc.consent.acceptedAt))
+    ? doc.consent.acceptedAt
+    : new Date().toISOString();
+  return provenanceFromGuestMediaDoc(doc as unknown as Record<string, unknown>, evidenceSource, recordedAt);
+}
+
+/**
+ * Derivative object paths attributable to a generation job. Covers staged
+ * camera outputs, delivery + generated paths, cartoon stills, intermediate
+ * outputs, and delivery objects recorded under current or historical field
+ * names. Audit/accounting fields (costLogs, usage rows) are never paths and
+ * are never included. Shared catalog references are NOT resolved here; the
+ * retention sweeper protects objects still referenced by live seeds/jobs.
+ */
+export function collectJobDerivativePaths(job: Record<string, unknown>): string[] {
+  const paths = new Set<string>();
+  const addList = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        if (typeof item === "string" && item.startsWith("parties/")) paths.add(item);
+      }
+    }
+  };
+  for (const key of [
+    "deliveryPaths",
+    "generatedPaths",
+    "stillPaths",
+    "intermediatePaths",
+    "previewPaths",
+    "deliveryObjects",
+    "stagedPaths",
+  ] as const) {
+    addList(job[key]);
+  }
+  for (const key of ["cartoonStillPath", "stillPath", "intermediatePath"] as const) {
+    const single = job[key];
+    if (typeof single === "string" && single.startsWith("parties/")) paths.add(single);
+  }
+  const staged = job.stagedOutputs;
+  if (staged && typeof staged === "object") {
+    for (const clip of Object.values(staged as Record<string, unknown>)) {
+      if (clip && typeof clip === "object" && typeof (clip as Record<string, unknown>).objectPath === "string") {
+        const path = (clip as Record<string, unknown>).objectPath as string;
+        if (path.startsWith("parties/")) paths.add(path);
+      }
+    }
+  }
+  return [...paths];
+}
+
+export { GUEST_MOBILE_PURPOSE, HOST_SOURCE_PURPOSE };
