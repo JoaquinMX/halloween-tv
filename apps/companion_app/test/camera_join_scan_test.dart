@@ -651,6 +651,48 @@ void main() {
     },
   );
 
+  testWidgets(
+    'stale ancestor context without a Navigator falls back instead of crashing',
+    (tester) async {
+      // Regression: _pushScanner caught only Exception, but Navigator.of
+      // throws FlutterError (an Error) when no Navigator is in scope — e.g.
+      // a stale ancestor context captured above MaterialApp. The scan must
+      // fall back to type-or-paste instead of crashing.
+      BuildContext? stale;
+      await tester.pumpWidget(
+        Builder(
+          builder: (BuildContext context) {
+            stale = context;
+            return const SizedBox();
+          },
+        ),
+      );
+      expect(stale, isNotNull);
+      final scanner = CameraJoinPayloadScanner(
+        permissions: _FakePermissions(
+          checkResult: CameraPermissionState.granted,
+        ),
+      );
+      final result = await scanner.scan(stale);
+      expect(result, isA<JoinPayloadUnavailable>());
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  test(
+    'legacy supplier throwing FlutterError falls back instead of crashing',
+    () async {
+      final scanner = CameraJoinPayloadScanner(
+        contextOf: () => throw FlutterError('stale element'),
+        permissions: _FakePermissions(
+          checkResult: CameraPermissionState.granted,
+        ),
+      );
+      final result = await scanner.scan();
+      expect(result, isA<JoinPayloadUnavailable>());
+    },
+  );
+
   group('shipped CompanionApp hierarchy', () {
     const MethodChannel permissionChannel = MethodChannel(
       'flutter.baseflow.com/permissions/methods',
