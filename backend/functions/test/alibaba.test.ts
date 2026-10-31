@@ -4,6 +4,8 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import test from "node:test";
 import { AlibabaSubmissionError, AlibabaVideoGenerationPort, buildAlibabaSubmitBody } from "../src/providers/alibaba";
+import { AlibabaImageGenerationPort, buildAlibabaImageSubmitBody, cartoonStillSeed } from "../src/providers/alibaba_image";
+import type { CartoonStillRequest } from "../src/image_generation_port";
 import { buildCameoDemoRequest, buildCheapDemoRequest } from "../src/video_generation_port";
 import { CAMEO_DEMO_PRESET, CAMEO_DEMO_PROMPT } from "../src/config";
 
@@ -230,6 +232,123 @@ test("resolved reference serializes to the fetchable https URL form (no network)
   assert.ok(!("objectPath" in wire));
 });
 
+test("cartoon still seed is constrained to signed int32 (live 400 regression, no network)", () => {
+  // Live qwen-image-3.0-pro submit returned HTTP 400 InvalidParameter for a
+  // seed of 3399556814 (> 2147483647): the Token Plan image route expects a
+  // signed 32-bit seed. Zero provider network: pure offline derivation.
+  const INT32_MAX = 2147483647;
+  const MOD = 2147483648;
+  // The exact previously-failing raw material now maps in-range.
+  assert.equal(3399556814 % MOD, 1252073166);
+  assert.ok(1252073166 >= 0 && 1252073166 <= INT32_MAX);
+  // Known-good seed stays byte-identical (modulo is a no-op below 2**31).
+  assert.equal(30102026 % MOD, 30102026);
+  // Pinned fixture key is below the boundary: its seed is unchanged.
+  assert.equal(cartoonStillSeed("job-cartoon-1:still:attic-computer-corner:cramped-stumble-chase"), 311071940);
+  // Determinism: same key -> same seed.
+  const key = "job-cartoon-1:still:attic-computer-corner:cramped-stumble-chase";
+  assert.equal(cartoonStillSeed(key), cartoonStillSeed(key));
+  // Independent re-derivation (not the function under test): seed must equal
+  // raw-8-hex mod 2**31 for a sweep of live-shaped keys, always in-range.
+  for (let i = 0; i < 50; i += 1) {
+    const candidate = `job-cartoon-${i}:still:attic-computer-corner:cramped-stumble-chase`;
+    const raw = Number.parseInt(createHash("sha256").update(candidate).digest("hex").slice(0, 8), 16);
+    const seed = cartoonStillSeed(candidate);
+    assert.equal(seed, raw % MOD);
+    assert.ok(Number.isSafeInteger(seed) && seed >= 0 && seed <= INT32_MAX, `seed out of range for ${candidate}`);
+  }
+  // At least one swept key has a raw value above INT32_MAX (proves the sweep
+  // exercises the previously-rejected region rather than passing vacuously).
+  const raws = Array.from({ length: 50 }, (_, i) =>
+    Number.parseInt(createHash("sha256").update(`job-cartoon-${i}:still:attic-computer-corner:cramped-stumble-chase`).digest("hex").slice(0, 8), 16));
+  assert.ok(raws.some((raw) => raw > INT32_MAX), "sweep must cover raw values above signed int32");
+});
+
+function tinyCartoonStillRequest(idempotencyKey: string): CartoonStillRequest {
+  const subjectBytes = new Uint8Array([1, 2, 3, 4]);
+  const styleBytes = new Uint8Array([5, 6, 7, 8]);
+  return {
+    jobId: "job-cartoon-1",
+    idempotencyKey,
+    prompt: "test still prompt",
+    negativePrompt: "test negative",
+    modelId: "qwen-image-3.0-pro",
+    region: "singapore",
+    references: [
+      { role: "subject_identity", bytes: subjectBytes, sha256: createHash("sha256").update(subjectBytes).digest("hex"), contentType: "image/jpeg" },
+      { role: "style_scene", bytes: styleBytes, sha256: createHash("sha256").update(styleBytes).digest("hex"), contentType: "image/jpeg" },
+    ],
+  };
+}
+
+test("cartoon still body keeps the verified wire shape with an in-range seed (no network)", () => {
+  // Zero provider network requests: pure offline serialization. The wire
+  // shape is byte-for-byte the verified sync multimodal form; only the seed
+  // derivation changed (modulo 2**31).
+  const body = buildAlibabaImageSubmitBody(tinyCartoonStillRequest("job-cartoon-1:still:attic-computer-corner:cramped-stumble-chase"));
+  assert.equal(body.model, "qwen-image-3.0-pro");
+  const messages = (body.input as { messages: Array<{ role: string; content: Array<Record<string, string>> }> }).messages;
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].role, "user");
+  assert.equal(messages[0].content.length, 3);
+  assert.match(String(messages[0].content[0].image), /^data:image\/jpeg;base64,/);
+  assert.match(String(messages[0].content[1].image), /^data:image\/jpeg;base64,/);
+  assert.equal(messages[0].content[2].text, "test still prompt");
+  const parameters = body.parameters as Record<string, unknown>;
+  assert.equal(parameters.size, "1024*768");
+  assert.equal(parameters.n, 1);
+  assert.equal(parameters.seed, 311071940);
+  assert.ok(typeof parameters.seed === "number" && (parameters.seed as number) >= 0 && (parameters.seed as number) <= 2147483647);
+  assert.equal(parameters.prompt_extend, false);
+  assert.equal(parameters.enable_thinking, false);
+  assert.equal(parameters.watermark, false);
+  assert.equal(parameters.negative_prompt, "test negative");
+  // Schema parity with the pinned verified fixture (same keys, same flags).
+  const fixture = JSON.parse(readFileSync(resolve("test/fixtures/alibaba_cartoon_still_request.json"), "utf8")) as {
+    body: { model: string; input: Record<string, unknown>; parameters: Record<string, unknown> };
+  };
+  assert.equal(fixture.body.model, body.model);
+  assert.deepEqual(Object.keys(fixture.body.parameters).sort(), Object.keys(parameters).sort());
+  assert.equal(fixture.body.parameters.size, parameters.size);
+  assert.equal(fixture.body.parameters.n, parameters.n);
+  assert.equal(fixture.body.parameters.prompt_extend, parameters.prompt_extend);
+  assert.equal(fixture.body.parameters.enable_thinking, parameters.enable_thinking);
+  assert.equal(fixture.body.parameters.watermark, parameters.watermark);
+  assert.ok(typeof fixture.body.parameters.seed === "number" && (fixture.body.parameters.seed as number) >= 0 && (fixture.body.parameters.seed as number) <= 2147483647);
+});
+
+test("image submit failure surfaces the sanitized provider message detail (no network)", async () => {
+  // Zero provider network requests: stubbed transport replays a 400 with a
+  // code plus a message carrying a URL and a token; both must be redacted
+  // while the human-readable detail survives for diagnosis.
+  const failing = new AlibabaImageGenerationPort({
+    apiKey: "fixture-key",
+    workspaceId: "workspace",
+    fetchImpl: async () => new Response(JSON.stringify({
+      code: "InvalidParameter",
+      message: "Parameter seed out of range, see https://provider.invalid/docs and Bearer secret-token",
+    }), { status: 400 }),
+  });
+  await assert.rejects(failing.submit(tinyCartoonStillRequest("job-cartoon-1:still:attic-computer-corner:cramped-stumble-chase")), (error: unknown) => {
+    assert.ok(error instanceof AlibabaSubmissionError);
+    assert.equal(error.certainty, "non_billable");
+    assert.equal(error.retryable, false);
+    assert.ok(error.message.includes("InvalidParameter"), "code must survive for diagnosis");
+    assert.ok(error.message.includes("Parameter seed out of range"), "message detail must survive for diagnosis");
+    assert.ok(!error.message.includes("https://provider.invalid/docs"), "URLs must stay redacted");
+    assert.ok(!error.message.includes("secret-token"), "tokens must stay redacted");
+    assert.ok(!error.message.includes("fixture-key"), "API key must never leak into errors");
+    return true;
+  });
+  // Ambiguous failures stay unknown without leaking anything.
+  const flaky = new AlibabaImageGenerationPort({
+    apiKey: "fixture-key",
+    workspaceId: "workspace",
+    fetchImpl: async () => new Response(JSON.stringify({ code: "Throttling", message: "slow down" }), { status: 429 }),
+  });
+  await assert.rejects(flaky.submit(tinyCartoonStillRequest("job-cartoon-1:still:attic-computer-corner:cramped-stumble-chase")), (error: unknown) =>
+    error instanceof AlibabaSubmissionError && error.certainty === "unknown" && error.retryable === false);
+});
 test("polled FAILED surfaces the provider code/message and redacts URLs (no network)", async () => {
   // Zero provider network requests: stubbed transport replays a FAILED poll.
   const failedBody = {
