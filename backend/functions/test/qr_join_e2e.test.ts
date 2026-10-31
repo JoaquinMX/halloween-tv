@@ -97,6 +97,20 @@ test("qr join end-to-end: PIN-gated self-registration, TV listing, legacy manife
     await db.doc(`parties/${partyId}/devices/${tvDevice}`).set({ partyId, deviceId: tvDevice, label: "TV", role: "tv", status: "active" });
     const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
     const cameras = ["CAM-01", "CAM-02", "CAM-03", "CAM-04"] as const;
+    // Server-minted legacy seed authorization for the seeded wall manifest:
+    // the manifest cites job "seed-job" whose authorization lives in the
+    // seed catalog (written here through the server-side seed path, never
+    // fabricated mobile consent). The delivery gate resolves the implied
+    // legacy binding from this entry.
+    await db.doc(`parties/${partyId}/seedVideos/seed-legacy-wall`).set({
+      seedId: "seed-legacy-wall",
+      partyId,
+      channelId: CHANNEL,
+      jobId: "seed-job",
+      status: "ready",
+      operatorApproved: true,
+      expiresAt,
+    });
     await db.doc(`parties/${partyId}/manifests/current_${CHANNEL}`).set({
       partyId,
       channelId: CHANNEL,

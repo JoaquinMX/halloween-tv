@@ -226,11 +226,15 @@ export function canDeliverSeedArtifact(record: ProvenanceRecord | undefined, sco
 
 /**
  * Generation gate: may NEW portrait-derived media be generated?
- * ONLY guest_mobile provenance ever returns true, and only with the full
- * server-verified binding (supported consent namespace, matching scope +
- * device, verified source hash, live grant). Budget flags, existing jobs,
- * host role alone, and legacy markers are accepted as ambient input and
- * EXPLICITLY IGNORED — they never grant generation.
+ * The server-verified consented-portrait origins ever return true — ONLY
+ * guest_mobile (guest-submitted photos) and host_source (host-submitted
+ * source photos) — and only with the full server-verified binding
+ * (supported consent namespace, matching scope + device, verified source
+ * hash, live grant). Approval/delivery origins (legacy_seed,
+ * operator_approval, host_approval) never grant generation: host role alone
+ * is not a portrait grant. Budget flags, existing jobs, and legacy markers
+ * are accepted as ambient input and EXPLICITLY IGNORED — they never grant
+ * generation.
  * Pure function over plain data for transaction-snapshot use by p2/p4.
  * Fail-closed boolean: malformed records return false (never throw).
  */
@@ -245,13 +249,15 @@ export function canGenerateFromPortrait(
   } catch {
     return false;
   }
-  if (record.origin !== "guest_mobile") return false;
-  if (!scopeMatches(record, scope)) return false;
-  if (expiredOrWithdrawn(record, scope.nowMs)) return false;
-  // Consent namespace: exactly the preserved pairs, never mixed, never unknown.
+  if (record.origin !== "guest_mobile" && record.origin !== "host_source") return false;
+  // Consent namespace: exactly one preserved pair, never mixed, never unknown.
+  // Role/pair consistency: guest pair requires guest actor, host pair a host actor.
   const hasGuestPair = record.purposes.includes(GUEST_MOBILE_PURPOSE);
   const hasHostPair = record.purposes.includes(HOST_SOURCE_PURPOSE);
   if (hasGuestPair === hasHostPair) return false;
+  if (!scopeMatches(record, scope)) return false;
+  if (expiredOrWithdrawn(record, scope.nowMs)) return false;
+  // Consent namespace: exactly the preserved pairs, never mixed, never unknown.
   // Role/pair consistency: guest pair requires guest actor, host pair a host actor.
   if (hasGuestPair && record.actorRole !== "guest") return false;
   if (hasHostPair && record.actorRole !== "host") return false;

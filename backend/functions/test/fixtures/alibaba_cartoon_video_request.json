@@ -3,7 +3,7 @@
     "jobId": "job-cartoon-1",
     "idempotencyKey": "idem-cartoon-1:cartoon-video:CAM-01",
     "cameraId": "CAM-01",
-    "prompt": "Animate the supplied illustrated first frame with tiny natural motion only. 0-1s: guest sprints left-to-right through a tight room with exaggerated cartoon strides while a goofy monster reaches from behind. 1-2s: guest trips over a rug/cable/plush (prop from the scenario, never a new object), arms windmill, monster overshoots and face-plants. 2s: both scramble and burst through the room doorway offscreen. One continuous side-tracking shot; both characters visible throughout. Locked camera, no cuts, preserve the illustrated character identity and scene.",
+    "prompt": "Animate the supplied illustrated first frame. 0-1s: guest sprints left-to-right through a tight room with exaggerated cartoon strides while a goofy monster reaches from behind. 1-2s: guest trips over a rug/cable/plush (prop from the scenario, never a new object), arms windmill, monster overshoots and face-plants. 2s: both scramble and burst through the room doorway offscreen. One continuous side-tracking shot; both characters visible throughout. Preserve the illustrated character identity and scene.",
     "presetId": "cheap_demo",
     "modelId": "wan3.0-video",
     "region": "singapore",
@@ -14,15 +14,20 @@
     "outputs": 1,
     "autoUpscale": false,
     "firstFrame": {
-      "url": "https://signed.invalid/cartoon-still.png",
-      "sha256": "b9c73ef7ecc72fbf0e5d049c3e76e2f5060328dad09f49714e5c534c42600505"
+      "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGJgAQAAAP//AwAABgAFV7+r1AAAAABJRU5ErkJggg==",
+      "sha256": "f8b9599fb418b563e2882fe3d64a8a6324ae835d0ad85e95783f95e781514a66"
     }
   },
   "body": {
     "model": "wan3.0-video",
     "input": {
-      "prompt": "Animate the supplied illustrated first frame with tiny natural motion only. 0-1s: guest sprints left-to-right through a tight room with exaggerated cartoon strides while a goofy monster reaches from behind. 1-2s: guest trips over a rug/cable/plush (prop from the scenario, never a new object), arms windmill, monster overshoots and face-plants. 2s: both scramble and burst through the room doorway offscreen. One continuous side-tracking shot; both characters visible throughout. Locked camera, no cuts, preserve the illustrated character identity and scene. Locked camera, no cuts.",
-      "first_frame": "https://signed.invalid/cartoon-still.png"
+      "prompt": "Animate the supplied illustrated first frame. 0-1s: guest sprints left-to-right through a tight room with exaggerated cartoon strides while a goofy monster reaches from behind. 1-2s: guest trips over a rug/cable/plush (prop from the scenario, never a new object), arms windmill, monster overshoots and face-plants. 2s: both scramble and burst through the room doorway offscreen. One continuous side-tracking shot; both characters visible throughout. Preserve the illustrated character identity and scene.",
+      "media": [
+        {
+          "type": "first_frame",
+          "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGJgAQAAAP//AwAABgAFV7+r1AAAAABJRU5ErkJggg=="
+        }
+      ]
     },
     "parameters": {
       "resolution": "480P",

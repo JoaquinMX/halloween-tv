@@ -1,30 +1,38 @@
 /**
- * Cartoon catalog sample-batch planner (cycle-13, preview-only).
+ * Cartoon catalog few-case batch preview (cycle-13 fix-3, preview-only).
  *
- * Builds a concrete owner-reviewable proposed sample batch covering all 16
- * image-backed scenarios WITHOUT submitting any live request or applying any
- * cloud migration:
+ * Emits a 3-case preview of 3 DISTINCT scenario+situation pairs for owner
+ * review. Each case carries the scenario id/version, situation id/version,
+ * selection seed, BOTH repo-relative reference paths, the EXACT composed
+ * still prompt + video prompt, model pins, and the owner max-credit gate.
  *
- *   - one consent-bound portrait per row (guest/operator/host portrait
- *     submission cited, never fabricated mobile consent);
- *   - fixed plan IDs / versions / seeds per scenario;
- *   - 16 still submissions (qwen-image-3.0-pro, Alibaba Singapore) plus
- *     16 two-second video submissions (wan3.0-video STANDARD, 2s/480P/
- *     silent/no-watermark/prompt_extend false): 32 generated video seconds;
- *   - 48 non-billable fixture slots (3 per video row, truthful fixture
- *     provenance, null task ID, null charge);
- *   - separate stage budget inputs (still stage + video stage) and a
- *     mandatory owner-supplied maximum credit allowance; Token Plan prices
- *     are never invented (no per-model price is stated here).
+ * Reference paths (both repo-relative, both on disk):
+ * - style_scene: the image-backed catalog reference
+ *   (assets/scenario_refs/..., sha256/sizeBytes pinned in
+ *   scenario_catalog.v1.json and re-verified here);
+ * - subject_identity: the committed byte-shape stand-in
+ *   test/fixtures/guest_photo.jpg, used ONLY to prove the still-stage byte
+ *   shape offline. It is never a real portrait: real batches use consented
+ *   ingest portraits, and private portrait bytes stay out of review
+ *   documents.
  *
  * Spend safety: this tool has NO live path. It never constructs a provider,
  * never signs reference URLs, never writes Firestore/Storage, and exits
  * nonzero unless `--max-credits` (owner-supplied ceiling) is present.
+ * Credits stay UNKNOWN (null): Token Plan prices are never invented.
  */
-import { writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join, resolve, sep } from "node:path";
 import { CARTOON_CATALOG_SCENARIOS, CARTOON_STILL_PRESET, CARTOON_VIDEO_PRESET } from "../src/contracts";
-import { loadValidatedCatalogs, resolveFunctionsRoot } from "../src/scenario_catalog";
+import { composeCartoonPromptsFromPair } from "../src/cartoon_prompts";
+import {
+  getScenario,
+  getSituation,
+  loadValidatedCatalogs,
+  readScenarioReferenceBytes,
+  resolveFunctionsRoot,
+  selectScenarioSituation,
+} from "../src/scenario_catalog";
 
 function argument(name: string): string | undefined {
   const prefix = `--${name}=`;
@@ -42,6 +50,20 @@ function requireId(label: string, value: string | undefined): string {
   return value;
 }
 
+/** Repo-relative guard: preview artifacts must stay inside the checkout. */
+function requireRepoRelative(functionsRoot: string, path: string, label: string): string {
+  const normalized = path.replace(/\\/g, "/");
+  if (normalized.startsWith("/") || normalized.startsWith("~") || /^[A-Za-z]:/.test(normalized) || normalized.includes("..")) {
+    fail(`${label} must be a repo-relative path (found ${JSON.stringify(path)}).`);
+  }
+  const absolute = resolve(functionsRoot, normalized);
+  if (absolute !== resolve(functionsRoot) && !absolute.startsWith(`${resolve(functionsRoot)}${sep}`)) {
+    fail(`${label} escapes the functions root (found ${JSON.stringify(path)}).`);
+  }
+  if (!existsSync(absolute)) fail(`${label} is missing on disk: ${path}.`);
+  return normalized;
+}
+
 async function main(): Promise<void> {
   const party = requireId("party", argument("party") ?? process.env.PARTY_ID);
   const device = requireId("device", argument("device") ?? process.env.DEVICE_ID);
@@ -57,47 +79,74 @@ async function main(): Promise<void> {
   if (process.argv.includes("--live") || process.argv.includes("--apply") || process.argv.includes("--confirm-budget-guard")) {
     fail("prepare_cartoon_batch is preview-only: it never submits live requests; remove --live/--apply/--confirm-budget-guard.");
   }
-  const portraitPrefix = argument("portrait-prefix") ?? "gsub-cartoon-portrait";
 
-  // Identity linkage: planner slots cross-check the real image-backed
-  // catalog records (record ids, versions, reference digests) so the 16
-  // rows are bound to hashed catalog bytes, not synthetic slot ids.
+  // Identity linkage: planner rows bind real validated catalog records, so
+  // the 3 cases resolve to hashed catalog bytes, never synthetic slot ids.
   const functionsRoot = resolveFunctionsRoot(resolve(__dirname, "../src"));
-  const { catalog } = loadValidatedCatalogs(functionsRoot);
+  const { catalog, situations } = loadValidatedCatalogs(functionsRoot);
   if (catalog.records.length !== CARTOON_CATALOG_SCENARIOS.length) {
     fail(`Catalog record count (${catalog.records.length}) does not match planner slots (${CARTOON_CATALOG_SCENARIOS.length}).`);
   }
-  const rows = CARTOON_CATALOG_SCENARIOS.map((scenario, index) => {
-    const record = catalog.records[index];
-    if (!record) fail(`Catalog record is missing for planner slot ${scenario.scenarioId}.`);
-    const portraitSubmissionId = `${portraitPrefix}-${scenario.scenarioId}`;
-    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(portraitSubmissionId)) {
-      fail(`Derived portrait submission ID is invalid for ${scenario.scenarioId}.`);
-    }
+
+  // Deterministic few-case selection: fixed selection seeds pick 3 DISTINCT
+  // scenario+situation pairs (seeded, reproducible, owner-reviewable).
+  const selectionSeeds = ["cartoon-batch-case-1", "cartoon-batch-case-2", "cartoon-batch-case-3"];
+  const picked: Array<{ scenarioId: string; situationId: string; seed: string }> = [];
+  for (const seed of selectionSeeds) {
+    const { buildAutoCartoonPlan } = await import("../src/cartoon_pipeline");
+    const plan = buildAutoCartoonPlan({ submissionId: seed, catalog, situations });
+    picked.push({ scenarioId: plan.scenarioId, situationId: plan.situationId, seed });
+  }
+  const pairs = new Set(picked.map((entry) => `${entry.scenarioId}:${entry.situationId}`));
+  if (pairs.size !== picked.length) {
+    fail("Batch selection collided: the 3 preview cases must be DISTINCT scenario+situation pairs.");
+  }
+
+  const subjectStandInRepoPath = requireRepoRelative(functionsRoot, join("test", "fixtures", "guest_photo.jpg"), "subject_identity stand-in");
+
+  const rows = picked.map(({ scenarioId, situationId, seed }, index) => {
+    const { scenario, situation } = selectScenarioSituation(catalog, situations, scenarioId, situationId);
+    // Hash-verified style reference: readScenarioReferenceBytes rejects
+    // missing/altered files before the row is emitted.
+    readScenarioReferenceBytes(scenario, functionsRoot);
+    const scenarioRecord = getScenario(catalog, scenarioId);
+    const situationEvent = getSituation(situations, situationId);
+    const prompts = composeCartoonPromptsFromPair(scenario, situation);
+    // Fixed slot for the chosen scenario: the planner slot follows the
+    // catalog record order, exactly as the server auto-select persists it.
+    const scenarioIndex = catalog.records.findIndex((record) => record.id === scenarioId);
+    const slot = CARTOON_CATALOG_SCENARIOS[scenarioIndex % CARTOON_CATALOG_SCENARIOS.length];
     return {
-      scenarioId: scenario.scenarioId,
-      catalogRecordId: record.id,
-      catalogRecordVersion: catalog.version,
-      catalogReference: { sourceFilename: record.sourceFilename, sha256: record.sha256, sizeBytes: record.sizeBytes },
-      portrait: {
-        submissionId: portraitSubmissionId,
-        binding: "consent-bound (guest v1/guest_cameo or host host_source_v1/host_source; verified at request/worker/publication)",
-        note: "Portrait bytes stay in the consented ingest prefix; only objectPath+hash+consentRevision travel with the job.",
+      case: index + 1,
+      selectionSeed: seed,
+      scenario: { id: scenarioRecord.id, version: scenarioRecord.version },
+      situation: { id: situationEvent.id, version: situationEvent.version },
+      referencePaths: {
+        // Still -> video role ordering preserved: the generated still becomes
+        // the video first_frame; the still stage itself takes subject_identity
+        // (portrait) + style_scene (catalog reference).
+        subjectIdentity: subjectStandInRepoPath,
+        subjectIdentityNote: "byte-shape stand-in only (committed fixture); real batches use consented ingest portraits, never review documents",
+        styleScene: scenarioRecord.referencePath,
       },
+      catalogReference: { sourceFilename: scenarioRecord.sourceFilename, sha256: scenarioRecord.sha256, sizeBytes: scenarioRecord.sizeBytes },
+      stillPrompt: prompts.still,
+      videoPrompt: prompts.motion,
+      negativePrompt: prompts.negative,
       still: {
-        planId: scenario.stillPlanId,
-        version: scenario.version,
-        seed: scenario.seed,
+        planId: slot.stillPlanId,
+        version: slot.version,
+        seed: slot.seed,
         modelId: CARTOON_STILL_PRESET.modelId,
         region: CARTOON_STILL_PRESET.region,
         provider: CARTOON_STILL_PRESET.provider,
-        inputs: "separately identified portrait reference + scene/style reference",
+        inputs: "separately identified portrait reference + scene/style reference (in-process data URIs, no hosting)",
         submissions: 1,
       },
       video: {
-        planId: scenario.videoPlanId,
-        version: scenario.version,
-        seed: scenario.seed,
+        planId: slot.videoPlanId,
+        version: slot.version,
+        seed: slot.seed,
         modelId: CARTOON_VIDEO_PRESET.modelId,
         region: CARTOON_VIDEO_PRESET.region,
         resolution: CARTOON_VIDEO_PRESET.resolution,
@@ -121,22 +170,23 @@ async function main(): Promise<void> {
         profile: "H.264/yuv420p/24fps/854x480/2s",
       },
       budgetInputs: {
-        stillStage: { planId: scenario.stillPlanId, modelId: CARTOON_STILL_PRESET.modelId, submissions: 1 },
+        stillStage: { planId: slot.stillPlanId, modelId: CARTOON_STILL_PRESET.modelId, submissions: 1, creditsCharged: null },
         videoStage: {
-          planId: scenario.videoPlanId,
+          planId: slot.videoPlanId,
           modelId: CARTOON_VIDEO_PRESET.modelId,
           submissions: 1,
           secondsOut: 2,
+          creditsCharged: null,
         },
         fixtureSlots: 3,
         ownerMaxCredits: maxCredits,
-        priceNote: "Token Plan prices are not stated here; only realized console Credits are billable truth.",
+        priceNote: "Token Plan prices are not stated here; Credits stay UNKNOWN until the provider reports realized charges. Only realized console Credits are billable truth.",
       },
     };
   });
 
   const plan = {
-    mode: "cartoon-sample-batch",
+    mode: "cartoon-few-case-batch",
     preview: true,
     writes: false,
     liveSubmits: 0,
@@ -145,11 +195,11 @@ async function main(): Promise<void> {
     partyId: party,
     deviceId: device,
     channelId: channel,
-    scenarios: 16,
-    stillSubmissions: 16,
-    videoSubmissions: 16,
-    generatedVideoSeconds: 32,
-    nonBillableFixtureSlots: 48,
+    cases: 3,
+    stillSubmissions: 3,
+    videoSubmissions: 3,
+    generatedVideoSeconds: 6,
+    nonBillableFixtureSlots: 9,
     stillModel: `${CARTOON_STILL_PRESET.modelId} (${CARTOON_STILL_PRESET.region})`,
     videoModel: `${CARTOON_VIDEO_PRESET.modelId} (${CARTOON_VIDEO_PRESET.region}, ${CARTOON_VIDEO_PRESET.videoControl})`,
     videoControls: "2s/480P/silent/no-watermark/prompt_extend false",

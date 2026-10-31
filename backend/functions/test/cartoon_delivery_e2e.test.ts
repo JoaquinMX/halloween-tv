@@ -271,8 +271,6 @@ test("cartoon e2e via prod generation path: real still bytes, publishManifest, t
   const partyId = randomPartyId();
   const deviceId = "tv-cartoon-prod";
   const channelId = "main";
-  const jobId = "job-cartoon-prod";
-  const idempotencyKey = "idem-cartoon-prod";
   const expiry = new Date(Date.now() + 60 * 60 * 1000).toISOString();
   try {
     await seedParty(db, partyId, deviceId, channelId);
@@ -288,8 +286,10 @@ test("cartoon e2e via prod generation path: real still bytes, publishManifest, t
     await bucket.file(requested.objectPath).save(photoBytes, { contentType: "image/jpeg" });
     await guestUpload.completeGuestUpload({ partyId, deviceId, channelId, submissionId: requested.submissionId });
     // Prod path with the offline fake ports (rehearsal-marked so the fixture
-    // still is publishable as an offline rehearsal artifact): the chain and
-    // the still object come from the pipeline, never hand-written.
+    // still is publishable as an offline rehearsal artifact): the plan is
+    // server-assigned at job setup (seeded auto-select — the client never
+    // supplies it), the chain and the still object come from the pipeline,
+    // never hand-written.
     const generation = createGenerationServices({
       db, bucket,
       provider: new FakeVideoGenerationPort(ASSETS),
@@ -298,23 +298,25 @@ test("cartoon e2e via prod generation path: real still bytes, publishManifest, t
       sleep: async () => undefined,
       fixtureDirectory: ASSETS,
       signReferenceUrl: async () => "https://signed.invalid/cartoon-portrait.jpg",
-      signStillUrl: async () => "https://signed.invalid/cartoon-still.png",
     });
-    const request = await generation.requestGeneration({
-      partyId, deviceId, channelId, jobId, idempotencyKey, presetId: "cheap_demo",
-      rehearsalOnly: true,
-      cartoonPlan: {
-        scenarioId: "attic-computer-corner", situationId: "cramped-stumble-chase",
-        portraitSubmissionId: requested.submissionId,
-        stillPlanId: "cartoon-still-plan-01", videoPlanId: "cartoon-video-plan-01", version: 1, seed: 130100,
-      },
+    const request = await generation.requestCartoonFromPortrait({
+      partyId, deviceId, channelId, guestMediaId: requested.submissionId, rehearsalOnly: true,
     });
     assert.equal(request.created, true);
-    const run = await generation.runGeneration({ partyId, deviceId, channelId, jobId, idempotencyKey });
+    const autoJobId = request.jobId;
+    assert.equal(autoJobId, `cartoon-${requested.submissionId}`);
+    // The server-selected pair is a real compatible catalog pair.
+    const { loadValidatedCatalogs: loadCatalogs, resolveFunctionsRoot: resolveRoot, selectScenarioSituation: selectPair } =
+      await import("../src/scenario_catalog");
+    const autoCatalogs = loadCatalogs(resolveRoot(resolve(__dirname, "../src")));
+    const selected = selectPair(autoCatalogs.catalog, autoCatalogs.situations, request.scenarioId, request.situationId);
+    assert.equal(selected.scenario.id, request.scenarioId);
+    assert.equal(selected.situation.id, request.situationId);
+    const run = await generation.runGeneration({ partyId, deviceId, channelId, jobId: autoJobId, idempotencyKey: autoJobId });
     assert.equal(run.state, "ready");
     // Real still bytes from the pipeline: hash matches the chain binding and
     // the stored object verifies byte-for-byte.
-    const jobSnap = await db.doc(`parties/${partyId}/jobs/${jobId}`).get();
+    const jobSnap = await db.doc(`parties/${partyId}/jobs/${autoJobId}`).get();
     const chain = jobSnap.data()?.cartoonChain as Record<string, unknown>;
     assert.equal(chain.stillStatus, "completed");
     assert.match(String(chain.stillSha256), /^[a-f0-9]{64}$/);
@@ -336,7 +338,7 @@ test("cartoon e2e via prod generation path: real still bytes, publishManifest, t
     assert.ok(withdrawn.deletedObjects.includes(String(chain.stillPath)), "staged cartoon still must be deleted on withdrawal");
     assert.equal((await bucket.file(String(chain.stillPath)).exists())[0], false);
     assert.equal(withdrawn.verifiedAbsent, true);
-    const failedJob = await db.doc(`parties/${partyId}/jobs/${jobId}`).get();
+    const failedJob = await db.doc(`parties/${partyId}/jobs/${autoJobId}`).get();
     assert.equal(failedJob.data()?.state, "failed");
     await assert.rejects(delivery.getDeliveryUrls({ partyId, deviceId, channelId }),
       (error: unknown) => error instanceof BackendError && (error.errorCode === "FORBIDDEN" || error.errorCode === "NOT_FOUND" || error.errorCode === "MANIFEST_MISMATCH"));

@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import test from "node:test";
 import { BackendError } from "../src/contracts";
-import { buildAlibabaImageSubmitBody } from "../src/providers/alibaba_image";
+import { buildAlibabaImageSubmitBody, cartoonStillSeed } from "../src/providers/alibaba_image";
 import { buildAlibabaCartoonVideoBody } from "../src/providers/alibaba";
 import { FakeImageGenerationPort } from "../src/providers/fake_image";
 import { FakeVideoGenerationPort } from "../src/providers/fake";
@@ -16,7 +16,7 @@ import {
   sha256,
 } from "../src/cartoon_pipeline";
 import { buildCartoonVideoRequest, validateCartoonPlan } from "../src/video_generation_port";
-import { loadValidatedCatalogs, resolveFunctionsRoot } from "../src/scenario_catalog";
+import { getScenario, loadValidatedCatalogs, readScenarioReferenceBytes, resolveFunctionsRoot } from "../src/scenario_catalog";
 
 const FUNCTIONS_ROOT = resolveFunctionsRoot(resolve(__dirname, "../src"));
 const PORTRAIT_BYTES = new Uint8Array(readFileSync(resolve(__dirname, "fixtures/guest_photo.jpg")));
@@ -86,7 +86,7 @@ test("offline fake still is idempotent with zero Alibaba calls", async () => {
   assert.equal(fake.submissions.length, 1);
 });
 
-test("cartoon still serializes to the deterministic dual-ref wire mapping (no network)", () => {
+test("cartoon still serializes to the verified sync multimodal body (no network)", () => {
   const { catalog, situations } = loadValidatedCatalogs(FUNCTIONS_ROOT);
   const request = buildCartoonStillRequest({
     jobId: "job-cartoon-1",
@@ -99,30 +99,56 @@ test("cartoon still serializes to the deterministic dual-ref wire mapping (no ne
     portraitSha256: PORTRAIT_SHA,
     functionsRoot: FUNCTIONS_ROOT,
   });
-  const body = buildAlibabaImageSubmitBody(request, [
-    "https://signed.invalid/cartoon-portrait.jpg",
-    "https://signed.invalid/cartoon-style.jpg",
-  ]);
+  // Verified shape: single POST, messages content [style image, subject
+  // image, text], in-process data URIs, size/seed/flags parameters.
+  const body = buildAlibabaImageSubmitBody(request);
   assert.equal(body.model, "qwen-image-3.0-pro");
-  assert.deepEqual((body.input as Record<string, unknown>).images, [
-    "https://signed.invalid/cartoon-portrait.jpg",
-    "https://signed.invalid/cartoon-style.jpg",
-  ]);
-  assert.match(String((body.input as Record<string, unknown>).prompt), /subject_identity.*style_scene/s);
-  assert.equal((body.parameters as Record<string, unknown>).negative_prompt, request.negativePrompt);
+  const messages = (body.input as { messages: Array<{ role: string; content: Array<Record<string, string>> }> }).messages;
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].role, "user");
+  assert.equal(messages[0].content.length, 3);
+  const [styleItem, subjectItem, textItem] = messages[0].content;
+  assert.match(String(styleItem.image), /^data:image\/jpeg;base64,/);
+  assert.match(String(subjectItem.image), /^data:image\/jpeg;base64,/);
+  // Role ordering preserved: style_scene bytes first, subject_identity second.
+  assert.deepEqual(Buffer.from(String(styleItem.image).split(",")[1], "base64"), Buffer.from(readScenarioReferenceBytes(
+    getScenario(catalog, "attic-computer-corner"), FUNCTIONS_ROOT)));
+  assert.deepEqual(Buffer.from(String(subjectItem.image).split(",")[1], "base64"), Buffer.from(PORTRAIT_BYTES));
+  assert.equal(textItem.text, request.prompt);
+  assert.deepEqual(body.parameters, {
+    size: "1024*768",
+    n: 1,
+    seed: cartoonStillSeed(request.idempotencyKey),
+    prompt_extend: false,
+    enable_thinking: false,
+    watermark: false,
+    negative_prompt: request.negativePrompt,
+  });
+  // Digests stay on the request path: no sha or private path leaks on the wire.
   assert.ok(!JSON.stringify(body).includes(PORTRAIT_SHA.slice(0, 16)));
-  // Unfetchable resolver output never reaches transport.
-  assert.throws(() => buildAlibabaImageSubmitBody(request, ["http://signed.invalid/a.jpg", "https://signed.invalid/b.jpg"] as unknown as [string, string]));
+  assert.ok(!JSON.stringify(body).includes("parties/"));
+  // Tampered bytes fail closed before transport.
+  const tampered = new Uint8Array(PORTRAIT_BYTES);
+  tampered[0] ^= 0xff;
+  assert.throws(() => buildAlibabaImageSubmitBody({
+    ...request,
+    references: [{ ...request.references[0], bytes: tampered }, request.references[1]],
+  }), /digest mismatch/);
 });
 
-test("cartoon video serializes STANDARD cheap_demo from the exact still as first_frame (no network)", () => {
+test("cartoon video serializes STANDARD cheap_demo from the exact still as first_frame media (no network)", () => {
   const { catalog, situations } = loadValidatedCatalogs(FUNCTIONS_ROOT);
   const motion = buildCartoonMotionPrompt({
     scenarioId: "attic-computer-corner", situationId: "cramped-stumble-chase", catalog, situations,
   });
-  const stillSha = createHash("sha256").update("cartoon-fixture-still").digest("hex");
+  // Canonical tiny still bytes shared with the pinned fixture (derived, never
+  // mirrored from a wrong body): the video stage carries the exact still as an
+  // in-process data URI, never hosted bytes.
+  const stillPng = Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c626001000000ffff03000006000557bfabd40000000049454e44ae426082", "hex");
+  const stillSha = createHash("sha256").update(stillPng).digest("hex");
+  const stillDataUri = `data:image/png;base64,${stillPng.toString("base64")}`;
   const request = buildCartoonVideoRequest("job-cartoon-1", "idem-cartoon-1", "CAM-01", motion, {
-    url: "https://signed.invalid/cartoon-still.png", sha256: stillSha,
+    url: stillDataUri, sha256: stillSha,
   });
   assert.equal(request.modelId, "wan3.0-video");
   assert.equal(request.resolution, "480P");
@@ -130,16 +156,23 @@ test("cartoon video serializes STANDARD cheap_demo from the exact still as first
   assert.equal(request.audio, false);
   const body = buildAlibabaCartoonVideoBody(request);
   assert.equal(body.model, "wan3.0-video");
-  assert.equal((body.input as Record<string, unknown>).first_frame, "https://signed.invalid/cartoon-still.png");
-  assert.match(String((body.input as Record<string, unknown>).prompt), /Locked camera/);
+  // Verified shape: prompt verbatim (no appended suffix), still as
+  // input.media first_frame data URI (no input.first_frame field).
+  assert.equal((body.input as Record<string, unknown>).prompt, motion);
+  assert.ok(!(("first_frame") in (body.input as Record<string, unknown>)));
+  assert.deepEqual((body.input as Record<string, unknown>).media, [{ type: "first_frame", url: stillDataUri }]);
   assert.deepEqual(body.parameters, {
     resolution: "480P", ratio: "16:9", duration: 2, audio: false, watermark: false, prompt_extend: false, video_control: "STANDARD",
   });
   // The still hash binds the chain on the request path, never on the wire.
   assert.ok(!JSON.stringify(body).includes(stillSha));
   assert.throws(() => buildAlibabaCartoonVideoBody({ ...request, firstFrame: undefined } as never));
-  assert.throws(() => buildCartoonVideoRequest("job-cartoon-1", "idem-cartoon-1", "CAM-02", motion, {
+  // Hosted/signed bytes are refused on the live video wire: data URIs only.
+  assert.throws(() => buildAlibabaCartoonVideoBody(buildCartoonVideoRequest("job-cartoon-1", "idem-cartoon-1", "CAM-01", motion, {
     url: "https://signed.invalid/cartoon-still.png", sha256: stillSha,
+  })), /data URI/);
+  assert.throws(() => buildCartoonVideoRequest("job-cartoon-1", "idem-cartoon-1", "CAM-02", motion, {
+    url: stillDataUri, sha256: stillSha,
   }), /CAM-01/);
   // Fixture parity: pinned video request serializes identically (no network).
   const fixture = JSON.parse(readFileSync(resolve(__dirname, "fixtures/alibaba_cartoon_video_request.json"), "utf8")) as {
@@ -180,8 +213,11 @@ test("fake two-stage rehearsal animates the generated still with zero Alibaba ca
     scenarioId: "attic-computer-corner", situationId: "cramped-stumble-chase", catalog, situations,
   });
   const videoFake = new FakeVideoGenerationPort();
+  // The rehearsal path carries the exact still as an in-process data URI
+  // (production video-stage form); the offline fake accepts it without fetch.
+  const stillDataUri = `data:image/png;base64,${Buffer.from(still.image).toString("base64")}`;
   const videoRequest = buildCartoonVideoRequest("job-cartoon-rehearsal", "idem-cartoon-rehearsal", "CAM-01", motion, {
-    url: "https://signed.invalid/cartoon-still.png", sha256: still.sha256,
+    url: stillDataUri, sha256: still.sha256,
   });
   const submitted = await videoFake.submit(videoRequest);
   assert.ok(submitted.taskId.startsWith("CAM-01__"));

@@ -35,11 +35,13 @@ export class FakeVideoGenerationPort implements VideoGenerationPort {
       }
     }
     // Cartoon first frame follows the same fetchability gate: the exact
-    // generated still must resolve to a signed https URL before transport.
+    // generated still resolves to an in-process data URI in production (no
+    // hosted bytes) or a signed https URL on fixture paths. Bare internal
+    // bucket paths without a URL are rejected here, never silently accepted.
     if (request.firstFrame !== undefined) {
       const url = (request.firstFrame as { url?: unknown }).url;
-      if (typeof url !== "string" || !/^https:\/\//.test(url)) {
-        throw new Error("Fake provider first frame must carry a signed https URL.");
+      if (typeof url !== "string" || !/^(data:image\/(jpeg|png);base64,[A-Za-z0-9+/=]+|https:\/\/)/.test(url)) {
+        throw new Error("Fake provider first frame must carry a data URI or signed https URL.");
       }
     }
     const oldTaskId = this.byKey.get(request.idempotencyKey);

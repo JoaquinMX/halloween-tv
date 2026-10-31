@@ -1,11 +1,13 @@
 import { Bucket } from "@google-cloud/storage";
 import { FieldValue, Firestore, Timestamp } from "firebase-admin/firestore";
 import { assertRegisteredPartyDevice } from "./auth";
-import { BackendError, isSupportedConsent, parseRequestGeneration, RequestGenerationInput, validateId } from "./contracts";
+import { BackendError, isSupportedConsent, parseRequestGeneration, RequestGenerationInput, requireIdentity, validateId } from "./contracts";
 import { CAMEO_DEMO_PRESET, CHEAP_DEMO_PRESET, MEDIA_RETENTION_MS, REQUIRED_CAMERA_IDS } from "./config";
 import { assertGuestEligible, GuestMediaDoc } from "./guest_media";
 import { cartoonStillIntentDocument, cartoonStillLedgerPath, usageIntentDocument, usageLedgerPath } from "./usage";
-import { CameraId, ProviderResult, ProviderTaskStatus, validateCartoonPlan, validatePresetControls } from "./video_generation_port";
+import { CameraId, CartoonPlan, ProviderResult, ProviderTaskStatus, validateCartoonPlan, validatePresetControls } from "./video_generation_port";
+import { buildAutoCartoonPlan } from "./cartoon_pipeline";
+import { loadValidatedCatalogs, resolveFunctionsRoot } from "./scenario_catalog";
 
 export interface GenerationTask {
   partyId: string;
@@ -101,23 +103,10 @@ function stripRehearsalOnly(value: unknown): unknown {
 }
 
 /**
- * Immutable cartoon plan extraction. The plan rides alongside the fixed
- * preset controls (never altering cheap_demo/cameo_demo locks) and is
- * stripped before shared control validation + request parsing, then
- * validated, bound, and persisted by the store itself. Unknown fields are
- * never silently accepted: only the documented cartoon keys survive.
+ * Strips a caller-supplied cartoon plan before shared control validation and
+ * request parsing (defense in depth: requestGeneration already rejects caller
+ * plans; only requestCartoonFromPortrait builds the server plan).
  */
-function extractCartoonPlan(value: unknown): Record<string, unknown> | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const record = value as Record<string, unknown>;
-  if (record.cartoonPlan === undefined) return undefined;
-  const plan = record.cartoonPlan as Record<string, unknown>;
-  if (!plan || typeof plan !== "object" || Array.isArray(plan)) {
-    throw new BackendError("INVALID_ARGUMENT", "Cartoon plan must be an object.");
-  }
-  return plan;
-}
-
 function stripCartoonPlan(value: unknown): unknown {
   if (value && typeof value === "object" && !Array.isArray(value) && "cartoonPlan" in value) {
     const { cartoonPlan: _ignored, ...rest } = value as Record<string, unknown>;
@@ -154,8 +143,71 @@ export class FirestoreGenerationStore {
   }
 
   async requestGeneration(value: unknown): Promise<RequestGenerationResult> {
+    // Cartoon plans are server-assigned at job setup (auto-select from the
+    // seeded RNG); callers must never supply a plan, prompt, scene, or
+    // situation. The portrait auto-enqueue path (requestCartoonFromPortrait)
+    // is the only writer of cartoon plans.
+    if (value && typeof value === "object" && !Array.isArray(value) && "cartoonPlan" in value) {
+      throw new BackendError("INVALID_ARGUMENT", "Cartoon plans are assigned by the server; supply only the portrait submission.");
+    }
+    return this.createJob(value, undefined);
+  }
+
+  /**
+   * Minimal portrait request (cycle-13 fix-3): identity + guestMediaId only.
+   * The server randomly selects the catalog scenario + compatible situation
+   * (seeded RNG keyed by the submission id), persists the plan immutably at
+   * creation, and enqueues exactly one two-stage cartoon job. Retries and
+   * ingest-finalization replays reuse the persisted plan and never reroll or
+   * rebill: the job id and idempotency key derive deterministically from the
+   * submission id, so a second call returns the existing job (created:false).
+   * Any caller-supplied plan/prompt/scene/situation field is rejected — the
+   * client must not supply a plan.
+   */
+  async requestCartoonFromPortrait(value: unknown): Promise<RequestGenerationResult & { scenarioId: string; situationId: string }> {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new BackendError("INVALID_ARGUMENT", "Portrait request must be an object.");
+    }
+    const record = value as Record<string, unknown>;
+    for (const forbidden of ["cartoonPlan", "prompt", "scenarioId", "situationId", "presetId", "modelId", "stillPlanId", "videoPlanId", "seed"]) {
+      if (forbidden in record) {
+        throw new BackendError("INVALID_ARGUMENT", "Cartoon plans are assigned by the server; supply only the portrait submission.");
+      }
+    }
+    const identity = requireIdentity(value);
+    if (!identity.channelId) throw new BackendError("INVALID_ARGUMENT", "channelId is required.");
+    if (typeof record.guestMediaId !== "string" || !record.guestMediaId) {
+      throw new BackendError("INVALID_ARGUMENT", "guestMediaId is required.");
+    }
+    const guestMediaId = validateId(record.guestMediaId, "guestMediaId");
+    // Consent/budget entry gate: the portrait must be eligible right now; the
+    // creation transaction, worker submit, and publication recheck, so a
+    // withdrawal races fail closed.
+    await assertGuestEligible(this.db, identity, guestMediaId, this.now().getTime());
     const rehearsalOnly = extractRehearsalOnly(value);
-    const cartoonPlan = extractCartoonPlan(value);
+    // Server-side auto-select: seeded by the stable submission id so retries
+    // reuse the same pair. Catalog compatibility is enforced by the selector.
+    const functionsRoot = resolveFunctionsRoot();
+    const { catalog, situations } = loadValidatedCatalogs(functionsRoot);
+    const cartoonPlan = buildAutoCartoonPlan({ submissionId: guestMediaId, catalog, situations });
+    const jobId = `cartoon-${guestMediaId}`;
+    const idempotencyKey = `cartoon-${guestMediaId}`;
+    const created = await this.createJob({
+      partyId: identity.partyId,
+      deviceId: identity.deviceId,
+      channelId: identity.channelId,
+      jobId,
+      idempotencyKey,
+      presetId: CHEAP_DEMO_PRESET.presetId,
+      guestMediaId,
+      ...(rehearsalOnly ? { rehearsalOnly: true as const } : {}),
+    }, cartoonPlan as unknown as Record<string, unknown>);
+    return { ...created, scenarioId: cartoonPlan.scenarioId, situationId: cartoonPlan.situationId };
+  }
+
+  /** Shared creation path: requestGeneration (no plan) and the server auto path (server plan). */
+  private async createJob(value: unknown, cartoonPlan: Record<string, unknown> | undefined): Promise<RequestGenerationResult> {
+    const rehearsalOnly = extractRehearsalOnly(value);
     const sanitized = stripCartoonPlan(stripRehearsalOnly(value));
     validatePresetControls(sanitized);
     if (sanitized && typeof sanitized === "object" && !Array.isArray(sanitized) && "prompt" in sanitized) {

@@ -29,6 +29,15 @@ export interface GuestUploadServiceOptions {
   /** Emulator-injected PUT signer. Production uses v4 signed PUT URLs. */
   signUploadUrl?: (file: File, contentType: string, expiresAt: Date) => Promise<string>;
   deleteObject?: (file: File) => Promise<void>;
+  /**
+   * Portrait-eligible hook (cycle-13 fix-3 auto-enqueue): invoked best-effort
+   * after a portrait becomes eligible (completion) and when finalization
+   * observes an already-eligible portrait (trigger/replay). Failures are
+   * swallowed so upload stays fully operational when generation is disabled
+   * or the queue is unavailable; the enqueue path itself is idempotent (one
+   * persisted plan, one job, no reroll/rebill).
+   */
+  onPortraitEligible?: (info: { partyId: string; deviceId: string; channelId: string; submissionId: string }) => Promise<void>;
 }
 
 export interface RequestGuestUploadResult {
@@ -119,6 +128,18 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
   const deleteObject = options.deleteObject ?? (async (file) => {
     await file.delete({ ignoreNotFound: true });
   });
+  const onPortraitEligible = options.onPortraitEligible;
+
+  /** Best-effort auto-enqueue: never breaks the upload path. */
+  async function notifyPortraitEligible(info: { partyId: string; deviceId: string; channelId: string; submissionId: string }): Promise<void> {
+    if (!onPortraitEligible) return;
+    try {
+      await onPortraitEligible(info);
+    } catch {
+      // Upload stays fully operational when generation is disabled,
+      // misconfigured, or the queue is unavailable.
+    }
+  }
 
   async function requestGuestUpload(value: unknown): Promise<RequestGuestUploadResult> {
     const identity = requireIdentity(value);
@@ -276,6 +297,9 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
       if (doc.sourceHash !== sha256 || doc.sourceSizeBytes !== bytes.byteLength) {
         throw new BackendError("MANIFEST_MISMATCH", "Guest object changed after eligibility was recorded.");
       }
+      // Replay-safe: an already-eligible completion still triggers the
+      // idempotent auto-enqueue exactly once downstream.
+      await notifyPortraitEligible({ partyId: identity.partyId, deviceId: identity.deviceId, channelId: identity.channelId, submissionId });
       return {
         submissionId,
         partyId: doc.partyId,
@@ -362,6 +386,9 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
       }
       throw error;
     }
+    // Eligible-upload completion idempotently enqueues the backend-selected
+    // two-stage cartoon generation (best-effort: never breaks completion).
+    await notifyPortraitEligible({ partyId: identity.partyId, deviceId: identity.deviceId, channelId: identity.channelId, submissionId });
     return {
       submissionId,
       partyId: identity.partyId,
@@ -669,6 +696,13 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
       const [stillExists] = await bucket.file(objectPath).exists();
       if (stillExists) throw new BackendError("INTERNAL", "Withdrawn guest object could not be removed.");
       return { handled: true, deleted: true };
+    }
+    // Ingest-finalization race: when the object arrives after (or is replayed
+    // after) an eligible completion, enqueue idempotently exactly once
+    // downstream. Pending uploads are left alone; explicit completion
+    // validates bytes before any eligibility change.
+    if (doc.status === "eligible") {
+      await notifyPortraitEligible({ partyId: parsed.partyId, deviceId: parsed.deviceId, channelId: doc.channelId, submissionId: parsed.submissionId });
     }
     return { handled: true, deleted: false };
   }

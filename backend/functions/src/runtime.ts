@@ -38,6 +38,7 @@ export interface RuntimeServiceOptions {
 
 export interface RuntimeServices {
   requestGeneration(value: unknown): Promise<{ jobId: string; state: string; created: boolean }>;
+  requestCartoonFromPortrait(value: unknown): Promise<{ jobId: string; state: string; created: boolean }>;
   runGeneration(task: GenerationTask): Promise<{ jobId: string; state: string; manifestVersion?: number }>;
   normalizeAndStage(partyId: string, jobId: string, cameraId: CameraId, result: ProviderResult): Promise<Record<string, unknown>>;
   publishManifest(partyId: string, jobId: string, idempotencyKey: string): Promise<DeliveryManifest>;
@@ -87,6 +88,14 @@ export function createRuntimeServices(options: RuntimeServiceOptions): RuntimeSe
   // PROVIDER_UNAVAILABLE instead of billing a live video for a placeholder
   // still. Fake-produced stills are marked fixture:true (see generation.ts)
   // and publish refuses them for non-rehearsal jobs.
+  //
+  // Live still consumer (cycle-13 fix-3, verified shape): the synchronous
+  // Alibaba Token Plan multimodal-generation adapter carries both references
+  // as in-process data URIs — no public/signed hosting, no URL resolver hop,
+  // so the previous always-throwing resolveImageUrl is gone. The port is
+  // constructed only under the same gated config as video (explicit
+  // IMAGE_GENERATION_PROVIDER=alibaba plus server-side credentials);
+  // otherwise the still stage fails closed with PROVIDER_UNAVAILABLE.
   const configuredImageProvider = (process.env.IMAGE_GENERATION_PROVIDER ?? "").trim().toLowerCase();
   let imageProvider = options.imageProvider;
   if (!imageProvider && configuredImageProvider === "alibaba") {
@@ -95,10 +104,7 @@ export function createRuntimeServices(options: RuntimeServiceOptions): RuntimeSe
       const apiKey = process.env.ALIBABA_API_KEY ?? "";
       const workspaceId = process.env.ALIBABA_WORKSPACE_ID ?? "";
       if (apiKey && workspaceId) {
-        imageProvider = new AlibabaImageGenerationPort({
-          apiKey, workspaceId,
-          resolveImageUrl: async () => { throw new Error("Image URL resolution is not configured."); },
-        });
+        imageProvider = new AlibabaImageGenerationPort({ apiKey, workspaceId });
       }
     } catch {
       imageProvider = undefined;
@@ -134,6 +140,34 @@ export function createRuntimeServices(options: RuntimeServiceOptions): RuntimeSe
     now: options.now,
     ...(options.signGuestUploadUrl ? { signUploadUrl: options.signGuestUploadUrl } : {}),
     ...(options.deleteGuestObject ? { deleteObject: options.deleteGuestObject } : {}),
+    // Eligible-upload completion AND ingest-finalization/replay races
+    // idempotently enqueue backend-selected two-stage cartoon generation when
+    // generation is enabled. Best-effort: hook failures never break upload.
+    // Generation-disabled keeps upload fully operational (no hook wired).
+    ...(generation ? {
+      onPortraitEligible: async (info) => {
+        const request = await generation.requestCartoonFromPortrait({
+          partyId: info.partyId,
+          deviceId: info.deviceId,
+          channelId: info.channelId,
+          guestMediaId: info.submissionId,
+        });
+        if (request.created) {
+          const task: GenerationTask = {
+            partyId: request.partyId,
+            deviceId: request.deviceId,
+            channelId: request.channelId,
+            jobId: request.jobId,
+            idempotencyKey: request.idempotencyKey,
+          };
+          try {
+            await enqueue(task);
+          } catch {
+            await generation.failEnqueue(task).catch(() => undefined);
+          }
+        }
+      },
+    } : {}),
   });
   const delivery = createDeliveryServices({
     db: options.db,
@@ -149,6 +183,34 @@ export function createRuntimeServices(options: RuntimeServiceOptions): RuntimeSe
   async function requestGeneration(value: unknown) {
     if (!generation) throw new BackendError("PROVIDER_UNAVAILABLE", "Generation is not enabled.");
     const request = await generation.requestGeneration(value);
+    if (request.created) {
+      const task: GenerationTask = {
+        partyId: request.partyId,
+        deviceId: request.deviceId,
+        channelId: request.channelId,
+        jobId: request.jobId,
+        idempotencyKey: request.idempotencyKey,
+      };
+      try {
+        await enqueue(task);
+      } catch {
+        await generation.failEnqueue(task);
+        throw new BackendError("PROVIDER_UNAVAILABLE", "Generation task could not be queued.");
+      }
+    }
+    return { jobId: request.jobId, state: request.state, created: request.created };
+  }
+
+  /**
+   * Minimal portrait request (guest does consent + upload only; no prompt /
+   * scene / situation UI — the client must not supply a plan). The server
+   * selects the scenario + situation (seeded RNG) and enqueues exactly one
+   * two-stage cartoon job. Service-level only (not an HTTP callable): the
+   * upload-completion and ingest-finalization paths drive it.
+   */
+  async function requestCartoonFromPortrait(value: unknown) {
+    if (!generation) throw new BackendError("PROVIDER_UNAVAILABLE", "Generation is not enabled.");
+    const request = await generation.requestCartoonFromPortrait(value);
     if (request.created) {
       const task: GenerationTask = {
         partyId: request.partyId,
@@ -184,6 +246,7 @@ export function createRuntimeServices(options: RuntimeServiceOptions): RuntimeSe
 
   return {
     requestGeneration,
+    requestCartoonFromPortrait,
     runGeneration,
     normalizeAndStage,
     publishManifest,
