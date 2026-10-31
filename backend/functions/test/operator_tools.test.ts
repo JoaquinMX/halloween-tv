@@ -499,6 +499,81 @@ test("preflight pins the storage trigger to the deploy bucket region", () => {
   }
 });
 
+test("preflight owner-approved live batch seam is explicit and cloud-only", () => {
+  const LIVE_APPROVAL_REF = "telegram-20261030-2322-step1";
+  const complete = buildArtifact();
+  try {
+    const live = runTool("tools/deploy_preflight.ts",
+      ["--target=cloud", "--project=artifact-project-12345", "--bucket=artifact-bucket-123456",
+        `--functions-root=${complete.functions}`, `--config-root=${complete.root}`,
+        `--allow-live-batch=${LIVE_APPROVAL_REF}`],
+      { ...preflightEnv(), GENERATION_ENABLED: "true", VIDEO_GENERATION_PROVIDER: "alibaba" });
+    assert.equal(live.status, 0, live.stderr);
+    const report = lastJson(live.stdout);
+    assert.equal(report.preflight, "passed");
+    assert.equal(report.generationOptIn, "live-batch");
+    assert.equal(report.liveBatch, true);
+    assert.equal(report.liveBatchApprovalRef, LIVE_APPROVAL_REF);
+    assert.equal(report.approvalRef, LIVE_APPROVAL_REF);
+    assert.ok(Array.isArray(report.warnings), "live batch report carries warnings");
+    const warning = report.warnings.join("\n");
+    assert.match(warning, new RegExp(LIVE_APPROVAL_REF));
+    assert.match(warning, /alibaba/);
+    assert.match(warning, /GENERATION_ENABLED.*unset\/false/);
+    assert.match(warning, /VIDEO_GENERATION_PROVIDER=fake/);
+    assert.match(warning, /redeploy/);
+
+    const missingRef = runTool("tools/deploy_preflight.ts",
+      ["--target=cloud", "--project=artifact-project-12345", "--bucket=artifact-bucket-123456",
+        `--functions-root=${complete.functions}`, `--config-root=${complete.root}`, "--allow-live-batch"],
+      { ...preflightEnv(), GENERATION_ENABLED: "true", VIDEO_GENERATION_PROVIDER: "alibaba" });
+    assert.notEqual(missingRef.status, 0);
+    assert.match(missingRef.stderr, /--allow-live-batch requires an explicit owner approval reference/);
+
+    const fakeWithLiveFlag = runTool("tools/deploy_preflight.ts",
+      ["--target=cloud", "--project=artifact-project-12345", "--bucket=artifact-bucket-123456",
+        `--functions-root=${complete.functions}`, `--config-root=${complete.root}`,
+        `--allow-live-batch=${LIVE_APPROVAL_REF}`],
+      { ...preflightEnv(), GENERATION_ENABLED: "true", VIDEO_GENERATION_PROVIDER: "fake" });
+    assert.notEqual(fakeWithLiveFlag.status, 0);
+    assert.match(fakeWithLiveFlag.stderr, /VIDEO_GENERATION_PROVIDER=alibaba/);
+
+    const enabledWithoutFlag = runTool("tools/deploy_preflight.ts",
+      ["--target=cloud", "--project=artifact-project-12345", "--bucket=artifact-bucket-123456",
+        `--functions-root=${complete.functions}`, `--config-root=${complete.root}`],
+      { ...preflightEnv(), GENERATION_ENABLED: "true", VIDEO_GENERATION_PROVIDER: "fake" });
+    assert.notEqual(enabledWithoutFlag.status, 0);
+    assert.match(enabledWithoutFlag.stderr, /refuses GENERATION_ENABLED=true/);
+
+    const emulatorLive = runTool("tools/deploy_preflight.ts",
+      ["--target=emulator", "--project=artifact-project-12345", "--bucket=artifact-bucket-123456",
+        `--functions-root=${complete.functions}`, `--config-root=${complete.root}`,
+        `--allow-live-batch=${LIVE_APPROVAL_REF}`],
+      { ...preflightEnv(), FIRESTORE_EMULATOR_HOST: "127.0.0.1:8080", STORAGE_EMULATOR_HOST: "127.0.0.1:9199",
+        GENERATION_ENABLED: "true", VIDEO_GENERATION_PROVIDER: "alibaba" });
+    assert.notEqual(emulatorLive.status, 0);
+    assert.match(emulatorLive.stderr, /cloud-only/);
+
+    const combined = runTool("tools/deploy_preflight.ts",
+      ["--target=cloud", "--project=artifact-project-12345", "--bucket=artifact-bucket-123456", "--allow-generation",
+        `--functions-root=${complete.functions}`, `--config-root=${complete.root}`,
+        `--allow-live-batch=${LIVE_APPROVAL_REF}`],
+      { ...preflightEnv(), GENERATION_ENABLED: "true", VIDEO_GENERATION_PROVIDER: "alibaba" });
+    assert.notEqual(combined.status, 0);
+    assert.match(combined.stderr, /cannot be combined with --allow-generation/);
+
+    const liveWithoutEnabled = runTool("tools/deploy_preflight.ts",
+      ["--target=cloud", "--project=artifact-project-12345", "--bucket=artifact-bucket-123456",
+        `--functions-root=${complete.functions}`, `--config-root=${complete.root}`,
+        `--allow-live-batch=${LIVE_APPROVAL_REF}`],
+      { ...preflightEnv(), VIDEO_GENERATION_PROVIDER: "alibaba" });
+    assert.notEqual(liveWithoutEnabled.status, 0);
+    assert.match(liveWithoutEnabled.stderr, /GENERATION_ENABLED=true/);
+  } finally {
+    rmSync(complete.root, { recursive: true, force: true });
+  }
+});
+
 test("preflight enforces the generation worker memory floor for ffmpeg normalization", () => {
   const complete = buildArtifact();
   try {

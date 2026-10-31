@@ -203,19 +203,39 @@ export async function runPreflight(): Promise<Record<string, unknown>> {
     throw new Error("Cloud preflight refuses emulator hosts; unset FIRESTORE_EMULATOR_HOST and STORAGE_EMULATOR_HOST.");
   }
   const provider = (process.env.VIDEO_GENERATION_PROVIDER ?? config.VIDEO_GENERATION_PROVIDER ?? "").trim().toLowerCase();
-  if (provider !== "fake") {
-    throw new Error("Preflight requires an explicit VIDEO_GENERATION_PROVIDER=fake; live generation stays owner-gated.");
-  }
   const generationEnabled = (process.env.GENERATION_ENABLED ?? config.GENERATION_ENABLED ?? "").trim().toLowerCase() === "true";
   const allowGeneration = process.argv.includes("--allow-generation");
-  if (target === "cloud" && generationEnabled && !allowGeneration) {
-    throw new Error("Cloud preflight refuses GENERATION_ENABLED=true without an explicit owner-approved generation batch; unset it for deploy checks.");
+  const liveBatchRequested = process.argv.some((item) => item === "--allow-live-batch" || item.startsWith("--allow-live-batch="));
+  const liveBatchApprovalRef = argument("allow-live-batch")?.trim();
+  if (liveBatchRequested && !liveBatchApprovalRef) {
+    throw new Error("--allow-live-batch requires an explicit owner approval reference via --allow-live-batch=<approval-ref>; no reference = no live batch.");
   }
-  if (allowGeneration && target !== "cloud") {
-    throw new Error("--allow-generation is a cloud-only explicit opt-in; emulator targets never enable generation.");
+  if (liveBatchApprovalRef && target !== "cloud") {
+    throw new Error("--allow-live-batch is a cloud-only explicit opt-in; emulator targets never enable generation.");
   }
-  if (allowGeneration && provider !== "fake") {
-    throw new Error("--allow-generation permits only the fake provider; live generation stays owner-gated.");
+  if (liveBatchApprovalRef && allowGeneration) {
+    throw new Error("--allow-live-batch cannot be combined with --allow-generation; use exactly one explicit opt-in.");
+  }
+  if (liveBatchApprovalRef) {
+    if (!generationEnabled) {
+      throw new Error(`--allow-live-batch=${liveBatchApprovalRef} requires GENERATION_ENABLED=true for the approved batch window; otherwise unset it for deploy checks.`);
+    }
+    if (provider !== "alibaba") {
+      throw new Error(`--allow-live-batch=${liveBatchApprovalRef} requires VIDEO_GENERATION_PROVIDER=alibaba; live generation stays owner-gated.`);
+    }
+  } else {
+    if (provider !== "fake") {
+      throw new Error("Preflight requires an explicit VIDEO_GENERATION_PROVIDER=fake; live generation stays owner-gated.");
+    }
+    if (target === "cloud" && generationEnabled && !allowGeneration) {
+      throw new Error("Cloud preflight refuses GENERATION_ENABLED=true without an explicit owner-approved generation batch; unset it for deploy checks.");
+    }
+    if (allowGeneration && target !== "cloud") {
+      throw new Error("--allow-generation is a cloud-only explicit opt-in; emulator targets never enable generation.");
+    }
+    if (allowGeneration && provider !== "fake") {
+      throw new Error("--allow-generation permits only the fake provider; live generation stays owner-gated.");
+    }
   }
 
   const failures: string[] = [];
@@ -403,6 +423,12 @@ export async function runPreflight(): Promise<Record<string, unknown>> {
   if (allowGeneration) {
     warnings.push("Explicit fake-only rehearsal opt-in (--allow-generation with VIDEO_GENERATION_PROVIDER=fake); restore GENERATION_ENABLED=unset/false after the rehearsal window.");
   }
+  if (liveBatchApprovalRef) {
+    warnings.push(
+      `Owner-approved live batch ${liveBatchApprovalRef} with VIDEO_GENERATION_PROVIDER=alibaba; ` +
+      "mandatory restore after the batch: GENERATION_ENABLED unset/false + VIDEO_GENERATION_PROVIDER=fake + redeploy.",
+    );
+  }
   let workerMemory: { raw: string; mib: number } | undefined;
   try {
     if (compiledMainPath && existsSync(compiledMainPath)) {
@@ -428,7 +454,10 @@ export async function runPreflight(): Promise<Record<string, unknown>> {
     },
     fixtureDirectory: runtime?.fixtureDirectory,
     functionsEntry: mainEntry,
-    generationOptIn: allowGeneration ? "fake-only-rehearsal" : "disabled",
+    generationOptIn: liveBatchApprovalRef ? "live-batch" : (allowGeneration ? "fake-only-rehearsal" : "disabled"),
+    liveBatch: Boolean(liveBatchApprovalRef),
+    liveBatchApprovalRef: liveBatchApprovalRef ?? null,
+    approvalRef: liveBatchApprovalRef ?? null,
     workerTimeoutSeconds: integerSetting("GENERATION_WORKER_TIMEOUT_SECONDS", config),
     providerPollTimeoutSeconds: integerSetting("PROVIDER_POLL_TIMEOUT_SECONDS", config),
     normalizationHeadroomSeconds: integerSetting("NORMALIZATION_HEADROOM_SECONDS", config),
