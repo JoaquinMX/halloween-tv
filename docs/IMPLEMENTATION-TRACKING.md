@@ -110,3 +110,15 @@ Test success does not change deployment, device, or live-spend statuses above.
 - `harness/harness-run.sh` now preflights its siblings (registry, instructions, schemas, validator) and exits 2 with a clear absolute-path message when run as a stray copy from a repo checkout/worktree.
 - New `scripts/harness-preflight.sh`: resolves HARNESS_HOME (env or workspace checkout), fails fast exit 2 naming the missing path, prints the absolute runner path on success. RUNBOOK §1 now mandates preflight-first absolute invocation.
 - Workspace files left uncommitted for the orchestrator owner (repo has unrelated pre-existing modifications).
+
+
+## Cycle-13 rollout closeout (2026-10-31)
+
+This dated closeout supersedes older operational blockers above; those sections remain historical evidence.
+
+- Catalog/two-stage cartoon rollout independently accepted at `f6cde52`: full backend build + emulators **234/234**, TV **104/104**, TV analysis clean. Final integration adds documentation/evidence only; tested source trees are unchanged.
+- Backend deployed; all 20 exports ACTIVE. `hostInvites.expiresAt` TTL ACTIVE and collection-group index READY. Final cloud configuration is generation-disabled/fake, with zero queued tasks/pending intents and an idle budget.
+- Original bounded batch reconciled: two confirmed stills/videos delivered; the first still POST has unknown outcome and consumes the third still allowance. No retry/fourth case. Actual Token Plan Credits remain UNKNOWN, not zero.
+- Registered-TV ACK/manifest hashes and all eight retained preview byte hashes match; eight delivery objects are purged. Parent directly observed the cached cartoon still playing on the TV after purge. This is not a new network-isolation test.
+- Remaining hardware boundary: phone flow UNVERIFIED until owner unlocks/reconnects the Pixel. No lock bypass or TV Wi-Fi toggle was used. No further paid batch is active.
+- Detailed scope, source/review distinctions, evidence hashes, and limitations: [catalog runbook](CYCLE-13-CATALOG-PIPELINE-RUNBOOK.md) and [final acceptance](cycle13/verification-f6cde52.json). Authorized main integration preserves branches, owner files, and stash.

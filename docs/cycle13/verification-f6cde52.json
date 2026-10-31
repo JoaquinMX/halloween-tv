@@ -1,0 +1,232 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-10-31T23:37:11.717227+00:00",
+  "acceptance": "Final source independently accepted; live batch reconciled and generation safely closed. Phone hardware flow remains unverified. Main integration is recorded by the containing closure commit and external post-push audit.",
+  "branch": "orchestrator/cycle-13-catalog-pipeline",
+  "base": "d4f13dadffc79a993aee826c5c002d5f9c9d036e",
+  "testedHead": "f6cde52c1a6390e392f6d4173bac000d7f76efda",
+  "sourceTrees": {
+    "backend/functions": "b6107b6f1c61b7267810b259030021b50a5236d0",
+    "apps/tv_app": "10917572f5fe5d2ea369256933e8a37ebb261172"
+  },
+  "documentationOnlyAfterTestedHead": true,
+  "independentVerification": {
+    "backend": {
+      "command": "npm run test:emulator",
+      "sourceHead": "f6cde52c1a6390e392f6d4173bac000d7f76efda",
+      "exitCode": 0,
+      "counts": {
+        "tests": 234,
+        "suites": 0,
+        "pass": 234,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "sha256": "2762eda339b51ed473c58592cedf2ea0604205cf39b4c35617163c6dc622ebca",
+      "workingDirectory": "backend/functions"
+    },
+    "tv": [
+      {
+        "command": "flutter test --no-pub --reporter json",
+        "sourceHead": "f6cde52c1a6390e392f6d4173bac000d7f76efda",
+        "exitCode": 0,
+        "sha256": "3f55313d07ffcc06766c593bfb2a923b5ae0abe99d49cfde1751b9521316c847",
+        "counts": {
+          "tests": 104,
+          "pass": 104,
+          "fail": 0,
+          "skipped": 0,
+          "hiddenRunnerEvents": 12
+        },
+        "workingDirectory": "apps/tv_app"
+      },
+      {
+        "command": "flutter analyze --no-pub",
+        "sourceHead": "f6cde52c1a6390e392f6d4173bac000d7f76efda",
+        "exitCode": 0,
+        "sha256": "0c983507cd162d7d37550f2a616b32561cb19585968b5c1280ff5d364bf77e7d",
+        "workingDirectory": "apps/tv_app"
+      }
+    ],
+    "tvAnalysis": "No issues found",
+    "backendBuild": "passed as part of test:emulator",
+    "providerNetworkInTests": "Fake/stub providers only; separate live evidence below."
+  },
+  "closedFindings": [
+    {
+      "id": "CARTOON-MISSING-IMAGE-CONFIG",
+      "resolution": "Dedicated pre-contact error identity fails the claimed job and releases single-flight capacity; generic provider-unavailable remains ambiguous.",
+      "coverage": "rollout-6 cartoon missing image config fails closed and releases single-flight"
+    },
+    {
+      "id": "CARTOON-CONFIRMED-FAILED",
+      "resolution": "Definitive still/video FAILED records failure, terminally settles job, preserves ledger and releases budget; unknown still/video timeout retains evidence and forbids resubmission.",
+      "coverage": "rollout-6 real cartoon still/video FAILED and ambiguous still/video timeout regressions"
+    }
+  ],
+  "openCodeFindings": [],
+  "reviewScope": {
+    "freshThreeRoleReviewOfFinalRolloutDiff": false,
+    "approvalBasis": "Parent source review of rollout changes plus independent full final-source backend emulator suite and affected TV tests/analyze. Prior harness reviews remain scoped to their frozen diffs."
+  },
+  "liveBatch": {
+    "authority": "Owner: Run remaining pendings; bounded original three cases, no ceiling reset or fourth case.",
+    "ceiling": {
+      "stills": 3,
+      "videos": 3
+    },
+    "consumed": {
+      "confirmedStills": 2,
+      "uncertainReservedStills": 1,
+      "videos": 2
+    },
+    "case1": {
+      "jobId": "hv-cartoon-case-1",
+      "state": "failed",
+      "stillPostOutcome": "unknown; counted as spent; not resubmitted",
+      "evidence": "Submit-once flag remains consumed/submitting, no still task ID, no completed still; final cost rows are placeholders with null task IDs/charges, not proof of zero contact.",
+      "remainingAllowanceCanBeReopenedWithoutOwnerDecision": false
+    },
+    "completedCases": [
+      {
+        "case": 2,
+        "jobId": "hv-cartoon-case-2",
+        "plan": {
+          "scenarioId": "furnace-kitchen-pass",
+          "situationId": "kitchen-slapstick-chase",
+          "seed": 130108,
+          "stillPlanId": "cartoon-still-plan-09",
+          "videoPlanId": "cartoon-video-plan-09"
+        },
+        "still": {
+          "sha256": "657d2935f2ec7f35972381c238bebf9dd90a45e8fd5b8653b4aa1582efbcee40",
+          "bytes": 1157339,
+          "model": "qwen-image-3.0-pro"
+        },
+        "video": {
+          "sha256": "7091f48af79a624af684200f29a5fe397a481d4a4f5afaec103c7b3a9203252f",
+          "bytes": 563257,
+          "model": "wan3.0-video STANDARD",
+          "codec": "h264",
+          "pixelFormat": "yuv420p",
+          "width": 854,
+          "height": 480,
+          "fps": 24,
+          "seconds": 2,
+          "audio": false
+        },
+        "state": "purged",
+        "manifestVersion": 2,
+        "ackManifestHash": "4846a25f9ae6caacb0e2c7d8d7a636a63c2f67c2e20b5a42afc5913f7992e14a",
+        "stillSubmits": 1,
+        "videoSubmits": 1
+      },
+      {
+        "case": 3,
+        "jobId": "hv-cartoon-case-3",
+        "plan": {
+          "scenarioId": "pink-mansion-foyer",
+          "situationId": "grand-staircase-chase",
+          "seed": 130102,
+          "stillPlanId": "cartoon-still-plan-03",
+          "videoPlanId": "cartoon-video-plan-03"
+        },
+        "still": {
+          "sha256": "ff4fc79cf45077b180b11523022c536f68f099f5369154583929dc219a674798",
+          "bytes": 847983,
+          "model": "qwen-image-3.0-pro"
+        },
+        "video": {
+          "sha256": "dc2d89ac90ef7969107c51dcea89405086658d69a93bcb287618edb79b5ea9d9",
+          "bytes": 672987,
+          "model": "wan3.0-video STANDARD",
+          "codec": "h264",
+          "pixelFormat": "yuv420p",
+          "width": 854,
+          "height": 480,
+          "fps": 24,
+          "seconds": 2,
+          "audio": false
+        },
+        "state": "purged",
+        "manifestVersion": 3,
+        "ackManifestHash": "d1b61847f6498bac83b211f4ed785f3b82db91f0b9b856567c1d1fde2e3ed430",
+        "stillSubmits": 1,
+        "videoSubmits": 1
+      }
+    ],
+    "actualTokenPlanCredits": null,
+    "creditsStatus": "UNKNOWN; no provider-console reconciliation; null ledger is not zero realized spend.",
+    "additionalProviderSubmissionsByParent": 0,
+    "unusedVideoAllowanceIsNotAnotherCase": true
+  },
+  "safeCloud": {
+    "observedAt": "2026-10-31T23:33:20.125Z",
+    "activeFunctions": 20,
+    "generationEnabledFunctions": 0,
+    "videoProvider": "fake",
+    "imageProvider": "not configured",
+    "queuedTasks": 0,
+    "pendingIntents": 0,
+    "budgetState": "idle",
+    "activeJobId": null,
+    "ttl": "ACTIVE",
+    "hostInviteIndex": "READY",
+    "liveCaseStates": {
+      "hv-cartoon-case-1": "failed",
+      "hv-cartoon-case-2": "purged",
+      "hv-cartoon-case-3": "purged"
+    },
+    "purgedDeliveryObjectsVerifiedAbsent": 8,
+    "retainedPreviewObjectsByteVerified": 8,
+    "closureProbe": "withdrawn; no job or pending intent remains"
+  },
+  "deviceEvidence": {
+    "registeredTvAckVersions": [
+      2,
+      3
+    ],
+    "canonicalManifestAndAllAckClipHashesMatched": true,
+    "postPurgeHardwareCartoonPlaybackObservedByParent": true,
+    "parentScreenshotSha256": "99f035f03db51c168ea3353a08aebfec0ef2d103f87c833e19d1003246416a2a",
+    "tvNetworkDisabled": false,
+    "networkIsolatedPlaybackNotTestedInThisRollout": true,
+    "directDeviceCacheByteExtraction": "unavailable: installed release package is not debuggable; no bypass attempted. Proof combines registered-TV hash-bearing ACKs, independently matched cloud preview bytes, source/tests, and actual post-purge playback.",
+    "phone": "UNVERIFIED: earlier locked; USB Pixel absent at final audit. Requires owner unlock/reconnect; no bypass attempted.",
+    "visualReview": "Distinct portrait features preserved across both stills/clips; sampled frames show changing poses/actions; no claim of exhaustive frame-by-frame quality."
+  },
+  "preservation": {
+    "localBranchesBefore": 92,
+    "remoteBranchesBefore": 26,
+    "ownerUntrackedFilesBefore": 19,
+    "stashBefore": "4cd8afb504172ae57837db5678ca408e0e612225",
+    "branchDeletionAuthorizedOrPerformed": false,
+    "privateMediaCommitted": false,
+    "credentialCommitted": false
+  },
+  "externalEvidence": [
+    {
+      "name": "parent-final-f6cde52-emulator.json",
+      "sha256": "4cfdc066c9ce7e426ac146ce8928b3d9801bf17d9c136bd72a3a45ccd40dfd91"
+    },
+    {
+      "name": "parent-final-f6cde52-tv.json",
+      "sha256": "0174b927b42521b650c95ee33a2c07cab6b2ff3d0ff204472322a018c7973ed8"
+    },
+    {
+      "name": "parent-live-after.json",
+      "sha256": "38ff7d7e379d0c91b7f8d94f03360871a7d4fd1f66502d9927ce07054ef22b4c"
+    },
+    {
+      "name": "parent-preview-byte-verification.json",
+      "sha256": "5874d56b006247cb3a9ec20137648dbf9047fa282113bbb65e8dde36b6a2e4fb"
+    },
+    {
+      "name": "parent-media-probes.json",
+      "sha256": "bfc400d5d713b8bb66e6aa2f07aa0d94452ee9f9f6b85c911d2bfd4f8f1f2268"
+    }
+  ],
+  "evidenceLocation": "Private workspace reports/halloween-cycle13-rollout-20261031/; media remains outside git."
+}

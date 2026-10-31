@@ -1,5 +1,7 @@
 # Cycle 13 catalog pipeline runbook
 
+Current status (2026-10-31): the authorized live rollout is closed; two cartoon clips were delivered and ACKed. Generation is now disabled/fake, the queue is empty, and host-invite TTL/index are active. Phone hardware verification remains pending unlock/reconnect. See the final independent acceptance section and [verification-f6cde52.json](cycle13/verification-f6cde52.json). Earlier offline verification below is historical, not a description of the post-rollout cloud state.
+
 ## Scope and safety
 
 This runbook covers the backend-owned cartoon pipeline on Alibaba Singapore Token Plan only: `qwen-image-3.0-pro` for stills (synchronous multimodal generation, in-process data URIs, no task polling) and `wan3.0-video` STANDARD for video (first_frame carried as an in-process data URI inside `input.media`, never hosted bytes). Video controls remain 2 seconds, 480P, silent, no watermark, and `prompt_extend=false`. The `cheap_demo` and `cameo_demo` preset locks remain unchanged. Do not use Google, Veo, or Imagen. The batch planner is preview-only; no live provider request, cloud migration, or deployment is part of preparation.
@@ -24,7 +26,7 @@ The canonical manifest hash, 1/2/4-camera contracts, MIME/profile validation, id
 
 ## Reference provenance (factual note)
 
-The 16 reference stills shipped under `assets/scenario_refs/` (one per catalog record, sha256/sizeBytes pinned in `scenario_catalog.v1.json`) are the style references for the `qwen-image-3.0-pro` still stage; the batch preview re-verifies each referenced file against its pinned hash before emitting a row. The supplied refs are task-authorized inputs. Preparation in this workstream remains offline only (no live provider calls). The preview requires a numeric ceiling argument, but that argument is not spend authorization: an applicable owner-approved remaining allowance must still be established before live submission. Preparation never submits live work or writes cloud data; prompt composition stays server-owned (the client never supplies prompts, scenes, or plans).
+The 16 reference stills shipped under `assets/scenario_refs/` (one per catalog record, sha256/sizeBytes pinned in `scenario_catalog.v1.json`) are the style references for the `qwen-image-3.0-pro` still stage; the batch preview re-verifies each referenced file against its pinned hash before emitting a row. The supplied refs are task-authorized inputs. The original catalog preparation was offline only (no live provider calls); the subsequent separately authorized live rollout is recorded below. The preview requires a numeric ceiling argument, which is an offline constraint, not approval to spend; establish the owner's applicable remaining allowance before any live submission. Preparation never submits live work or writes cloud data; prompt composition stays server-owned (the client never supplies prompts, scenes, or plans).
 
 ## Few-case preview (verbatim, 3 cases)
 
@@ -93,15 +95,15 @@ Guest portraits persist a durable pending intent (`parties/{partyId}/pendingGene
 
 Rollback by stopping new submissions, disabling publication for affected jobs, withdrawing impacted consent or deleting the affected seed through its supported authorization path, and purging only after the owner confirms retention obligations. Retain task/charge reconciliation, manifest hashes, ACK results, and sanitized diagnostic codes according to the applicable party retention policy; do not retain signed URLs or portrait bytes in logs.
 
-Physical-TV observation checklist (pending until performed):
+Physical-TV observation checklist (historical pre-rollout checklist; current proof and limitations are recorded below):
 
 - Confirm the correct party/channel and all four expected camera tiles.
 - Observe startup, playback, reconnect, and refresh behavior; record visible errors and timestamps.
-- Confirm the preview remains available until ACK and that ACK removes the delivered manifest as expected.
+- Confirm that ACK purges delivery object bytes while separately retained host previews remain available.
 - Withdraw the portrait consent and verify that a subsequent URL request is denied.
 - Record device, build, emulator-signing differences, and operator observations. Emulator validation is not physical-TV validation.
 
-Physical-device smoke is already authorized by the workstream brief, but was not performed in cycle 13. Inspect the existing device session before use; physical proof of the changed backend also depends on deployment. Deployment and live-provider submissions were not performed; use established deployment authority and an applicable remaining paid allowance before those external steps.
+At the pre-rollout code closure, physical smoke, deployment, and live-provider submissions had not yet been performed. The subsequent authorized rollout deployed the backend and produced the TV proof recorded below; physical phone verification remains pending. These earlier boundaries are historical, not a new approval gate or the current cloud state.
 
 ## Fix-5d behavior notes (review-E + review-F)
 
@@ -126,19 +128,19 @@ Physical-device smoke is already authorized by the workstream brief, but was not
 - Fail-on-definitive: only validation/consent/4xx-certain errors fail the claimed running job via `failClaimedJob` (state failed + budget idle, job + ledger evidence preserved, never touches unclaimed jobs). Unknown/timeout/ambiguous paths keep `releaseWorker` only.
 - Wedged-running recovery: a `running` job with no lease that never settles (terminal config left running by an old worker) is redispatchable via the repo queue client with the same task identity (`partyId/deviceId/channelId/jobId/idempotencyKey`); the claiming worker re-evaluates definitiveness and fails or progresses it. Do not delete the job or hand-roll budget writes.
 
-## Final verification evidence (cycle-13 closure)
+## Historical verification evidence (pre-rollout code closure)
 
 Task restatement: 16-scenario image-backed catalog, two-stage cartoon pipeline (qwen-image-3.0-pro still -> wan3.0-video STANDARD first_frame), scoped consent provenance, delivery-gap repair, host callable enqueue, pending-intent queue, explicit role mapping + situation tableaus.
 
 Plan pointer: the harness plan produced 4 partitions (p1 catalog/packaging, p2 pipeline/wiring, p3 provenance/migration, p4 contracts/delivery/runbook) plus sequential fixes through fix-5e closing delivery gaps, host dispatch, durable pending intents, server-only rehearsal provenance, concurrent dispatch, and created-only plan-mismatch release.
 
-Independent parent verification on merged source `8fa76936cc8b736c3f09ee2fbfe241c3fa31efc9`: `npm run test:emulator` exited 0, including the TypeScript build and all 215 Firestore + Storage + Functions emulator tests (215 passed, 0 failed, 0 skipped). Both deterministic fix-5e regressions executed. The child also reported 105 unit passes / 110 emulator-gated skips; the independent full-emulator result is the acceptance evidence. Earlier runtime:prepare structural-only and cartoon:prepare 3-case offline preview checks remain applicable because packaging inputs did not change (16 packaged scenarios, 0 live submissions, Credits UNKNOWN). Machine-checkable parent acceptance, closed finding IDs, plan receipt hash, review scope and remaining boundaries: [verification-8fa7693.json](cycle13/verification-8fa7693.json). The subsequent closure edits are documentation/evidence only; the tested backend source is unchanged.
+Independent parent verification on merged source `8fa76936cc8b736c3f09ee2fbfe241c3fa31efc9`: `npm run test:emulator` exited 0, including the TypeScript build and all 215 Firestore + Storage + Functions emulator tests (215 passed, 0 failed, 0 skipped). Both deterministic fix-5e regressions executed. The child also reported 105 unit passes / 110 emulator-gated skips; the independent full-emulator result is the acceptance evidence. Earlier runtime:prepare structural-only and cartoon:prepare 3-case offline preview checks remain applicable because packaging inputs did not change (16 packaged scenarios, 0 live submissions, Credits UNKNOWN). Machine-checkable parent acceptance, closed finding IDs, plan receipt hash, review scope and remaining boundaries: [verification-8fa7693.json](cycle13/verification-8fa7693.json). The immediate pre-rollout closure edits were documentation/evidence only. Later rollout source changes are covered by the final independent acceptance section below.
 
 Coverage distinctions (be precise): (i) real serializer tests against the verified Token Plan shapes (input.messages image+text content, parameters incl. negative_prompt; video input.media first_frame) — no network; (ii) network-mocked adapter tests with fetch stubs asserting zero live calls and request body shapes; (iii) fake-rehearsal two-stage tests using FakeImageGenerationPort/FakeVideoGenerationPort proving pipeline orchestration by construction (cannot prove wire bytes — fake ports substitute for provider wire bytes, so byte-level provider equivalence is not established by these tests); (iv) emulator E2Es on real storage bytes (delivery bytes/hashes/ACK/purge/preview retention/withdrawal denial; host portrait real-path; two-guest busy exactly-once; cartoon chain still-bytes vs hash at publish).
 
 Honest review statement: A/B/C cover the earlier base diff, not the final tree. D approved with no findings; E approved with 2 Low + 1 Minimal findings; F requested changes with 1 High + 5 Low + 1 Minimal findings. All 10 E/F findings were addressed in fix-5d. No fresh three-role review covers fix-5e; the parent independently audits that narrow diff and reruns the full merged-tree emulator suite. Do not describe earlier reviews as approval of the final diff.
 
-Boundaries: 0 provider calls, credits UNKNOWN, no cloud deploy/migration, no device proof in this turn, no main merge.
+Historical boundaries of that pre-rollout audit only: 0 provider calls, credits UNKNOWN, no cloud deploy/migration, no device proof, no main merge. The later live rollout and final acceptance supersede those operational boundaries.
 
 ## Rollout closure (live batch + safe window) — appendix
 
@@ -158,7 +160,7 @@ Sanitized only: no private inputs/URLs/credentials/keys, no image bytes/data URI
 |------|--------|----------------------|-----------|---------------|---------------|----------|
 | 1 | `hv-cartoon-case-1` | pink-mansion-foyer / grand-staircase-chase | 130102 | 1 uncertain still POST counted as spent, zero confirmed submits | 0 | Failed + budget released via `failClaimedJob`; evidence preserved |
 | 2 | `hv-cartoon-case-2` | furnace-kitchen-pass / kitchen-slapstick-chase | 130108 | 1 | 1 | Still sha `657d2935…fcee40` (1157339 B); video sha `7091f48a…9203252f` (563257 B, h264/854x480/24fps/2.0s); manifest v2 |
-| 3 | `hv-cartoon-case-3` | pink-mansion-foyer / grand-staircase-chase | (backend-selected, persisted immutably) | 1 | 1 | Still 847983 B; video sha `dc2d89ac…a9d9` (672987 B, same profile); manifest v3 |
+| 3 | `hv-cartoon-case-3` | pink-mansion-foyer / grand-staircase-chase | 130102 | 1 | 1 | Still 847983 B; video sha `dc2d89ac…a9d9` (672987 B, same profile); manifest v3 |
 
 Totals: still POSTs 2 confirmed + 1 uncertain-reserved = 3/3 (ceiling reached, none remaining); videos 2/3 (1 unused, not convertible to a still or a 4th case).
 
@@ -198,5 +200,16 @@ Each item below was observed live and is now closed in code (see behavior notes 
 
 - Case-1 unknown POST is counted as spent without proof of execution (no confirmed submit, no artifact; conservative accounting against the ceiling).
 - Credits UNKNOWN: ledger null everywhere; no console reconciliation performed, so realized spend is unstated.
-- No live still/video re-verification was performed after the final code merges; the cited pass suites are rollout-5/6 emulator runs (228/220/234 passes) on the merged tree, not post-merge live generations.
+- No further paid generations were submitted after safe closure. Final-source parent verification passed 234/234 full backend emulator tests and 104/104 TV tests, with clean TV analysis; these are distinct from the earlier live-provider evidence.
 - Phone proof pending owner unlock + reconnect (see section 5).
+
+
+## Final independent rollout acceptance (2026-10-31)
+
+- Tested merged source: `f6cde52c1a6390e392f6d4173bac000d7f76efda`. `npm run test:emulator` (including TypeScript build) passed **234/234**, with zero failures/skips. TV `flutter test --no-pub --reporter json` passed **104/104** (12 hidden runner/loading events excluded); `flutter analyze --no-pub` found no issues. The containing closure commit changes documentation/evidence only; backend and TV source trees match the tested revision.
+- Parent source review closed the two missing-image-config/definitive-cartoon-FAILED findings and verified the unknown-outcome no-fail/no-resubmit boundary. No fresh three-role harness review covers the final rollout diff; earlier verdicts keep their original scope.
+- Independent read-only cloud checks found all **20** exports ACTIVE (19 in the primary region plus the ingest trigger), none generation-enabled, video provider `fake`, image provider absent, zero queue tasks/pending intents, and an idle generation budget. `hostInvites.expiresAt` TTL is ACTIVE and its collection-group index READY.
+- Both registered-TV ACKs (v2/v3) match the independently recomputed canonical manifest hashes and all clip hashes. All eight delivery objects are absent after purge; all eight retained preview objects were downloaded read-only and independently byte/size-hashed against those manifests. Local CAM-01 videos were independently probed as silent H.264/yuv420p, 854x480, 24fps, 48 frames, 2.0 seconds.
+- Parent reconnected only the already-authorized TV and directly observed the cartoon playing after cloud delivery purge (`WALL UPDATED · v3`); no Wi-Fi toggle, new paid request, or device-state bypass occurred. The installed release package is not debuggable, so direct extraction/hashing of its private cache was unavailable; evidence is the hash-bearing registered-TV ACK plus independently matched retained bytes and actual post-purge playback. This is not a network-isolation test. Physical phone proof remains UNVERIFIED pending owner unlock and USB reconnect.
+- Budget accounting remains **two confirmed stills + one uncertain-reserved still**, **two videos**; no fourth case, blind retry, or ledger reset. Case-1's final cost rows are null-task/null-charge placeholders, not evidence of zero provider contact. Actual Credits remain **UNKNOWN**; no console reconciliation was performed.
+- Machine-checkable, sanitized acceptance and external log hashes: [verification-f6cde52.json](cycle13/verification-f6cde52.json). Private portraits, generated media, screenshots, signed URLs, and credentials remain outside git. All existing branches, owner untracked files, and the stash are retained during the authorized main integration.
