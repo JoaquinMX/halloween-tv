@@ -177,7 +177,16 @@ const GENERIC_TABLEAU: SituationTableau = {
     "companion figures and props for the staged interaction stationed beside them; all figures and props hold completely still with sharp static clarity",
 };
 
+/** Allowlist for situation IDs interpolated into the still prompt (fix-5d). */
+const SITUATION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+
 function tableauForSituationId(situationId: string): SituationTableau {
+  // Validate before interpolation: the fallback tableau names the situation
+  // id in prompt text, so an unvalidated id would be prompt injection.
+  assertPromptText(situationId, "situationId", 128);
+  if (!SITUATION_ID_RE.test(situationId)) {
+    throw new BackendError("INVALID_ARGUMENT", "Cartoon situationId is invalid.");
+  }
   return TABLEAU_BY_SITUATION_ID[situationId] ?? {
     cast: `the uploaded subject (foreground, visually dominant) and the companion figures for situation ${situationId}`,
     tableau:
@@ -246,6 +255,12 @@ export function composeCartoonPrompts(selection: CartoonPromptSelection, situati
   const subject = assertPromptText(selection.subject, "subject", 1200);
   const action = assertPromptText(selection.action, "action", 4000);
   const sceneStyle = neutralizeCastLine(assertPromptText(selection.sceneStyle, "sceneStyle", 4000));
+  if (situationId !== undefined) {
+    assertPromptText(situationId, "situationId", 128);
+    if (!SITUATION_ID_RE.test(situationId)) {
+      throw new BackendError("INVALID_ARGUMENT", "Cartoon situationId is invalid.");
+    }
+  }
   const tableau = situationId !== undefined ? tableauForSituationId(situationId) : GENERIC_TABLEAU;
   const still =
     `Subject and identity: use the subject_identity reference as the character identity. ` +

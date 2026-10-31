@@ -224,23 +224,33 @@ export async function sweepExpiredMedia(
       }
     }
   }
-  // Durable pending intents (fix-5a): withdrawn/expired/missing guests never
-  // dispatch — delete their intent docs here as the bounded cleanup pass
-  // alongside the withdrawal path itself.
+  // Durable pending intents (fix-5a, fix-5d): withdrawn/expired/missing guests
+  // never dispatch — delete their intent docs here as the bounded cleanup
+  // pass alongside the withdrawal path itself. A guest read failure must NOT
+  // delete: the intent is left for the dispatch gate (which distinguishes
+  // typed consent outcomes from ambiguous errors).
   try {
     const intents = await db.collectionGroup("pendingGenerations").get();
     for (const intentDoc of intents.docs) {
       const intent = intentDoc.data() as Record<string, unknown>;
       const submissionId = typeof intent.submissionId === "string" ? intent.submissionId : intentDoc.id;
       const partyId = typeof intent.partyId === "string" ? intent.partyId : undefined;
-      let live = false;
-      if (partyId) {
-        const guestSnap = await db.doc(`parties/${partyId}/guestMedia/${submissionId}`).get().catch(() => undefined);
-        const guest = guestSnap?.exists ? (guestSnap.data() as Record<string, unknown>) : undefined;
-        const expiry = expiryDate(guest?.expiresAt);
-        live = guest?.status === "eligible" && expiry !== undefined && expiry > now &&
-          (guest as Record<string, unknown>).tombstone !== true;
+      if (!partyId) {
+        continue;
       }
+      let guestSnap: FirebaseFirestore.DocumentSnapshot | undefined;
+      try {
+        guestSnap = await db.doc(`parties/${partyId}/guestMedia/${submissionId}`).get();
+      } catch {
+        guestSnap = undefined;
+      }
+      if (guestSnap === undefined) {
+        continue;
+      }
+      const guest = guestSnap.exists ? (guestSnap.data() as Record<string, unknown>) : undefined;
+      const expiry = expiryDate(guest?.expiresAt);
+      const live = guest?.status === "eligible" && expiry !== undefined && expiry > now &&
+        (guest as Record<string, unknown>).tombstone !== true;
       if (!live) {
         await intentDoc.ref.delete().catch(() => undefined);
       }

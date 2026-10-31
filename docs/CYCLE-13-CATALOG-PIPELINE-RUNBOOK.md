@@ -103,6 +103,12 @@ Physical-TV observation checklist (pending until performed):
 
 Physical-TV and live-provider validation remain pending until separately authorized and performed.
 
+## Fix-5d behavior notes (review-E + review-F)
+
+- Rehearsal is server-only: `generateHostVideo` rejects any caller-supplied `rehearsalOnly` (`INVALID_ARGUMENT`); fixture stills publish only when the server-derived `rehearsalOnly` marker is persisted on the job.
+- Queue intent lifecycle is transient-vs-terminal: withdrawn/expired/not-found/forbidden delete intents, ambiguous read failures leave the intent pending with attempt accounting, and `unavailable` is reserved for genuine admission/terminal errors (queue rejection, consent/permission denial).
+- Withdrawal-triggered flush uses the validated identity's `partyId` from the withdrawal result, never the raw caller value.
+
 ## Final verification evidence (cycle-13 closure)
 
 Task restatement: 16-scenario image-backed catalog, two-stage cartoon pipeline (qwen-image-3.0-pro still -> wan3.0-video STANDARD first_frame), scoped consent provenance, delivery-gap repair, host callable enqueue, pending-intent queue, explicit role mapping + situation tableaus.

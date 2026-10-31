@@ -2,7 +2,7 @@ import type { Bucket, File } from "@google-cloud/storage";
 import type { Firestore } from "firebase-admin/firestore";
 import { FieldValue } from "firebase-admin/firestore";
 import { createDeliveryServices, DeliveryServiceOptions, GenerationTask } from "./delivery";
-import { BackendError, DeliveryManifest, isHostSourceConsent, pendingCartoonIntentPath } from "./contracts";
+import { BackendError, DeliveryManifest, isHostSourceConsent, validateId } from "./contracts";
 import { assertGuestEligible } from "./guest_media";
 import { createGenerationServices, GenerationServiceOptions } from "./generation";
 import { createGuestListService } from "./guest_list";
@@ -192,14 +192,22 @@ export function createRuntimeServices(options: RuntimeServiceOptions): RuntimeSe
   });
 
   /**
-   * Bounded pending-intent dispatch (fix-5a): after capacity releases, queue
-   * each pending portrait EXACTLY ONCE with its SAME immutable plan (no
+   * Bounded pending-intent dispatch (fix-5a, fix-5d): after capacity releases,
+   * queue each pending portrait EXACTLY ONCE with its SAME immutable plan (no
    * reroll), before any provider submit. Single-flight stays: the first
    * dispatch occupies the budget and the rest stay pending. Withdrawal/expiry
    * gates are rechecked at dispatch (withdrawn/expired pending never
    * dispatches and is cleaned up). Queue-admission failures mark the intent
    * TERMINAL unavailable. One pass per trigger, no timers, no blind resubmit
    * of unknown outcomes (existing failed jobs are never resubmitted).
+   * Fix-5d: plan-identity mismatch never deletes the job doc (no raw delete of
+   * a possibly-raced job) — the intent is marked unavailable with
+   * MANIFEST_MISMATCH and the job is left for reconciliation. Typed consent
+   * outcomes (withdrawn/expired/not-found/forbidden) delete intents; ambiguous
+   * read failures leave the intent pending with attempt accounting. TERMINAL
+   * unavailable is reserved for genuine admission/terminal errors (queue
+   * rejection, consent/permission denial); transient INTERNAL /
+   * PROVIDER_UNAVAILABLE stay pending with attempt accounting.
    */
   async function flushPendingIntents(partyId: string): Promise<void> {
     if (!generation) return;
@@ -228,7 +236,10 @@ export function createRuntimeServices(options: RuntimeServiceOptions): RuntimeSe
         await intentDoc.ref.delete().catch(() => undefined);
         continue;
       }
-      // Withdrawal/expiry gates re-checked at dispatch.
+      // Withdrawal/expiry gates re-checked at dispatch. Typed consent outcomes
+      // (withdrawn/FORBIDDEN, expired/CLIP_EXPIRED, missing/NOT_FOUND) delete
+      // the intent; ambiguous read failures leave it pending with attempt
+      // accounting for the next bounded pass.
       let eligible: Awaited<ReturnType<typeof assertGuestEligible>> | undefined;
       try {
         eligible = await assertGuestEligible(
@@ -238,8 +249,15 @@ export function createRuntimeServices(options: RuntimeServiceOptions): RuntimeSe
           (options.now ?? (() => new Date()))().getTime(),
         );
       } catch (error) {
-        // Withdrawn/expired pending never dispatches and is cleaned up.
-        await intentDoc.ref.delete().catch(() => undefined);
+        if (error instanceof BackendError &&
+            (error.errorCode === "FORBIDDEN" || error.errorCode === "CLIP_EXPIRED" || error.errorCode === "NOT_FOUND")) {
+          await intentDoc.ref.delete().catch(() => undefined);
+          continue;
+        }
+        await intentDoc.ref.update({
+          attempts: Number(intent.attempts ?? 0) + 1,
+          updatedAt: FieldValue.serverTimestamp(),
+        }).catch(() => undefined);
         continue;
       }
       if (eligible.consentRevision !== intent.consentRevision || eligible.sourceHash !== intent.sourceHash) {
@@ -287,12 +305,13 @@ export function createRuntimeServices(options: RuntimeServiceOptions): RuntimeSe
           idempotencyKey: request.idempotencyKey,
         };
         // The dispatched retry reuses the SAME immutable plan: verify the
-        // persisted plan was not rerolled.
+        // persisted plan was not rerolled. On mismatch the job is NEVER
+        // deleted (it may be raced); the intent is marked unavailable with
+        // MANIFEST_MISMATCH and the job is left for reconciliation.
         const job = await options.db.doc(`parties/${partyId}/jobs/${request.jobId}`).get().catch(() => undefined);
         const persistedPlan = job?.exists ? (job.data() as Record<string, unknown>).cartoonPlan : undefined;
         if (persistedPlan !== undefined && intent.plan !== undefined &&
             JSON.stringify(persistedPlan) !== JSON.stringify(intent.plan)) {
-          await options.db.doc(`parties/${partyId}/jobs/${request.jobId}`).delete().catch(() => undefined);
           await intentDoc.ref.update({
             status: "unavailable",
             errorCode: "MANIFEST_MISMATCH",
@@ -323,11 +342,18 @@ export function createRuntimeServices(options: RuntimeServiceOptions): RuntimeSe
           return;
         }
         if (error instanceof BackendError && (error.errorCode === "FORBIDDEN" || error.errorCode === "CLIP_EXPIRED" || error.errorCode === "NOT_FOUND")) {
-          await intentDoc.ref.delete().catch(() => undefined);
+          // Genuine admission/terminal consent or permission denial: TERMINAL
+          // unavailable (never silent delete; surfaced via status).
+          await intentDoc.ref.update({
+            status: "unavailable",
+            errorCode: error.errorCode,
+            updatedAt: FieldValue.serverTimestamp(),
+          }).catch(() => undefined);
           continue;
         }
-        // Unknown outcome: never blind-resubmit; leave pending for operator
-        // visibility (the next lifecycle event retries boundedly).
+        // Transient (INTERNAL/PROVIDER_UNAVAILABLE) or unknown outcome: never
+        // blind-resubmit; leave pending with attempt accounting for the next
+        // bounded pass.
         await intentDoc.ref.update({
           attempts: Number(intent.attempts ?? 0) + 1,
           updatedAt: FieldValue.serverTimestamp(),
@@ -409,14 +435,38 @@ export function createRuntimeServices(options: RuntimeServiceOptions): RuntimeSe
     return generation.publishManifest(partyId, jobId, idempotencyKey);
   }
 
+  async function generateHostVideo(value: unknown) {
+    try {
+      return await hostMedia.generateHostVideo(value);
+    } catch (error) {
+      // Host queue-admission failure already ran failEnqueue inside the host
+      // service: flush pending intents best-effort like the other
+      // queue-admission paths, then rethrow the typed admission error.
+      if (error instanceof BackendError && error.errorCode === "PROVIDER_UNAVAILABLE") {
+        try {
+          const raw = (value ?? {}) as Record<string, unknown>;
+          if (typeof raw.partyId === "string" && raw.partyId) {
+            const validatedPartyId = validateId(raw.partyId, "partyId");
+            await flushPendingIntents(validatedPartyId).catch(() => undefined);
+          }
+        } catch {
+          // Best-effort only.
+        }
+      }
+      throw error;
+    }
+  }
+
   async function withdrawGuestMedia(value: unknown) {
     const result = await guestUpload.withdrawGuestMedia(value);
     // Withdrawal releases the party budget: dispatch pending portraits
     // boundedly (the withdrawn pending itself was deleted, never dispatched).
+    // The flush uses the validated identity's partyId from the withdrawal
+    // result (never the raw caller value) and is gated on it.
     try {
-      const identity = (value ?? {}) as { partyId?: unknown };
-      if (typeof identity.partyId === "string" && identity.partyId) {
-        await flushPendingIntents(identity.partyId).catch(() => undefined);
+      const validatedPartyId = (result as { partyId?: unknown }).partyId;
+      if (typeof validatedPartyId === "string" && validatedPartyId) {
+        await flushPendingIntents(validateId(validatedPartyId, "partyId")).catch(() => undefined);
       }
     } catch {
       // Best-effort only.
@@ -439,7 +489,7 @@ export function createRuntimeServices(options: RuntimeServiceOptions): RuntimeSe
     joinHost: hostJoin.joinHost,
     revokeHostDevice: hostJoin.revokeHostDevice,
     listHostVideos: hostMedia.listHostVideos,
-    generateHostVideo: hostMedia.generateHostVideo,
+    generateHostVideo,
     getHostVideoPreview: hostMedia.getHostVideoPreview,
     deleteHostVideo: hostMedia.deleteHostVideo,
     requestGuestUpload: guestUpload.requestGuestUpload,
