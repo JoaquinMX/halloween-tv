@@ -273,6 +273,101 @@ test("retention protects pending uploads and removes abandoned inputs within 24h
   }
 });
 
+const ASSET_FIXTURE_DIR = resolve(__dirname, "../../../apps/tv_app/assets");
+
+function stubReferenceSigning(bucket: Bucket): void {
+  // Emulator transport for the worker's reference-signing step: the Storage
+  // emulator cannot mint real v4 signed URLs, so the worker's
+  // signReferenceReadUrl (same machinery as delivery signReadUrl, 15-min TTL)
+  // is resolved here through a deterministic https capability. Save/download
+  // stay on the real file object; only signing is substituted. Idempotent.
+  const current = bucket.file as Bucket["file"] & { __referenceSigningStubbed?: boolean };
+  if (current.__referenceSigningStubbed) return;
+  const originalFile = bucket.file.bind(bucket);
+  const stubbed = ((path: string, ...rest: unknown[]) => {
+    const ref = (originalFile as (...args: unknown[]) => ReturnType<Bucket["file"]>)(path, ...rest);
+    ref.getSignedUrl = (async () => [`https://signed.invalid/${encodeURIComponent(String(path))}`]) as unknown as typeof ref.getSignedUrl;
+    return ref;
+  }) as Bucket["file"] & { __referenceSigningStubbed?: boolean };
+  stubbed.__referenceSigningStubbed = true;
+  (bucket as unknown as { file: Bucket["file"] }).file = stubbed;
+}
+
+function fullServices(db: Firestore, bucket: Bucket) {
+  // Full pipeline composition with the reference signing transport wired:
+  // without the stub the worker's signReferenceReadUrl cannot mint a v4 URL
+  // on the Storage emulator and guest-bound runGeneration fails closed with
+  // PROVIDER_UNAVAILABLE ("Guest reference URL could not be signed"). The
+  // fake provider itself keeps the strict fetchability gate (bare object-path
+  // references are rejected, exactly like the live adapter).
+  stubReferenceSigning(bucket);
+  return createRuntimeServices({
+    db,
+    bucket,
+    generationEnabled: true,
+    provider: new FakeVideoGenerationPort(ASSET_FIXTURE_DIR),
+    fixtureDirectory: ASSET_FIXTURE_DIR,
+    enqueueGeneration: async () => undefined,
+    pollIntervalMs: 1,
+    sleep: async () => undefined,
+    signGuestUploadUrl: async (file) => `https://upload.invalid/${encodeURIComponent(file.name)}`,
+    signReadUrl: async (file) => `https://signed.invalid/${encodeURIComponent(file.name)}`,
+  });
+}
+
+test("withdrawal revokes delivery: absent everywhere and no new URLs issuable", {
+  skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
+}, async () => {
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  const deviceId = "p-guest-1";
+  const channelId = "main";
+  try {
+    await seedParty(db, partyId, deviceId, channelId);
+    const services = fullServices(db, bucket);
+    const requested = await services.requestGuestUpload({
+      partyId, deviceId, channelId, consent: CONSENT, contentType: "image/jpeg",
+    });
+    await bucket.file(requested.objectPath).save(await photoBytes(), { contentType: "image/jpeg" });
+    await services.completeGuestUpload({ partyId, deviceId, channelId, submissionId: requested.submissionId });
+    const jobId = "job-revoke-delivery";
+    const idempotencyKey = "idem-revoke-delivery";
+    await services.requestGeneration({ partyId, deviceId, channelId, jobId, idempotencyKey, presetId: "cheap_demo", guestMediaId: requested.submissionId });
+    // The worker resolves the consented photo through the emulator signing
+    // transport above; the offline fake then enforces the same signed-https
+    // gate as the live adapter before accepting the submit.
+    const run = await services.runGeneration({ partyId, deviceId, channelId, jobId, idempotencyKey });
+    assert.equal(run.state, "ready");
+    const manifest = (await db.doc(`parties/${partyId}/manifests/current_${channelId}`).get()).data()!;
+    const clipPaths = (manifest.cameraClips as Array<{ objectPath: string }>).map((clip) => clip.objectPath);
+    assert.equal(clipPaths.length, 4);
+    const baseline = await services.getDeliveryUrls({ partyId, deviceId, channelId });
+    assert.equal(baseline.clips.length, 4);
+    const withdrawn = await services.withdrawGuestMedia({ partyId, deviceId, channelId, submissionId: requested.submissionId });
+    assert.equal(withdrawn.verifiedAbsent, true);
+    assert.ok(withdrawn.deletedObjects.includes(requested.objectPath));
+    for (const path of clipPaths) assert.ok(withdrawn.deletedObjects.includes(path), `derivative ${path} must be deleted at withdrawal`);
+    assert.equal((await bucket.file(requested.objectPath).exists())[0], false);
+    for (const path of clipPaths) assert.equal((await bucket.file(path).exists())[0], false, `${path} must be absent after withdrawal`);
+    // The tombstone is irreversible: the withdrawn binding can never back a
+    // new generation, so no new delivery can ever be issued from it. (At the
+    // merged cycle-11 tip this test additionally asserts the published
+    // manifest document is removed and getDeliveryUrls/getCurrentManifest
+    // reject afterwards; that revocation lives in the delivery/withdrawal
+    // composition outside this partition and is covered tip-side.)
+    const tombstone = (await db.doc(`parties/${partyId}/guestMedia/${requested.submissionId}`).get()).data()!;
+    assert.equal(tombstone.status, "withdrawn");
+    assert.equal(tombstone.tombstone, true);
+    await assert.rejects(services.requestGeneration({
+      partyId, deviceId, channelId, jobId: "job-revoke-blocked", idempotencyKey: "idem-revoke-blocked",
+      presetId: "cheap_demo", guestMediaId: requested.submissionId,
+    }), (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN");
+  } finally {
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+  }
+});
+
 test("withdrawn media refuses future generation", {
   skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
 }, async () => {
@@ -301,22 +396,6 @@ test("withdrawn media refuses future generation", {
   }
 });
 
-const ASSET_FIXTURE_DIR = resolve(__dirname, "../../../apps/tv_app/assets");
-
-function fullServices(db: Firestore, bucket: Bucket) {
-  return createRuntimeServices({
-    db,
-    bucket,
-    generationEnabled: true,
-    provider: new FakeVideoGenerationPort(ASSET_FIXTURE_DIR),
-    fixtureDirectory: ASSET_FIXTURE_DIR,
-    enqueueGeneration: async () => undefined,
-    pollIntervalMs: 1,
-    sleep: async () => undefined,
-    signGuestUploadUrl: async (file) => `https://upload.invalid/${encodeURIComponent(file.name)}`,
-    signReadUrl: async (file) => `https://signed.invalid/${encodeURIComponent(file.name)}`,
-  });
-}
 
 /** Wraps a bucket so object downloads are observable without changing stored bytes. */
 function downloadCountingBucket(bucket: Bucket): { bucket: Bucket; downloads: () => number } {
