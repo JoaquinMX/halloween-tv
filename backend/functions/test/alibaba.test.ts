@@ -380,3 +380,130 @@ test("polled FAILED surfaces the provider code/message and redacts URLs (no netw
   assert.equal(empty.errorCode, "PROVIDER_ERROR");
   assert.equal(empty.errorMessage, undefined);
 });
+
+test("bounded video submit timeout surfaces certainty unknown, never non_billable", async () => {
+  // Hung POST regression: the fetch never resolves unless aborted; the short
+  // timeout must abort it and classify the outcome as unknown.
+  const hanging = new AlibabaVideoGenerationPort({
+    apiKey: "fixture-key",
+    workspaceId: "workspace",
+    submitTimeoutMs: 10,
+    fetchImpl: ((_url: unknown, init?: { signal?: AbortSignal }) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () =>
+          reject(Object.assign(new Error("The operation was aborted."), { name: "AbortError" })));
+      })) as typeof fetch,
+  });
+  await assert.rejects(hanging.submit(buildCheapDemoRequest("job-1", "idem-1", "CAM-01")), (error: unknown) =>
+    error instanceof AlibabaSubmissionError && error.certainty === "unknown" && error.retryable === false);
+});
+
+test("bounded video status/result timeouts surface unknown, never success", async () => {
+  const hanging = new AlibabaVideoGenerationPort({
+    apiKey: "fixture-key",
+    workspaceId: "workspace",
+    statusTimeoutMs: 10,
+    resultTimeoutMs: 10,
+    fetchImpl: ((_url: unknown, init?: { signal?: AbortSignal }) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () =>
+          reject(Object.assign(new Error("The operation was aborted."), { name: "AbortError" })));
+      })) as typeof fetch,
+  });
+  await assert.rejects(hanging.getStatus("task-fixture-001"), (error: unknown) =>
+    error instanceof AlibabaSubmissionError && error.certainty === "unknown");
+  await assert.rejects(hanging.getResult("task-fixture-001"), (error: unknown) =>
+    error instanceof AlibabaSubmissionError && error.certainty === "unknown");
+});
+
+test("bounded image POST timeout surfaces certainty unknown, never non_billable", async () => {
+  const hanging = new AlibabaImageGenerationPort({
+    apiKey: "fixture-key",
+    workspaceId: "workspace",
+    submitTimeoutMs: 10,
+    fetchImpl: ((_url: unknown, init?: { signal?: AbortSignal }) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () =>
+          reject(Object.assign(new Error("The operation was aborted."), { name: "AbortError" })));
+      })) as typeof fetch,
+  });
+  await assert.rejects(
+    hanging.submit(tinyCartoonStillRequest("job-cartoon-1:still:timeout-reg")),
+    (error: unknown) => error instanceof AlibabaSubmissionError && error.certainty === "unknown" && error.retryable === false,
+  );
+});
+
+test("bounded reference-image fetch timeout surfaces certainty unknown", async () => {
+  const syncBody = {
+    output: {
+      request_id: "req-ref-timeout-1",
+      choices: [{ message: { content: [{ image: "https://cdn.invalid/still-timeout.png" }] } }],
+    },
+  };
+  const refHanging = new AlibabaImageGenerationPort({
+    apiKey: "fixture-key",
+    workspaceId: "workspace",
+    submitTimeoutMs: 5_000,
+    referenceFetchTimeoutMs: 10,
+    fetchImpl: (async (url: unknown, init?: { signal?: AbortSignal }) => {
+      if (String(url).startsWith("https://cdn.invalid/")) {
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(Object.assign(new Error("The operation was aborted."), { name: "AbortError" })));
+        });
+      }
+      return new Response(JSON.stringify(syncBody), { status: 200 });
+    }) as typeof fetch,
+  });
+  await assert.rejects(
+    refHanging.submit(tinyCartoonStillRequest("job-cartoon-1:still:ref-timeout")),
+    (error: unknown) => error instanceof AlibabaSubmissionError && error.certainty === "unknown",
+  );
+});
+
+test("no-timeout regression guard: every provider fetch call site passes an AbortSignal", async () => {
+  const seen: Array<AbortSignal | undefined> = [];
+  const capturing = (body: unknown, status = 200) =>
+    (async (_url: unknown, init?: { signal?: AbortSignal }) => {
+      seen.push(init?.signal);
+      return new Response(JSON.stringify(body), { status });
+    }) as typeof fetch;
+  // Video submit + status + result.
+  const video = new AlibabaVideoGenerationPort({
+    apiKey: "fixture-key", workspaceId: "workspace", fetchImpl: capturing(fixture.submit),
+  });
+  await video.submit(buildCheapDemoRequest("job-1", "idem-1", "CAM-01"));
+  assert.ok(seen[0] instanceof AbortSignal, "video submit must carry an AbortSignal timeout");
+  const videoPoll = new AlibabaVideoGenerationPort({
+    apiKey: "fixture-key", workspaceId: "workspace", fetchImpl: capturing(fixture.succeeded),
+  });
+  await videoPoll.getStatus("task-fixture-001");
+  await videoPoll.getResult("task-fixture-001");
+  // Image POST.
+  const image = new AlibabaImageGenerationPort({
+    apiKey: "fixture-key", workspaceId: "workspace", fetchImpl: capturing({
+      output: { request_id: "req-signal-guard", choices: [{ message: { content: [{ image: "data:image/png;base64,AQID" }] } }] },
+    }),
+  });
+  await image.submit(tinyCartoonStillRequest("job-cartoon-1:still:signal-guard"));
+  // Reference-image https fetch.
+  const refSeen: Array<AbortSignal | undefined> = [];
+  const refPort = new AlibabaImageGenerationPort({
+    apiKey: "fixture-key",
+    workspaceId: "workspace",
+    fetchImpl: (async (url: unknown, init?: { signal?: AbortSignal }) => {
+      if (String(url).startsWith("https://cdn.invalid/")) {
+        refSeen.push(init?.signal);
+        return new Response(await Promise.resolve(new Uint8Array([9, 9]).buffer as ArrayBuffer), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        output: { request_id: "req-ref-signal", choices: [{ message: { content: [{ image: "https://cdn.invalid/g.png" }] } }] },
+      }), { status: 200 });
+    }) as typeof fetch,
+  });
+  await refPort.submit(tinyCartoonStillRequest("job-cartoon-1:still:ref-signal"));
+  for (const signal of [...seen, ...refSeen]) {
+    assert.ok(signal instanceof AbortSignal, "every provider fetch call site must pass a signal");
+  }
+  assert.ok(refSeen.length === 1 && refSeen[0] instanceof AbortSignal, "reference-image fetch must carry an AbortSignal timeout");
+});

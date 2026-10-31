@@ -64,9 +64,40 @@ export interface GenerationServices {
   requestCartoonFromPortrait(value: unknown): ReturnType<FirestoreGenerationStore["requestCartoonFromPortrait"]>;
   getGenerationStatus(value: unknown): ReturnType<FirestoreGenerationStore["getGenerationStatus"]>;
   failEnqueue(task: GenerationTask): Promise<void>;
+  failClaimedJob(task: GenerationTask, errorCode?: string, providerErrorCode?: string): Promise<boolean>;
   runGeneration(task: GenerationTask): Promise<{ jobId: string; state: string; manifestVersion?: number }>;
   normalizeAndStage(partyId: string, jobId: string, cameraId: CameraId, result: ProviderResult): Promise<Record<string, unknown>>;
   publishManifest(partyId: string, jobId: string, idempotencyKey: string): Promise<import("./contracts").DeliveryManifest>;
+}
+
+/**
+ * Rollout-5 fail-on-definitive classifier. Returns true ONLY for definitive
+ * terminal worker errors: request validation (INVALID_ARGUMENT,
+ * MANIFEST_MISMATCH, or config-shape plain Errors), consent refusal
+ * (FORBIDDEN), and 4xx-certain provider rejections (AlibabaSubmissionError
+ * certainty "non_billable"). Unknown/timeout/ambiguous outcomes — including
+ * AlibabaSubmissionError "unknown", PROVIDER_UNAVAILABLE, AbortError/timeouts,
+ * socket/fetch failures, and reconciliation phrasing — return false and keep
+ * the releaseWorker-only path so a running job is never failed blindly.
+ */
+export function isDefinitiveTerminalWorkerError(error: unknown): boolean {
+  if (error instanceof AlibabaSubmissionError) return error.certainty === "non_billable";
+  if (error instanceof BackendError) {
+    if (error.errorCode === "INVALID_ARGUMENT" || error.errorCode === "FORBIDDEN" ||
+        error.errorCode === "MANIFEST_MISMATCH") return true;
+    return false;
+  }
+  if (error instanceof Error) {
+    const message = error.message ?? "";
+    if (/abort|timeout|timed out|timing out|unknown|reconciliation|reconcile|socket|econn|fetch failed|network/i.test(message)) {
+      return false;
+    }
+    if (/Unsupported|invalid|must|requires?|required|mismatch|malformed|rejected|validation|consent|withdrawn|forbidden|not consented|not available|missing/i.test(message)) {
+      return true;
+    }
+    return false;
+  }
+  return false;
 }
 
 function ledgerInput(job: FirebaseFirestore.DocumentData, cameraId: CameraId): UsageLedgerInput {
@@ -130,6 +161,23 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
   const now = options.now ?? (() => new Date());
   const pollIntervalMs = options.pollIntervalMs ?? 15_000;
   const providerTimeoutMs = options.providerTimeoutMs ?? 12 * 60 * 1000;
+
+  /**
+   * Rollout-5 claimed-job settle discipline: definitive terminal errors fail
+   * the claimed running job (state failed + budget idle, evidence preserved)
+   * via failClaimedJob; every ambiguous path (unknown/timeout/reconciliation)
+   * releases the worker lease only. Never touches terminal jobs or jobs this
+   * invocation did not claim (failClaimedJob is itself running-only).
+   */
+  async function settleClaimedJob(validTask: GenerationTask, error: unknown): Promise<void> {
+    const latest = await store.getJob(validTask.partyId, validTask.jobId).catch(() => undefined);
+    if (!latest || ["failed", "ready", "delivering", "expired", "purged"].includes(String(latest.state))) return;
+    if (isDefinitiveTerminalWorkerError(error)) {
+      await store.failClaimedJob(validTask, error instanceof BackendError ? error.errorCode : "PROVIDER_UNAVAILABLE").catch(() => undefined);
+      return;
+    }
+    await store.releaseWorker(validTask.partyId, validTask.jobId).catch(() => undefined);
+  }
 
   async function normalizeAndStage(partyId: string, jobId: string, cameraId: CameraId, result: ProviderResult): Promise<Record<string, unknown>> {
     validateId(partyId, "partyId");
@@ -621,10 +669,7 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
       await publish(validTask.partyId, validTask.jobId, validTask.idempotencyKey);
       return { jobId: validTask.jobId, state: "ready", manifestVersion: Number(finished.manifestVersion) };
     } catch (error) {
-      const latest = await store.getJob(validTask.partyId, validTask.jobId).catch(() => undefined);
-      if (latest && !["failed", "ready"].includes(String(latest.state))) {
-        await store.releaseWorker(validTask.partyId, validTask.jobId).catch(() => undefined);
-      }
+      await settleClaimedJob(validTask, error);
       throw error;
     }
   }
@@ -765,7 +810,12 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
               providerTask = { taskId: submitted.taskId };
             }
           } catch (error) {
-            const certainty = error instanceof AlibabaSubmissionError ? error.certainty : "unknown";
+            // Definitive submit rejections (validation/consent/4xx-certain)
+            // fail closed as non_billable so single-flight releases; unknown/
+            // timeout/ambiguous stays unknown with the worker lease released.
+            const certainty = error instanceof AlibabaSubmissionError
+              ? error.certainty
+              : isDefinitiveTerminalWorkerError(error) ? "non_billable" : "unknown";
             const errorCode = "PROVIDER_UNAVAILABLE";
             await store.recordSubmissionFailure({ ...validTask, presetId: jobPresetId }, cameraId, errorCode, certainty);
             await recordUsageOutcome(options.db, ledgerInput(job, cameraId), {
@@ -848,10 +898,7 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
           await failForWithdrawnConsent(validTask.partyId, validTask.jobId).catch(() => undefined);
         }
       } else {
-        const latest = await store.getJob(validTask.partyId, validTask.jobId).catch(() => undefined);
-        if (latest && !["failed", "ready"].includes(String(latest.state))) {
-          await store.releaseWorker(validTask.partyId, validTask.jobId).catch(() => undefined);
-        }
+        await settleClaimedJob(validTask, error);
       }
       throw error;
     }
@@ -862,6 +909,7 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
     requestCartoonFromPortrait: (value) => store.requestCartoonFromPortrait(value),
     getGenerationStatus: (value) => store.getGenerationStatus(value),
     failEnqueue: (task) => store.failEnqueue(task),
+    failClaimedJob: (task, errorCode, providerErrorCode) => store.failClaimedJob(task, errorCode, providerErrorCode),
     runGeneration,
     normalizeAndStage,
     publishManifest: publish,

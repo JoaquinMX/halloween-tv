@@ -772,6 +772,47 @@ export class FirestoreGenerationStore {
   }
 
   /**
+   * Rollout-5 fail-on-definitive: marks a CLAIMED (running) job failed and
+   * releases the party budget in one transaction, preserving job + ledger
+   * evidence (failedAt, errorCode, providerErrorCode; ledger rows untouched).
+   * Only transitions running -> failed; terminal jobs (failed/ready/
+   * delivering/expired/purged) and unclaimed queued jobs are never touched, so
+   * an invocation can never fail a job it did not claim. Ambiguous outcomes
+   * (unknown/timeout) must keep using releaseWorker, never this path.
+   * Returns true when the job was failed, false when it was left untouched.
+   */
+  async failClaimedJob(task: GenerationTask, errorCode = "PROVIDER_UNAVAILABLE", providerErrorCode?: string): Promise<boolean> {
+    const ref = jobRef(this.db, task.partyId, task.jobId);
+    const budget = budgetRef(this.db, task.partyId);
+    return this.db.runTransaction(async (transaction) => {
+      const [snapshot, budgetSnapshot] = await Promise.all([transaction.get(ref), transaction.get(budget)]);
+      if (!snapshot.exists) throw new BackendError("NOT_FOUND", "Generation job does not exist.");
+      const job = snapshot.data()!;
+      if (job.idempotencyKey !== task.idempotencyKey || job.deviceId !== task.deviceId || job.channelId !== task.channelId) {
+        throw new BackendError("FORBIDDEN", "Worker identity does not match the job.");
+      }
+      if (["failed", "ready", "delivering", "expired", "purged"].includes(String(job.state))) return false;
+      if (String(job.state) !== "running") return false;
+      const timestamp = FieldValue.serverTimestamp();
+      transaction.update(ref, {
+        state: "failed",
+        status: "failed",
+        errorCode,
+        ...(typeof providerErrorCode === "string" && providerErrorCode !== ""
+          ? { providerErrorCode: providerErrorCode.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 80) }
+          : {}),
+        failedAt: timestamp,
+        timestamp,
+        workerLeaseUntilMs: 0,
+      });
+      if (budgetSnapshot.exists && budgetSnapshot.data()?.activeJobId === task.jobId) {
+        transaction.update(budget, { activeJobId: null, state: "idle", updatedAt: timestamp });
+      }
+      return true;
+    });
+  }
+
+  /**
    * Cartoon still-stage guards: idempotent submit-once + resume without a
    * duplicate billable still submission. Mirrors beginSubmission/recordSubmission
    * for the CAM-01 video stage but keys on the still idempotency key.

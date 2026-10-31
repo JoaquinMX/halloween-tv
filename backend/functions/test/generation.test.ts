@@ -500,3 +500,133 @@ test("requestGeneration gate accepts host-consented sources and rejects mismatch
     await disposeEmulatorContext(app);
   }
 });
+
+test("definitive 4xx-certain submit failure fails the claimed job and releases the budget", {
+  skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
+}, async () => {
+  const { AlibabaSubmissionError } = await import("../src/providers/alibaba");
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  const deviceId = "tv-terminal-fail";
+  const channelId = "main";
+  const jobId = "job-terminal-4xx";
+  const idempotencyKey = "idem-terminal-4xx";
+  try {
+    await seedParty(db, partyId, deviceId, channelId);
+    const definitive = {
+      async submit(_request: VideoGenerationRequest) {
+        throw new AlibabaSubmissionError("Alibaba image request failed (InvalidParameter).", "non_billable", false);
+      },
+      async getStatus(_taskId: string): Promise<ProviderTaskStatus> { return { state: "SUCCEEDED" }; },
+      async getResult(_taskId: string): Promise<ProviderResult> {
+        return { video: { kind: "file", value: "unused" }, secondsOut: 2, secondsIn: 0, creditsCharged: null };
+      },
+    };
+    const services = createGenerationServices({
+      db, bucket, provider: definitive, pollIntervalMs: 1, sleep: async () => undefined,
+    });
+    await services.requestGeneration({ partyId, deviceId, channelId, jobId, idempotencyKey, presetId: "cheap_demo" });
+    await assert.rejects(services.runGeneration({ partyId, deviceId, channelId, jobId, idempotencyKey }),
+      (error: unknown) => error instanceof BackendError && error.errorCode === "PROVIDER_UNAVAILABLE");
+    const job = (await db.doc(`parties/${partyId}/jobs/${jobId}`).get()).data()!;
+    assert.equal(job.state, "failed", "definitive error must fail the claimed job, not wedge running");
+    assert.ok(job.failedAt, "job evidence must be preserved");
+    assert.equal(job.errorCode, "PROVIDER_UNAVAILABLE");
+    const budget = (await db.doc(`parties/${partyId}/generationBudget/active`).get()).data()!;
+    assert.equal(budget.activeJobId, null, "budget must release on definitive failure");
+    assert.equal(budget.state, "idle");
+    // Ledger evidence preserved: the failure outcome row exists.
+    const ledger = (await db.doc(`parties/${partyId}/costLogs/${usageLedgerId(jobId, "CAM-01")}`).get()).data()!;
+    assert.equal(ledger.success, false);
+    // Single-flight released: an unrelated job can proceed.
+    const next = await services.requestGeneration({
+      partyId, deviceId, channelId, jobId: "job-after-terminal", idempotencyKey: "idem-after-terminal", presetId: "cheap_demo",
+    });
+    assert.equal(next.created, true, "unrelated guest must proceed after terminal fail+release");
+  } finally {
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+  }
+});
+
+test("definitive validation config error fails the claimed job without wedging single-flight", {
+  skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
+}, async () => {
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  const deviceId = "tv-terminal-config";
+  const channelId = "main";
+  const jobId = "job-terminal-config";
+  const idempotencyKey = "idem-terminal-config";
+  try {
+    await seedParty(db, partyId, deviceId, channelId);
+    const misconfigured = {
+      async submit(_request: VideoGenerationRequest) {
+        throw new Error("Cartoon video controls must match the fixed STANDARD cheap_demo envelope.");
+      },
+      async getStatus(_taskId: string): Promise<ProviderTaskStatus> { return { state: "SUCCEEDED" }; },
+      async getResult(_taskId: string): Promise<ProviderResult> {
+        return { video: { kind: "file", value: "unused" }, secondsOut: 2, secondsIn: 0, creditsCharged: null };
+      },
+    };
+    const services = createGenerationServices({
+      db, bucket, provider: misconfigured, pollIntervalMs: 1, sleep: async () => undefined,
+    });
+    await services.requestGeneration({ partyId, deviceId, channelId, jobId, idempotencyKey, presetId: "cheap_demo" });
+    await assert.rejects(services.runGeneration({ partyId, deviceId, channelId, jobId, idempotencyKey }),
+      (error: unknown) => error instanceof BackendError);
+    const job = (await db.doc(`parties/${partyId}/jobs/${jobId}`).get()).data()!;
+    assert.equal(job.state, "failed", "terminal config error must fail, not wedge running-with-no-lease");
+    const budget = (await db.doc(`parties/${partyId}/generationBudget/active`).get()).data()!;
+    assert.equal(budget.state, "idle");
+    assert.equal(budget.activeJobId, null);
+    const next = await services.requestGeneration({
+      partyId, deviceId, channelId, jobId: "job-after-config", idempotencyKey: "idem-after-config", presetId: "cheap_demo",
+    });
+    assert.equal(next.created, true);
+  } finally {
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+  }
+});
+
+test("ambiguous timeout error releases the worker only and never fails the job", {
+  skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
+}, async () => {
+  const { AlibabaSubmissionError } = await import("../src/providers/alibaba");
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  const deviceId = "tv-ambiguous";
+  const channelId = "main";
+  const jobId = "job-ambiguous-timeout";
+  const idempotencyKey = "idem-ambiguous-timeout";
+  try {
+    await seedParty(db, partyId, deviceId, channelId);
+    const flaky = {
+      async submit(_request: VideoGenerationRequest) {
+        throw new AlibabaSubmissionError("Alibaba submission outcome is unknown.", "unknown", false);
+      },
+      async getStatus(_taskId: string): Promise<ProviderTaskStatus> { return { state: "SUCCEEDED" }; },
+      async getResult(_taskId: string): Promise<ProviderResult> {
+        return { video: { kind: "file", value: "unused" }, secondsOut: 2, secondsIn: 0, creditsCharged: null };
+      },
+    };
+    const services = createGenerationServices({
+      db, bucket, provider: flaky, pollIntervalMs: 1, sleep: async () => undefined,
+    });
+    await services.requestGeneration({ partyId, deviceId, channelId, jobId, idempotencyKey, presetId: "cheap_demo" });
+    await assert.rejects(services.runGeneration({ partyId, deviceId, channelId, jobId, idempotencyKey }),
+      (error: unknown) => error instanceof BackendError && error.errorCode === "PROVIDER_UNAVAILABLE");
+    const job = (await db.doc(`parties/${partyId}/jobs/${jobId}`).get()).data()!;
+    assert.equal(job.state, "running", "ambiguous errors must keep the job running with the lease released");
+    assert.equal(job.status, "reconciliation_required");
+    assert.equal(job.reconciliationReason, "SUBMISSION_OUTCOME_UNKNOWN");
+    assert.equal(Number(job.workerLeaseUntilMs ?? 0), 0);
+    const budget = (await db.doc(`parties/${partyId}/generationBudget/active`).get()).data()!;
+    assert.equal(budget.activeJobId, jobId, "ambiguous path must not release the budget");
+    assert.equal(budget.state, "in_flight");
+  } finally {
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+  }
+});
