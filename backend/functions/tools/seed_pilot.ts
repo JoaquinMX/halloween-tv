@@ -315,6 +315,10 @@ async function applySeed(
         channelId: options.channel,
         state: "ready",
         status: "ready",
+        // Server-authored fixed literal: this operator tool is a trusted
+        // creation path, so it stamps the unbound text-only marker the
+        // delivery provenance gate requires. Never caller input.
+        kind: "text-only",
         presetId: "pilot_fixture",
         modelId: "offline-fixture",
         sourceManifestVersion: 0,

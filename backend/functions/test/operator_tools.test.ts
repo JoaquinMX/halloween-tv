@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { createDeliveryServices } from "../src/delivery";
+import { evaluateDeliveryProvenance } from "../src/contracts";
 import { REQUIRED_CAMERA_IDS } from "../src/config";
 import { usageIntentDocument, usageLedgerId } from "../src/usage";
 import { HAS_FIRESTORE_EMULATOR, clearParty, createEmulatorContext, disposeEmulatorContext, randomPartyId } from "./support/emulators";
@@ -662,6 +663,15 @@ test("pilot seed stores playable bytes, is idempotent, and refuses newer or purg
     assert.ok(manifest.createdAt, "published manifest has no createdAt");
     assert.equal(manifest.jobId, "pilot-fixture-v1");
     assert.equal(job.state, "ready");
+    assert.equal(job.presetId, "pilot_fixture");
+    assert.equal(job.kind, "text-only", "seeded pilot job must carry the server-authored text-only marker");
+    assert.equal(evaluateDeliveryProvenance({ job, nowMs: Date.now() }), "text-only",
+      "seeded pilot job must pass the delivery provenance gate");
+    assert.throws(
+      () => evaluateDeliveryProvenance({ job: { ...job, kind: undefined }, nowMs: Date.now() }),
+      /Job carries no verifiable provenance binding/,
+      "a hand-written marker-less job must still be denied",
+    );
     assert.ok(job.createdAt);
     assert.ok(job.expiresAt);
     assert.deepEqual(job.deliveryPaths, manifest.cameraClips.map((clip: { objectPath: string }) => clip.objectPath));
@@ -993,4 +1003,21 @@ test("firestore indexes declare hostInvites expiresAt TTL plus collection-group 
   for (const entry of inventory.fieldOverrides) {
     if (entry.collectionGroup !== "hostInvites") assert.ok(!entry.ttl, `${entry.collectionGroup} must not enable TTL`);
   }
+});
+
+test("seeded pilot job carries the server-authored text-only marker accepted by the provenance gate", () => {
+  // Regression guard that runs without emulators: the operator seeder is a
+  // trusted creation path that stamps the fixed literal kind:"text-only" in
+  // the same creation transaction, never from caller input.
+  const seederSource = readFileSync(join(PACKAGE_ROOT, "tools", "seed_pilot.ts"), "utf8");
+  assert.match(seederSource, /kind:\s*"text-only"/, "seeder must stamp the server-authored text-only marker");
+  const seededJob = { jobId: "pilot-fixture-v1", presetId: "pilot_fixture", kind: "text-only" };
+  assert.equal(evaluateDeliveryProvenance({ job: seededJob, nowMs: Date.now() }), "text-only",
+    "seeded pilot job shape must pass the delivery provenance gate");
+  const markerLess = { jobId: "pilot-fixture-v1", presetId: "pilot_fixture" };
+  assert.throws(
+    () => evaluateDeliveryProvenance({ job: markerLess, nowMs: Date.now() }),
+    /Job carries no verifiable provenance binding/,
+    "a hand-written marker-less job must still be denied",
+  );
 });
