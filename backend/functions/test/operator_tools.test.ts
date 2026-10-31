@@ -969,3 +969,28 @@ test("cartoon batch planner is preview-only with a mandatory credit gate and zer
   // No Token Plan price is invented by the planner.
   assert.ok(!/\$0\.05|\$0\.10|US\$/.test(JSON.stringify(plan)));
 });
+
+test("firestore indexes declare hostInvites expiresAt TTL plus collection-group index", () => {
+  const indexesPath = resolve(PACKAGE_ROOT, "../firestore.indexes.json");
+  const inventory = JSON.parse(readFileSync(indexesPath, "utf8")) as {
+    indexes: unknown[];
+    fieldOverrides: Array<{ collectionGroup: string; fieldPath: string; ttl?: boolean; indexes?: Array<{ order: string; queryScope: string }> }>;
+  };
+  assert.ok(Array.isArray(inventory.fieldOverrides), "firestore indexes must declare fieldOverrides");
+  const byGroup = new Map(inventory.fieldOverrides.map((entry) => [entry.collectionGroup, entry]));
+  for (const group of ["jobs", "guestMedia", "hostInvites"]) {
+    const entry = byGroup.get(group);
+    assert.ok(entry, `missing ${group}.expiresAt fieldOverride`);
+    assert.equal(entry.fieldPath, "expiresAt");
+    const scopes = entry.indexes ?? [];
+    assert.ok(scopes.some((index) => index.order === "ASCENDING" && index.queryScope === "COLLECTION_GROUP"),
+      `${group}.expiresAt must keep the ASCENDING COLLECTION_GROUP index`);
+  }
+  // TTL is enabled ONLY on hostInvites; jobs/guestMedia behavior is unchanged.
+  assert.equal(byGroup.get("hostInvites")?.ttl, true, "hostInvites.expiresAt must enable TTL");
+  assert.ok(!byGroup.get("jobs")?.ttl, "jobs.expiresAt TTL must stay off");
+  assert.ok(!byGroup.get("guestMedia")?.ttl, "guestMedia.expiresAt TTL must stay off");
+  for (const entry of inventory.fieldOverrides) {
+    if (entry.collectionGroup !== "hostInvites") assert.ok(!entry.ttl, `${entry.collectionGroup} must not enable TTL`);
+  }
+});
