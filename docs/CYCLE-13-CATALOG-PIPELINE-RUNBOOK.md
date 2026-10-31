@@ -102,3 +102,17 @@ Physical-TV observation checklist (pending until performed):
 - Record device, build, emulator-signing differences, and operator observations. Emulator validation is not physical-TV validation.
 
 Physical-TV and live-provider validation remain pending until separately authorized and performed.
+
+## Final verification evidence (cycle-13 closure)
+
+Task restatement: 16-scenario image-backed catalog, two-stage cartoon pipeline (qwen-image-3.0-pro still -> wan3.0-video STANDARD first_frame), scoped consent provenance, delivery-gap repair, host callable enqueue, pending-intent queue, explicit role mapping + situation tableaus.
+
+Plan pointer: the harness plan produced 4 partitions (p1 catalog/packaging, p2 pipeline/wiring, p3 provenance/migration, p4 contracts/delivery/runbook) plus sequential fixes fix-p2 through fix-5b closing delivery gaps, host dispatch, and pending-intent dispatch.
+
+Machine evidence (sanitized, no private inputs/URLs/credentials/secrets): tsc build pass; unit suite 102 pass / 0 fail / 108 emulator-gated skips (of 210); FULL Firestore+Storage+Functions emulator suite 210 pass / 0 fail / 0 skipped on the final merged checkout; runtime:prepare structural-only pass with 16 scenarios packaged; cartoon:prepare 3-case offline preview (0 live submits, 0 billable, credits UNKNOWN).
+
+Coverage distinctions (be precise): (i) real serializer tests against the verified Token Plan shapes (input.messages image+text content, parameters incl. negative_prompt; video input.media first_frame) — no network; (ii) network-mocked adapter tests with fetch stubs asserting zero live calls and request body shapes; (iii) fake-rehearsal two-stage tests using FakeImageGenerationPort/FakeVideoGenerationPort proving pipeline orchestration by construction (cannot prove wire bytes — fake ports substitute for provider wire bytes, so byte-level provider equivalence is not established by these tests); (iv) emulator E2Es on real storage bytes (delivery bytes/hashes/ACK/purge/preview retention/withdrawal denial; host portrait real-path; two-guest busy exactly-once; cartoon chain still-bytes vs hash at publish).
+
+Honest review statement: plan + review-A/B/C receipts cover the cycle-13 base diff only; fix-2 through fix-5b diffs are NOT covered by those approvals; the parent runs the independent final audit.
+
+Boundaries: 0 provider calls, credits UNKNOWN, no cloud deploy/migration, no device proof in this turn, no main merge.
