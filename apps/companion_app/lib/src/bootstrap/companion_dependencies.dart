@@ -248,8 +248,16 @@ final class CompanionDependencies {
   }
 
   static Future<void> _initializeFirebase(BackendConfig config) async {
+    // FirebaseInitProvider may have already created [DEFAULT] from
+    // google-services.json (e.g. redacted local options). Tolerate that and
+    // use the pre-initialized default: callable transports do not consume
+    // the API key, so a key-mismatched default still reaches the backend.
     if (Firebase.apps.isEmpty) {
-      await Firebase.initializeApp(options: config.firebaseOptions!);
+      try {
+        await Firebase.initializeApp(options: config.firebaseOptions!);
+      } on FirebaseException catch (error) {
+        if (error.code != 'duplicate-app') rethrow;
+      }
     }
   }
 
