@@ -17,8 +17,10 @@ import {
   buildCheapDemoRequest,
   validateCameoDemoControls,
   validateCheapDemoControls,
+  validateFetchableReferenceImage,
   validatePresetControls,
 } from "../src/video_generation_port";
+import { REFERENCE_READ_URL_TTL_MS, signReferenceReadUrl } from "../src/generation";
 import {
   HAS_FIRESTORE_EMULATOR,
   clearParty,
@@ -105,11 +107,18 @@ test("fake provider reports the 5s cameo shape offline and keeps the 2s cheap sh
     objectPath: "parties/pilot/guests/p-1/ingest/gsub-1/photo.jpg",
     sha256: "b".repeat(64),
     consentRevision: "v1:2026-10-30T00:00:00.000Z",
+    url: "https://signed.invalid/offline-cameo.jpg",
   };
   const cameo = await provider.submit(buildCameoDemoRequest("job-cameo-offline", "idem-cameo-offline", "CAM-01", reference));
   assert.equal((await provider.getResult(cameo.taskId)).secondsOut, 5);
   const cheap = await provider.submit(buildCheapDemoRequest("job-cheap-offline", "idem-cheap-offline", "CAM-01"));
   assert.equal((await provider.getResult(cheap.taskId)).secondsOut, 2);
+  // The offline fake enforces the same fetchability gate as the live adapter.
+  await assert.rejects(provider.submit(buildCameoDemoRequest("job-cameo-bare", "idem-cameo-bare", "CAM-01", {
+    objectPath: "parties/pilot/guests/p-1/ingest/gsub-1/photo.jpg",
+    sha256: "b".repeat(64),
+    consentRevision: "v1:2026-10-30T00:00:00.000Z",
+  })), /signed https URL/);
 });
 
 class TrackingFakeProvider extends FakeVideoGenerationPort {
@@ -121,6 +130,16 @@ class TrackingFakeProvider extends FakeVideoGenerationPort {
 }
 
 function servicesFor(db: Firestore, bucket: Bucket, provider: TrackingFakeProvider) {
+  // Stub GCS v4 signing for the emulator: the worker resolves the guest photo
+  // to a short-lived signed https URL via bucket.getSignedUrl (same machinery
+  // as delivery signReadUrl). The stub keeps save/download on the real file
+  // object and only replaces signing with a deterministic https URL.
+  const originalFile = bucket.file.bind(bucket);
+  (bucket as unknown as { file: Bucket["file"] }).file = ((path: string, ...rest: unknown[]) => {
+    const ref = (originalFile as (...args: unknown[]) => ReturnType<Bucket["file"]>)(path, ...rest);
+    ref.getSignedUrl = (async () => [`https://signed.invalid/${encodeURIComponent(String(path))}`]) as unknown as typeof ref.getSignedUrl;
+    return ref;
+  }) as Bucket["file"];
   return createRuntimeServices({
     db,
     bucket,
@@ -143,6 +162,44 @@ async function eligibleGuestMedia(services: ReturnType<typeof createRuntimeServi
   assert.equal(completed.status, "eligible");
   return { requested, completed, photoHash: createHash("sha256").update(photo).digest("hex") };
 }
+
+test("reference read URL uses the delivery signing machinery with a 15-minute TTL (no network)", async () => {
+  const seen: Array<Record<string, unknown>> = [];
+  const fakeBucket = {
+    file: (objectPath: string) => ({
+      getSignedUrl: async (options: Record<string, unknown>) => {
+        seen.push({ objectPath, ...options });
+        return [`https://signed.invalid/${encodeURIComponent(objectPath)}`];
+      },
+    }),
+  };
+  const fixedNow = new Date("2026-10-31T00:00:00.000Z");
+  const url = await signReferenceReadUrl(
+    fakeBucket as unknown as Bucket,
+    "parties/pilot/guests/p-1/ingest/gsub-1/photo.jpg",
+    () => fixedNow,
+  );
+  assert.ok(url.startsWith("https://"));
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].action, "read");
+  assert.equal(seen[0].version, "v4");
+  assert.equal(
+    Date.parse(String((seen[0].expires as Date).toISOString())) - fixedNow.getTime(),
+    REFERENCE_READ_URL_TTL_MS,
+  );
+  // Fetchability gate: bare paths and non-https URLs are rejected.
+  assert.throws(() => validateFetchableReferenceImage({
+    objectPath: "parties/pilot/guests/p-1/ingest/gsub-1/photo.jpg",
+    sha256: "a".repeat(64),
+    consentRevision: "v1",
+  }), /signed https URL/);
+  assert.throws(() => validateFetchableReferenceImage({
+    objectPath: "parties/pilot/guests/p-1/ingest/gsub-1/photo.jpg",
+    sha256: "a".repeat(64),
+    consentRevision: "v1",
+    url: "http://signed.invalid/photo.jpg",
+  }), /signed https URL/);
+});
 
 test("guest-bound cameo_demo runs one 5s provider camera plus three fixture slots", {
   skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
@@ -191,11 +248,22 @@ test("guest-bound cameo_demo runs one 5s provider camera plus three fixture slot
     assert.equal(submitted.modelId, "happyhorse-1.1-r2v");
     assert.equal(submitted.secondsOut, 5);
     assert.equal(submitted.prompt, CAMEO_DEMO_PROMPT);
+    // The worker resolved the private bucket path to a fetchable signed https
+    // URL for the in-flight submit; the server-side binding is unchanged.
+    assert.ok(typeof submitted.referenceImage?.url === "string" && submitted.referenceImage.url.startsWith("https://"));
+    assert.ok(!submitted.referenceImage.url.includes("storage_ref"));
     assert.deepEqual(submitted.referenceImage, {
       objectPath: requested.objectPath,
       sha256: photoHash,
       consentRevision: completed.consentRevision,
+      url: submitted.referenceImage?.url,
     });
+    // No signed URL is persisted: the stored job, guest binding, and usage
+    // docs carry server-side state only.
+    const storedJobJson = JSON.stringify(storedJob);
+    assert.ok(!storedJobJson.includes("signed.invalid"));
+    const reloadedJob = (await db.doc(`parties/${partyId}/jobs/${jobId}`).get()).data()!;
+    assert.ok(!JSON.stringify(reloadedJob).includes("signed.invalid"));
 
     // Four playable published clips on the canonical four-camera manifest, all at the 5s cameo duration.
     const manifest = (await db.doc(`parties/${partyId}/manifests/current_${channelId}`).get()).data()!;

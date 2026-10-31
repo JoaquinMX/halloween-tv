@@ -49,6 +49,18 @@ function deliveryObjectPath(partyId: string, channelId: string, version: number,
   return `parties/${partyId}/channels/${channelId}/delivery/${version}/${cameraId}.mp4`;
 }
 
+/**
+ * Persistence guard: signed reference URLs are in-flight only and must never
+ * reach Firestore job docs. The guest binding stores server-side state
+ * (objectPath + sourceHash + consentRevision) exclusively.
+ */
+function assertNoSignedReferenceUrl(value: unknown): void {
+  const serialized = JSON.stringify(value ?? null);
+  if (/https?:\/\//.test(serialized) && /signed/.test(serialized)) {
+    throw new BackendError("INTERNAL", "Signed reference URLs must never be persisted.");
+  }
+}
+
 function exposedTimestamp(value: unknown): unknown {
   if (value && typeof value === "object" && "toDate" in value && typeof (value as { toDate?: unknown }).toDate === "function") {
     return ((value as { toDate: () => Date }).toDate()).toISOString();
@@ -140,6 +152,8 @@ export class FirestoreGenerationStore {
           deviceId: guest.deviceId,
           channelId: guest.channelId,
         };
+        // Fail closed if a fetchable URL ever reaches the persistence path.
+        assertNoSignedReferenceUrl(guestBinding);
       }
       transaction.create(ref, {
         jobId: input.jobId,

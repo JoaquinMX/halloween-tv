@@ -115,6 +115,7 @@ test("guest image reference serializes offline with cheap_demo limits unchanged"
     objectPath: "parties/pilot/guests/p-guest001/ingest/gsub-guest001/photo.jpg",
     sha256: photoSha,
     consentRevision: "v1:2026-10-30T00:00:00.000Z",
+    url: "https://signed.invalid/guest-photo.jpg",
   });
   assert.equal(request.modelId, "wan3.0-video");
   assert.equal(request.resolution, "480P");
@@ -126,9 +127,13 @@ test("guest image reference serializes offline with cheap_demo limits unchanged"
   assert.deepEqual(body, fixture.body);
   assert.equal((body.input as Record<string, unknown>).prompt, request.prompt);
   assert.deepEqual((body.input as Record<string, unknown>).reference_image, {
-    storage_ref: "parties/pilot/guests/p-guest001/ingest/gsub-guest001/photo.jpg",
+    url: "https://signed.invalid/guest-photo.jpg",
     sha256: photoSha,
   });
+  // The private bucket path never leaves the backend: no storage_ref or
+  // objectPath key survives serialization.
+  assert.ok(!JSON.stringify(body).includes("storage_ref"));
+  assert.ok(!JSON.stringify(body).includes("parties/pilot/"));
   assert.deepEqual(body.parameters, { resolution: "480P", ratio: "16:9", duration: 2, audio: false, watermark: false });
   const textOnly = buildAlibabaSubmitBody(buildCheapDemoRequest("job-1", "idem-1", "CAM-02"));
   assert.ok(!("reference_image" in (textOnly.input as Record<string, unknown>)));
@@ -145,6 +150,7 @@ test("cameo_demo serializes offline to the r2v model at 5s with a reference (no 
     objectPath: "parties/pilot/guests/p-guest001/ingest/gsub-guest001/photo.jpg",
     sha256: photoSha,
     consentRevision: "v1:2026-10-30T00:00:00.000Z",
+    url: "https://signed.invalid/guest-photo.jpg",
   });
   assert.equal(request.modelId, "happyhorse-1.1-r2v");
   assert.equal(request.presetId, "cameo_demo");
@@ -160,11 +166,62 @@ test("cameo_demo serializes offline to the r2v model at 5s with a reference (no 
   assert.equal(body.model, "happyhorse-1.1-r2v");
   assert.equal((body.input as Record<string, unknown>).prompt, request.prompt);
   assert.deepEqual((body.input as Record<string, unknown>).reference_image, {
-    storage_ref: "parties/pilot/guests/p-guest001/ingest/gsub-guest001/photo.jpg",
+    url: "https://signed.invalid/guest-photo.jpg",
     sha256: photoSha,
   });
   assert.deepEqual(body.parameters, { resolution: "480P", ratio: "16:9", duration: 5, audio: false, watermark: false });
+  // The private bucket path never leaves the backend: no storage_ref or
+  // objectPath key survives serialization.
+  assert.ok(!JSON.stringify(body).includes("storage_ref"));
+  assert.ok(!JSON.stringify(body).includes("parties/pilot/"));
   // cheap_demo is untouched by the cameo mapping.
   assert.equal(buildCheapDemoRequest("job-1", "idem-1", "CAM-01").modelId, "wan3.0-video");
   assert.equal(CAMEO_DEMO_PRESET.secondsOut, 5);
+});
+
+test("unsigned and internal reference paths are rejected before transport (no network)", async () => {
+  // Zero provider network requests: every case fails closed in serialization.
+  let fetches = 0;
+  const provider = new AlibabaVideoGenerationPort({
+    apiKey: "fixture-key",
+    workspaceId: "workspace",
+    fetchImpl: async () => { fetches += 1; return new Response("{}", { status: 200 }); },
+  });
+  const base = {
+    objectPath: "parties/pilot/guests/p-guest001/ingest/gsub-guest001/photo.jpg",
+    sha256: "9".repeat(64),
+    consentRevision: "v1:2026-10-30T00:00:00.000Z",
+  };
+  // Bare internal bucket path with no signed URL.
+  const bare = buildCameoDemoRequest("job-cameo-1", "idem-cameo-1", "CAM-01", { ...base });
+  assert.throws(() => buildAlibabaSubmitBody(bare), /signed https URL/);
+  await assert.rejects(provider.submit(bare), /signed https URL/);
+  // Non-https URL schemes are rejected at the binding boundary itself.
+  for (const url of ["http://signed.invalid/guest-photo.jpg", "gs://bucket/parties/pilot/photo.jpg"]) {
+    assert.throws(() => buildCameoDemoRequest("job-cameo-1", "idem-cameo-1", "CAM-01", { ...base, url }), /signed https URL/);
+  }
+  // Same gate for guest-bound cheap_demo references.
+  const cheapBare = buildCheapDemoRequest("job-guest-1", "idem-guest-1", "CAM-01", { ...base });
+  assert.throws(() => buildAlibabaSubmitBody(cheapBare), /signed https URL/);
+  await assert.rejects(provider.submit(cheapBare), /signed https URL/);
+  assert.equal(fetches, 0);
+});
+
+test("resolved reference serializes to the fetchable https URL form (no network)", async () => {
+  // Zero provider network requests: pure offline serialization.
+  const photoSha = createHash("sha256").update(readFileSync(resolve("test/fixtures/guest_photo.jpg"))).digest("hex");
+  const url = "https://signed.invalid/guest-photo.jpg?token=abc123";
+  const request = buildCameoDemoRequest("job-cameo-1", "idem-cameo-1", "CAM-01", {
+    objectPath: "parties/pilot/guests/p-guest001/ingest/gsub-guest001/photo.jpg",
+    sha256: photoSha,
+    consentRevision: "v1:2026-10-30T00:00:00.000Z",
+    url,
+  });
+  const body = buildAlibabaSubmitBody(request);
+  const reference = (body.input as Record<string, unknown>).reference_image as Record<string, unknown>;
+  assert.equal(reference.url, url);
+  assert.ok(String(reference.url).startsWith("https://"));
+  assert.equal(reference.sha256, photoSha);
+  assert.ok(!("storage_ref" in reference));
+  assert.ok(!("objectPath" in reference));
 });

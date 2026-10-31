@@ -34,7 +34,17 @@ export interface GenerationServiceOptions {
   normalization?: NormalizationOptions;
   /** Local fixture directory for consent-bound guest jobs (three fixture slots). */
   fixtureDirectory?: string;
+  /**
+   * Offline-test override for reference URL signing. Production defaults to
+   * the bucket's v4 signed read URL (same machinery as delivery signReadUrl,
+   * 15-min TTL). Injected signers must return an https URL and must never
+   * persist it; the URL is used in-flight only.
+   */
+  signReferenceUrl?: (objectPath: string) => Promise<string>;
 }
+
+/** Short-lived reference read capability: 15-min TTL is plenty for submit. */
+export const REFERENCE_READ_URL_TTL_MS = 15 * 60 * 1000;
 
 export interface GenerationServices {
   requestGeneration(value: unknown): ReturnType<FirestoreGenerationStore["requestGeneration"]>;
@@ -55,6 +65,24 @@ function ledgerInput(job: FirebaseFirestore.DocumentData, cameraId: CameraId): U
     jobId: String(job.jobId),
     cameraId,
   };
+}
+
+/**
+ * Signs a short-lived provider-fetchable read URL for a consented guest
+ * photo. Same machinery as the delivery signReadUrl default (GCS v4 read
+ * signature); the caller keeps the URL in memory for the submit call only.
+ */
+export async function signReferenceReadUrl(
+  bucket: Bucket,
+  objectPath: string,
+  now: () => Date = () => new Date(),
+): Promise<string> {
+  const [url] = await bucket.file(objectPath).getSignedUrl({
+    action: "read",
+    version: "v4",
+    expires: new Date(now().getTime() + REFERENCE_READ_URL_TTL_MS),
+  });
+  return url;
 }
 
 export function createGenerationServices(options: GenerationServiceOptions): GenerationServices {
@@ -212,7 +240,23 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
     if (createHash("sha256").update(bytes).digest("hex") !== eligible.sourceHash) {
       throw new BackendError("MANIFEST_MISMATCH", "Guest media bytes do not match the consented source hash.");
     }
-    return { objectPath: eligible.objectPath, sha256: eligible.sourceHash, consentRevision: eligible.consentRevision };
+    // Resolve the consented photo to a short-lived signed https read URL for
+    // provider submission: same v4 read-signature machinery as delivery
+    // signReadUrl, 15-min TTL. The URL lives only in this in-memory
+    // reference; it is never written to manifests, logs, or Firestore docs.
+    let url: string;
+    try {
+      url = options.signReferenceUrl
+        ? await options.signReferenceUrl(eligible.objectPath)
+        : await signReferenceReadUrl(options.bucket, eligible.objectPath, now);
+    } catch (error) {
+      if (error instanceof BackendError) throw error;
+      throw new BackendError("PROVIDER_UNAVAILABLE", "Guest reference URL could not be signed for submission.");
+    }
+    if (typeof url !== "string" || !/^https:\/\//.test(url)) {
+      throw new BackendError("PROVIDER_UNAVAILABLE", "Guest reference URL signing did not return a fetchable https URL.");
+    }
+    return { objectPath: eligible.objectPath, sha256: eligible.sourceHash, consentRevision: eligible.consentRevision, url };
   }
 
   async function publish(partyId: string, jobId: string, idempotencyKey: string) {

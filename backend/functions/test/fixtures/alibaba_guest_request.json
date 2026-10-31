@@ -16,7 +16,8 @@
     "referenceImage": {
       "objectPath": "parties/pilot/guests/p-guest001/ingest/gsub-guest001/photo.jpg",
       "sha256": "990113ea6cec90564cdc9e64917fd5fc2b1172a6220d20f8848225c084eb316a",
-      "consentRevision": "v1:2026-10-30T00:00:00.000Z"
+      "consentRevision": "v1:2026-10-30T00:00:00.000Z",
+      "url": "https://signed.invalid/guest-photo.jpg"
     }
   },
   "body": {
@@ -24,7 +25,7 @@
     "input": {
       "prompt": "A two-second, silent 16:9 Halloween security-camera scene for CAM-01.",
       "reference_image": {
-        "storage_ref": "parties/pilot/guests/p-guest001/ingest/gsub-guest001/photo.jpg",
+        "url": "https://signed.invalid/guest-photo.jpg",
         "sha256": "990113ea6cec90564cdc9e64917fd5fc2b1172a6220d20f8848225c084eb316a"
       }
     },
