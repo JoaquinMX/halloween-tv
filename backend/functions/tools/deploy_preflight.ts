@@ -9,33 +9,27 @@
  * project, `--target=emulator` is the local dry run. Every failure is
  * reported; the process exits nonzero when any check fails.
  */
-import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import {
+  EXPECTED_NORMALIZATION,
+  assertLinuxX64Executable,
+  assertMp4Container,
+  readRuntimeManifest,
+  sha256Hex,
+  validateFixtureBytes,
+  type RuntimeManifest,
+} from "./runtime_artifact";
 
 const REQUIRED_EXPORTS = ["requestGeneration", "runGeneration", "getCurrentManifest", "getDeliveryUrls", "acknowledgeDelivery", "sweepExpiredMedia"];
-const EXPECTED_NORMALIZATION = { codec: "h264", pixelFormat: "yuv420p", frameRate: "24/1", width: 854, height: 480, durationMs: 2000 };
 const CONFIG_KEYS = new Set([
   "STORAGE_BUCKET", "FFMPEG_PATH", "FFPROBE_PATH", "GENERATION_WORKER_TIMEOUT_SECONDS",
   "PROVIDER_POLL_TIMEOUT_SECONDS", "NORMALIZATION_HEADROOM_SECONDS", "VIDEO_GENERATION_PROVIDER",
   "FIRESTORE_EMULATOR_HOST", "STORAGE_EMULATOR_HOST", "FAKE_FIXTURE_DIR",
   "GENERATION_ENABLED", "PROVIDER_POLL_INTERVAL_MS", "PROVIDER_TIMEOUT_MS",
 ]);
-
-type RuntimeManifest = {
-  target?: string;
-  binaries?: {
-    ffmpegPath?: string; ffprobePath?: string; ffmpegVersion?: string; ffprobeVersion?: string;
-    ffmpegBytes?: number; ffprobeBytes?: number;
-  };
-  fixtureDirectory?: string;
-  fixtures?: Array<{ cameraId: string; path: string; sha256: string; sizeBytes: number; durationMs: number }>;
-  normalization?: typeof EXPECTED_NORMALIZATION;
-  smokeTested?: boolean;
-  runtimeBytes?: number;
-};
 
 function argument(name: string): string | undefined {
   const prefix = `--${name}=`;
@@ -140,8 +134,15 @@ export async function runPreflight(): Promise<Record<string, unknown>> {
     throw new Error("Preflight requires an explicit VIDEO_GENERATION_PROVIDER=fake; live generation stays owner-gated.");
   }
   const generationEnabled = (process.env.GENERATION_ENABLED ?? config.GENERATION_ENABLED ?? "").trim().toLowerCase() === "true";
-  if (target === "cloud" && generationEnabled) {
+  const allowGeneration = process.argv.includes("--allow-generation");
+  if (target === "cloud" && generationEnabled && !allowGeneration) {
     throw new Error("Cloud preflight refuses GENERATION_ENABLED=true without an explicit owner-approved generation batch; unset it for deploy checks.");
+  }
+  if (allowGeneration && target !== "cloud") {
+    throw new Error("--allow-generation is a cloud-only explicit opt-in; emulator targets never enable generation.");
+  }
+  if (allowGeneration && provider !== "fake") {
+    throw new Error("--allow-generation permits only the fake provider; live generation stays owner-gated.");
   }
 
   const failures: string[] = [];
@@ -166,21 +167,23 @@ export async function runPreflight(): Promise<Record<string, unknown>> {
   let runtime: RuntimeManifest | undefined;
   await recordAsync(async () => {
     const runtimeManifestPath = join(functionsRoot, "runtime", "runtime-manifest.json");
-    if (!existsSync(runtimeManifestPath)) throw new Error("Prepared runtime manifest is missing; run npm run runtime:prepare on Linux x64.");
-    runtime = JSON.parse(await readFile(runtimeManifestPath, "utf8")) as RuntimeManifest;
+    runtime = readRuntimeManifest(runtimeManifestPath);
     if (runtime.target !== "linux-x64") throw new Error(`Prepared runtime target must be linux-x64 (found ${String(runtime.target)}).`);
-    if (runtime.smokeTested !== true) throw new Error("Prepared FFmpeg/ffprobe artifact has no successful normalization smoke test.");
+    if (runtime.smokeTested === true) {
+      if (runtime.validationMode !== "executed") {
+        throw new Error("Prepared runtime claims smokeTested=true without executed validation; smokeTested requires binary execution.");
+      }
+    } else if (runtime.validationMode !== "structural-only") {
+      throw new Error("Prepared FFmpeg/ffprobe artifact has no successful normalization smoke test and no structural-only record.");
+    }
   });
 
   const runtimeRoot = join(functionsRoot, "runtime");
   if (runtime) {
     for (const relativePath of ["bin/ffmpeg", "bin/ffprobe"]) {
       record(() => {
-        const path = join(runtimeRoot, relativePath);
-        if (!existsSync(path)) throw new Error(`Prepared runtime binary is missing: runtime/${relativePath}.`);
-        const bytes = readFileSync(path);
-        if (bytes.byteLength < 1024 * 1024) throw new Error(`Prepared runtime binary is unexpectedly small (${bytes.byteLength} bytes): runtime/${relativePath}.`);
-        if (!isLinuxX64Elf(bytes)) throw new Error(`Prepared runtime binary is not a Linux x86_64 ELF executable: runtime/${relativePath}.`);
+        // Structural read-only check: the Linux binaries are never executed here.
+        assertLinuxX64Executable(join(runtimeRoot, relativePath), `Prepared runtime ${relativePath}`);
       });
     }
     record(() => {
@@ -215,11 +218,8 @@ export async function runPreflight(): Promise<Record<string, unknown>> {
         const path = join(functionsRoot, fixture.path);
         if (!existsSync(path)) throw new Error(`Prepared runtime fixture is missing: ${fixture.path}.`);
         const bytes = readFileSync(path);
-        if (bytes.toString("ascii", 4, 8) !== "ftyp") throw new Error(`Prepared runtime fixture is not an MP4 file: ${fixture.path}.`);
-        const hash = createHash("sha256").update(bytes).digest("hex");
-        if (hash !== fixture.sha256 || bytes.byteLength !== fixture.sizeBytes || fixture.durationMs !== 2000) {
-          throw new Error(`Prepared runtime fixture metadata does not match its bytes: ${fixture.cameraId}.`);
-        }
+        assertMp4Container(bytes, `Prepared runtime fixture: ${fixture.path}`);
+        validateFixtureBytes(bytes, fixture);
       }
     });
     await recordAsync(async () => {
@@ -300,6 +300,15 @@ export async function runPreflight(): Promise<Record<string, unknown>> {
   if (runtimeBytes > 100 * 1024 * 1024) {
     warnings.push(`Prepared runtime is ${(runtimeBytes / (1024 * 1024)).toFixed(1)} MiB; verify it against the current Functions source upload limit before npm run deploy.`);
   }
+  if (runtime?.validationMode === "structural-only") {
+    warnings.push(
+      "Runtime artifact is structural-only: the packaged Linux binaries were hashed and header-checked but never executed on this host; " +
+      "the normalization smoke test runs on linux-x64 execution before live use.",
+    );
+  }
+  if (allowGeneration) {
+    warnings.push("Explicit fake-only rehearsal opt-in (--allow-generation with VIDEO_GENERATION_PROVIDER=fake); restore GENERATION_ENABLED=unset/false after the rehearsal window.");
+  }
   return {
     preflight: "passed",
     target,
@@ -307,8 +316,15 @@ export async function runPreflight(): Promise<Record<string, unknown>> {
     bucket,
     functionsRoot,
     runtimeTarget: runtime?.target,
+    runtimeValidationMode: runtime?.validationMode ?? "unknown",
+    runtimeSmokeTested: runtime?.smokeTested === true,
+    binarySha256: {
+      ffmpeg: runtime?.binaries?.ffmpegSha256,
+      ffprobe: runtime?.binaries?.ffprobeSha256,
+    },
     fixtureDirectory: runtime?.fixtureDirectory,
     functionsEntry: mainEntry,
+    generationOptIn: allowGeneration ? "fake-only-rehearsal" : "disabled",
     workerTimeoutSeconds: integerSetting("GENERATION_WORKER_TIMEOUT_SECONDS", config),
     providerPollTimeoutSeconds: integerSetting("PROVIDER_POLL_TIMEOUT_SECONDS", config),
     normalizationHeadroomSeconds: integerSetting("NORMALIZATION_HEADROOM_SECONDS", config),

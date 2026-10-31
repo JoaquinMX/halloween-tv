@@ -18,6 +18,8 @@
     "seed:pilot:preview": "tsx tools/seed_pilot.ts --target=emulator",
     "seed:pilot:apply": "tsx tools/seed_pilot.ts --target=emulator --apply",
     "seed:pilot:cloud": "tsx tools/seed_pilot.ts --target=cloud",
+    "rehearse:fake": "tsx tools/run_fake_rehearsal.ts",
+    "preflight:rehearsal": "tsx tools/deploy_preflight.ts --target=cloud --allow-generation",
     "dry-run": "tsx tools/run_dry_run.ts --target=emulator",
     "fake:e2e": "STORAGE_BUCKET=demo-halloween-tv.appspot.com firebase --config ../firebase.json emulators:exec --project demo-halloween-tv --only firestore,storage \"npm run dry-run\"",
     "verify:delivery": "tsx tools/verify_delivery.ts",

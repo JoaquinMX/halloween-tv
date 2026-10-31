@@ -146,81 +146,171 @@ test("delivery verification refuses unsafe targets and exits nonzero on a failed
     "--output-dir=" + mkdtempSync(join(tmpdir(), "p4-verify-fail-"))], fakeEmulatorEnv());
   assert.notEqual(unreachable.status, 0);
   assert.match(unreachable.stderr, /failed|fetch|ECONNREFUSED/i);
+
+  const conflict = runTool("tools/verify_delivery.ts", ["--target=cloud", "--observe-only", "--ack-and-purge",
+    "--project=real-project-12345", "--bucket=real-project-12345.appspot.com",
+    "--functions-url=https://us-central1-real-project-12345.cloudfunctions.net",
+    "--party=pilot", "--device=tv-pilot", "--channel=haunted_surveillance"], cleanEnv());
+  assert.notEqual(conflict.status, 0);
+  assert.match(conflict.stderr, /never preempts/);
 });
 
-test("runtime preparation refuses a host that cannot execute the packaged target", {
-  skip: IS_LINUX_X64 ? "the Linux x64 packaging path is exercised by the deploy CI job" : false,
-}, () => {
+test("fake rehearsal previews without network and refuses live, mixed, and implicit selection", () => {
+  const base = ["--target=cloud", "--project=real-project-12345",
+    "--functions-url=https://us-central1-real-project-12345.cloudfunctions.net",
+    "--party=party-12345", "--device=tv-12345", "--channel=haunted_surveillance",
+    "--job=rehearsal-job-1", "--provider=fake"];
+  const preview = runTool("tools/run_fake_rehearsal.ts", base, cleanEnv());
+  assert.equal(preview.status, 0, preview.stderr);
+  const plan = lastJson(preview.stdout);
+  assert.equal(plan.result, "preview");
+  assert.equal(plan.preview, true);
+  assert.equal(plan.provider, "fake");
+  assert.equal(plan.submits, 1);
+  assert.equal(plan.jobId, "rehearsal-job-1");
+
+  const live = runTool("tools/run_fake_rehearsal.ts", base.map((arg) => arg === "--provider=fake" ? "--provider=alibaba" : arg), cleanEnv());
+  assert.notEqual(live.status, 0);
+  assert.match(live.stderr, /live providers are refused/);
+
+  const ambientLive = runTool("tools/run_fake_rehearsal.ts", base,
+    { ...cleanEnv(), VIDEO_GENERATION_PROVIDER: "alibaba" });
+  assert.notEqual(ambientLive.status, 0);
+  assert.match(ambientLive.stderr, /refuses ambient VIDEO_GENERATION_PROVIDER/);
+
+  const missing = base.filter((arg) => !arg.startsWith("--job="));
+  const implicit = runTool("tools/run_fake_rehearsal.ts", [...missing, "--apply"], cleanEnv());
+  assert.notEqual(implicit.status, 0);
+  assert.match(implicit.stderr, /nothing is inferred/);
+
+  const mixed = runTool("tools/run_fake_rehearsal.ts", [...base, "--apply"],
+    { ...cleanEnv(), FIRESTORE_EMULATOR_HOST: "127.0.0.1:8080" });
+  assert.notEqual(mixed.status, 0);
+  assert.match(mixed.stderr, /mixed emulator\/cloud targets/);
+
+  const http = runTool("tools/run_fake_rehearsal.ts", base.map((arg) =>
+    arg.startsWith("--functions-url=") ? "--functions-url=http://us-central1-real-project-12345.cloudfunctions.net" : arg),
+  cleanEnv());
+  assert.notEqual(http.status, 0);
+  assert.match(http.stderr, /must use HTTPS/);
+});
+
+test("runtime preparation validates the Linux artifact without executing foreign binaries", () => {
   const result = runTool("tools/prepare_runtime.ts", [], cleanEnv());
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /must execute on linux-x64/);
-  assert.match(result.stderr, new RegExp(`${process.platform}-${process.arch}`));
-  assert.equal(existsSync(join(PACKAGE_ROOT, "runtime", "runtime-manifest.json")), false,
-    "a refused preparation must not leave a runtime artifact behind");
+  assert.equal(result.status, 0, result.stderr);
+  const report = lastJson(result.stdout);
+  assert.equal(report.prepared, true);
+  assert.equal(report.target, "linux-x64");
+  const manifestPath = join(PACKAGE_ROOT, "runtime", "runtime-manifest.json");
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+    target: string; validationMode: string; smokeTested: boolean; structuralOnly: boolean;
+    binaries: { ffmpegSha256: string; ffprobeSha256: string; ffmpegBytes: number; ffprobeBytes: number };
+    fixtures: Array<{ cameraId: string; sha256: string; sizeBytes: number }>;
+  };
+  assert.equal(manifest.target, "linux-x64");
+  if (IS_LINUX_X64) {
+    assert.equal(manifest.validationMode, "executed");
+    assert.equal(manifest.smokeTested, true);
+  } else {
+    // Cross-host: structural-only, never executed, smokeTested never true.
+    assert.equal(manifest.validationMode, "structural-only");
+    assert.equal(manifest.smokeTested, false);
+    assert.equal(manifest.structuralOnly, true);
+    assert.match(result.stderr, /structural-only/);
+  }
+  for (const name of ["ffmpeg", "ffprobe"] as const) {
+    const bytes = readFileSync(join(PACKAGE_ROOT, "runtime", "bin", name));
+    assert.equal(bytes[0], 0x7f, `${name} is not an ELF binary`);
+    assert.equal(bytes.toString("ascii", 1, 4), "ELF");
+    assert.equal(bytes.readUInt16LE(18), 62, `${name} is not x86-64`);
+  }
+  const key = (name: string): string => name === "ffmpeg" ? manifest.binaries.ffmpegSha256 : manifest.binaries.ffprobeSha256;
+  for (const name of ["ffmpeg", "ffprobe"]) {
+    const original = readFileSync(join(PACKAGE_ROOT, "node_modules", name === "ffmpeg" ? "@ffmpeg-installer" : "@ffprobe-installer", "linux-x64", name));
+    assert.equal(createHash("sha256").update(original).digest("hex"), key(name), `packaged ${name} diverges from the pinned package bytes`);
+  }
+  const expected = fixtureManifest();
+  assert.equal(manifest.fixtures.length, 4);
+  for (const clip of manifest.fixtures) {
+    const want = expected.clips.find((entry) => entry.cameraId === clip.cameraId)!;
+    assert.equal(clip.sha256, want.sha256, `packaged fixture hash drift for ${clip.cameraId}`);
+    assert.equal(clip.sizeBytes, want.sizeBytes);
+  }
 });
 
 type ArtifactOptions = { timeoutSeconds?: number; omitFixture?: string; stripFixtureBinding?: boolean; omitRuntime?: boolean };
 
-/** Builds a deployable artifact shape from the real compiled output, fixtures and pinned binaries. */
+/**
+ * Builds an isolated deployable artifact from the ACTUAL compiled production
+ * modules (copies of lib/src, the real src/normalize.ts marker source, the
+ * real package.json entry point shape, and the packaged runtime/ bytes).
+ * Nothing is hand-written: the composition checks run against the genuine
+ * compiled index.js, and no repository asset directory is reachable from the
+ * isolated fixture set.
+ */
 function buildArtifact(options: ArtifactOptions = {}): { root: string; functions: string } {
   const root = mkdtempSync(join(tmpdir(), "p4-preflight-"));
   const functions = join(root, "functions");
-  mkdirSync(join(functions, "lib", "src", "providers"), { recursive: true });
-  mkdirSync(join(functions, "runtime", "bin"), { recursive: true });
-  mkdirSync(join(functions, "runtime", "fixtures"), { recursive: true });
-  symlinkSync(join(PACKAGE_ROOT, "src"), join(functions, "src"), "dir");
-  for (const file of readdirSync(join(PACKAGE_ROOT, "lib", "src"))) {
-    if (!file.endsWith(".js") || file === "index.js") continue;
-    symlinkSync(join(PACKAGE_ROOT, "lib", "src", file), join(functions, "lib", "src", file));
+  const copyTree = (from: string, to: string): void => {
+    mkdirSync(to, { recursive: true });
+    for (const entry of readdirSync(from, { withFileTypes: true })) {
+      if (entry.isDirectory()) copyTree(join(from, entry.name), join(to, entry.name));
+      else copyFileSync(join(from, entry.name), join(to, entry.name));
+    }
+  };
+  copyTree(join(PACKAGE_ROOT, "lib", "src"), join(functions, "lib", "src"));
+  mkdirSync(join(functions, "src"), { recursive: true });
+  copyFileSync(join(PACKAGE_ROOT, "src", "normalize.ts"), join(functions, "src", "normalize.ts"));
+  if (options.stripFixtureBinding) {
+    // Corrupt the composition binding the way a regressed build would: the
+    // packaged fixture directory is no longer passed to the runtime factory.
+    const indexPath = join(functions, "lib", "src", "index.js");
+    const compiled = readFileSync(indexPath, "utf8").replace(/runtime\/fixtures/g, "apps\/tv_app\/assets");
+    writeFileSync(indexPath, compiled);
   }
-  for (const file of readdirSync(join(PACKAGE_ROOT, "lib", "src", "providers"))) {
-    symlinkSync(join(PACKAGE_ROOT, "lib", "src", "providers", file), join(functions, "lib", "src", "providers", file));
+  if (options.timeoutSeconds !== undefined) {
+    const indexPath = join(functions, "lib", "src", "index.js");
+    const compiled = readFileSync(indexPath, "utf8").replace(/timeoutSeconds:\s*\d+/, `timeoutSeconds: ${options.timeoutSeconds}`);
+    writeFileSync(indexPath, compiled);
   }
-  const binding = options.stripFixtureBinding
-    ? "const services = (0, runtime_1.createRuntimeServices)({});"
-    : 'const services = (0, runtime_1.createRuntimeServices)({ fixtureDirectory: require("node:path").join(__dirname, "../../runtime/fixtures") });\nconst servicesWithFixtureBinding = "runtime/fixtures";';
-  writeFileSync(join(functions, "lib", "src", "index.js"), `"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-const runtime_1 = require("./runtime");
-const tasks_1 = require("firebase-functions/v2/tasks");
-${binding}
-exports.requestGeneration = services.requestGeneration;
-exports.getCurrentManifest = services.getCurrentManifest;
-exports.getDeliveryUrls = services.getDeliveryUrls;
-exports.acknowledgeDelivery = services.acknowledgeDelivery;
-exports.sweepExpiredMedia = () => undefined;
-exports.runGeneration = (0, tasks_1.onTaskDispatched)({ timeoutSeconds: ${options.timeoutSeconds ?? 900}, retryConfig: { maxAttempts: 1 } }, async () => { await services.runGeneration({}); });
-`);
   writeFileSync(join(functions, "package.json"), JSON.stringify({ name: "artifact", main: "lib/src/index.js", engines: { node: "22" } }, null, 2));
   writeFileSync(join(root, "firebase.json"), JSON.stringify({
     functions: { source: "functions", runtime: "nodejs22", predeploy: ["npm --prefix \"$RESOURCE_DIR\" run predeploy"] },
   }, null, 2));
 
+  mkdirSync(join(functions, "runtime", "bin"), { recursive: true });
+  mkdirSync(join(functions, "runtime", "fixtures"), { recursive: true });
   const manifest = fixtureManifest();
   const fixtures: Array<Record<string, unknown>> = [];
   for (const clip of manifest.clips) {
     const name = `cam${clip.cameraId.slice(-2).toLowerCase()}.mp4`;
-    copyFileSync(join(ASSETS, name), join(functions, "runtime", "fixtures", name));
+    copyFileSync(join(PACKAGE_ROOT, "runtime", "fixtures", name), join(functions, "runtime", "fixtures", name));
     fixtures.push({
       cameraId: clip.cameraId, path: `runtime/fixtures/${name}`, sha256: clip.sha256,
       sizeBytes: clip.sizeBytes, durationMs: 2000,
     });
   }
-  copyFileSync(join(ASSETS, "fixture_manifest.json"), join(functions, "runtime", "fixtures", "fixture_manifest.json"));
+  copyFileSync(join(PACKAGE_ROOT, "runtime", "fixtures", "fixture_manifest.json"), join(functions, "runtime", "fixtures", "fixture_manifest.json"));
   if (options.omitFixture) rmSync(join(functions, "runtime", "fixtures", options.omitFixture));
 
-  const binary = (packageName: string, name: string): { path: string; sha256: string; sizeBytes: number } => {
+  const linkBinary = (packageName: string, name: string): { path: string; sha256: string; sizeBytes: number } => {
+    // Symlink the real packaged bytes: preflight hash-verifies them read-only
+    // and never executes them, so identity holds without a 147MB copy.
+    // Negative tests MUST rmSync the link before writing a mutation, or the
+    // write follows the link into the real pinned package.
     const source = join(PACKAGE_ROOT, "node_modules", "@" + packageName, "linux-x64", name);
     symlinkSync(source, join(functions, "runtime", "bin", name));
     const bytes = readFileSync(source);
     return { path: `runtime/bin/${name}`, sha256: createHash("sha256").update(bytes).digest("hex"), sizeBytes: bytes.byteLength };
   };
-  const ffmpeg = binary("ffmpeg-installer", "ffmpeg");
-  const ffprobe = binary("ffprobe-installer", "ffprobe");
+  const ffmpeg = linkBinary("ffmpeg-installer", "ffmpeg");
+  const ffprobe = linkBinary("ffprobe-installer", "ffprobe");
   if (!options.omitRuntime) {
     writeFileSync(join(functions, "runtime", "runtime-manifest.json"), JSON.stringify({
       target: "linux-x64",
       preparedBy: "tools/prepare_runtime.ts",
+      validationMode: IS_LINUX_X64 ? "executed" : "structural-only",
+      smokeTested: IS_LINUX_X64,
       binaries: {
         ffmpegPath: ffmpeg.path, ffprobePath: ffprobe.path, ffmpegVersion: "4.1.0", ffprobeVersion: "5.2.0",
         ffmpegSha256: ffmpeg.sha256, ffprobeSha256: ffprobe.sha256, ffmpegBytes: ffmpeg.sizeBytes, ffprobeBytes: ffprobe.sizeBytes,
@@ -228,7 +318,6 @@ exports.runGeneration = (0, tasks_1.onTaskDispatched)({ timeoutSeconds: ${option
       fixtureDirectory: "runtime/fixtures",
       fixtures,
       normalization: { codec: "h264", pixelFormat: "yuv420p", frameRate: "24/1", width: 854, height: 480, durationMs: 2000 },
-      smokeTested: true,
       runtimeBytes: ffmpeg.sizeBytes + ffprobe.sizeBytes,
     }, null, 2));
   }
@@ -248,8 +337,8 @@ function preflightEnv(): NodeJS.ProcessEnv {
   };
 }
 
-function runPreflightOn(artifact: { root: string; functions: string }): ToolResult {
-  return runTool("tools/deploy_preflight.ts", ["--target=cloud", "--project=artifact-project-12345",
+function runPreflightOn(artifact: { root: string; functions: string }, project = "artifact-project-12345"): ToolResult {
+  return runTool("tools/deploy_preflight.ts", ["--target=cloud", `--project=${project}`,
     "--bucket=artifact-bucket-123456", `--functions-root=${artifact.functions}`, `--config-root=${artifact.root}`], preflightEnv());
 }
 
@@ -262,6 +351,7 @@ test("preflight passes a complete artifact and rejects each missing prerequisite
   assert.equal(report.target, "cloud");
   assert.equal(report.fixtureDirectory, "runtime/fixtures");
   assert.equal(report.workerTimeoutSeconds, 900);
+  assert.equal(report.runtimeValidationMode, IS_LINUX_X64 ? "executed" : "structural-only");
 
   const shortDeadline = buildArtifact({ timeoutSeconds: 600 });
   const deadlineResult = runPreflightOn(shortDeadline);
@@ -283,7 +373,75 @@ test("preflight passes a complete artifact and rejects each missing prerequisite
   assert.notEqual(runtimeResult.status, 0);
   assert.match(runtimeResult.stderr, /Prepared runtime manifest is missing/);
 
-  for (const artifact of [complete, shortDeadline, missingFixture, unwired, noRuntime]) {
+  const truncated = buildArtifact();
+  rmSync(join(truncated.functions, "runtime", "bin", "ffmpeg"));
+  writeFileSync(join(truncated.functions, "runtime", "bin", "ffmpeg"), Buffer.alloc(1024, 0));
+  const truncatedResult = runPreflightOn(truncated);
+  assert.notEqual(truncatedResult.status, 0);
+  assert.match(truncatedResult.stderr, /unexpectedly small|not a little-endian/);
+
+  const wrongArch = buildArtifact();
+  const archSource = join(wrongArch.functions, "runtime", "bin", "ffprobe");
+  const archBytes = readFileSync(archSource);
+  archBytes[4] = 1; // ELFCLASS32: structurally not the 64-bit target
+  rmSync(archSource);
+  writeFileSync(archSource, archBytes);
+  const archResult = runPreflightOn(wrongArch);
+  assert.notEqual(archResult.status, 0);
+  assert.match(archResult.stderr, /not a little-endian Linux x86_64 ELF/);
+
+  const hashed = buildArtifact();
+  const fixtureBytes = readFileSync(join(hashed.functions, "runtime", "fixtures", "cam02.mp4"));
+  fixtureBytes[fixtureBytes.length - 1] ^= 0xff;
+  writeFileSync(join(hashed.functions, "runtime", "fixtures", "cam02.mp4"), fixtureBytes);
+  const hashResult = runPreflightOn(hashed);
+  assert.notEqual(hashResult.status, 0);
+  assert.match(hashResult.stderr, /does not match its bytes for CAM-02/);
+
+  const corrupt = buildArtifact();
+  writeFileSync(join(corrupt.functions, "runtime", "fixtures", "cam04.mp4"), "plain text, not an mp4 container");
+  const corruptResult = runPreflightOn(corrupt);
+  assert.notEqual(corruptResult.status, 0);
+  assert.match(corruptResult.stderr, /not an MP4 file/);
+
+  const profile = buildArtifact();
+  const manifestPath = join(profile.functions, "runtime", "runtime-manifest.json");
+  const manifestJson = JSON.parse(readFileSync(manifestPath, "utf8")) as { normalization: Record<string, unknown> };
+  manifestJson.normalization = { ...manifestJson.normalization, width: 640 };
+  writeFileSync(manifestPath, JSON.stringify(manifestJson));
+  const profileResult = runPreflightOn(profile);
+  assert.notEqual(profileResult.status, 0);
+  assert.match(profileResult.stderr, /normalization profile disagrees.*on width/);
+
+  const lie = buildArtifact();
+  const liePath = join(lie.functions, "runtime", "runtime-manifest.json");
+  const lieJson = JSON.parse(readFileSync(liePath, "utf8")) as Record<string, unknown>;
+  lieJson.smokeTested = true;
+  lieJson.validationMode = "structural-only";
+  writeFileSync(liePath, JSON.stringify(lieJson));
+  const lieResult = runPreflightOn(lie);
+  assert.notEqual(lieResult.status, 0);
+  assert.match(lieResult.stderr, /smokeTested=true without executed validation/);
+
+  const enabledWithoutOptIn = runTool("tools/deploy_preflight.ts",
+    ["--target=cloud", "--project=artifact-project-12345", "--bucket=artifact-bucket-123456",
+      `--functions-root=${complete.functions}`, `--config-root=${complete.root}`],
+    { ...preflightEnv(), GENERATION_ENABLED: "true" });
+  assert.notEqual(enabledWithoutOptIn.status, 0);
+  assert.match(enabledWithoutOptIn.stderr, /refuses GENERATION_ENABLED=true/);
+
+  const liveProvider = runTool("tools/deploy_preflight.ts",
+    ["--target=cloud", "--project=artifact-project-12345", "--bucket=artifact-bucket-123456", "--allow-generation",
+      `--functions-root=${complete.functions}`, `--config-root=${complete.root}`],
+    { ...preflightEnv(), GENERATION_ENABLED: "true", VIDEO_GENERATION_PROVIDER: "alibaba" });
+  assert.notEqual(liveProvider.status, 0);
+  assert.match(liveProvider.stderr, /only the fake provider|VIDEO_GENERATION_PROVIDER=fake/);
+
+  const demoCloud = runPreflightOn(complete, "demo-artifact-123456");
+  assert.notEqual(demoCloud.status, 0);
+  assert.match(demoCloud.stderr, /cannot be a cloud deployment target/);
+
+  for (const artifact of [complete, shortDeadline, missingFixture, unwired, noRuntime, truncated, wrongArch, hashed, corrupt, profile, lie]) {
     rmSync(artifact.root, { recursive: true, force: true });
   }
 });

@@ -73,21 +73,23 @@ Expected evidence: required APIs are enabled; the task queue and Scheduler servi
 
 ## 4. Prepare the Linux Functions artifact
 
-The artifact contains compiled Functions, pinned Linux x64 FFmpeg/ffprobe packages copied to `functions/runtime/bin/`, and the four playable fixture MP4 files copied to `functions/runtime/fixtures/`. `src/normalize.ts` reads `FFMPEG_PATH` and `FFPROBE_PATH`, and the fake E2E passes the packaged fixture directory explicitly. The current deployed worker factory has not yet been wired to that path; preflight blocks deployment until it no longer depends on `../../apps/tv_app/assets`.
+The artifact contains compiled Functions, pinned Linux x64 FFmpeg/ffprobe packages copied to `functions/runtime/bin/`, and the four playable fixture MP4 files copied to `functions/runtime/fixtures/`. `src/normalize.ts` reads `FFMPEG_PATH` and `FFPROBE_PATH`, and the fake E2E passes the packaged fixture directory explicitly. The current deployed worker factory has now been wired to that path (preflight blocks deployment if the compiled entry point no longer passes `runtime/fixtures` to the fake provider).
 
-Build on an x64 host with Node.js 22. The Linux binaries are platform-specific; if developing from macOS, run the packaging step in an approved Linux x64 build container or CI worker. `runtime/` and local verification output are ignored by Git but included in the Firebase Functions source archive.
+Build on an x64 host with Node.js 22. The Linux binaries are platform-specific; from macOS run the packaging step in cross-host mode: `npm run runtime:prepare` validates the pinned packages structurally (exact versions, ELF64 LE x86-64 headers, sizes, exec bits, SHA-256) and NEVER executes the Linux binaries; fixture profiles are probed with the separately selected NATIVE host ffprobe (`FFPROBE_NATIVE_PATH` or PATH `ffprobe` — never `runtime/bin`). The manifest records `validationMode: structural-only` with `smokeTested: false` (`smokeTested` is never true without execution). On a linux-x64 host the same command additionally executes capability checks and the normalization smoke test (`validationMode: executed`, `smokeTested: true`). `runtime/` and local verification output are ignored by Git but included in the Firebase Functions source archive.
+
+Deployment environment lives in `backend/functions/.env.halloween-tv` (fake provider, generation disabled, `STORAGE_BUCKET` — never `FIREBASE_*` keys, no credentials):
 
 ```sh
 cd backend/functions
-npm ci --force
+npm ci --force # --force is required on darwin hosts: the linux-x64 installer packages declare os/cpu linux/x64
 export GCLOUD_PROJECT="$PROJECT_ID"
-export FIREBASE_STORAGE_BUCKET="$BUCKET"
+export STORAGE_BUCKET='<EXISTING_FIREBASE_STORAGE_BUCKET>'
 export GENERATION_WORKER_TIMEOUT_SECONDS='900'
 export PROVIDER_POLL_TIMEOUT_SECONDS='720'
 export NORMALIZATION_HEADROOM_SECONDS='120'
 npm run build
 npm run runtime:prepare
-npm run preflight -- --target=cloud --project="$PROJECT_ID" --bucket="$BUCKET"
+npm run preflight -- --target=cloud --project="$PROJECT_ID" --bucket='<EXISTING_FIREBASE_STORAGE_BUCKET>'
 ```
 
 Expected evidence from `runtime:prepare`: `target=linux-x64`, both executable paths, four fixture hashes/sizes, and the H.264/yuv420p/24fps/480P/two-second normalization profile. Expected evidence from preflight: compiled `package.json` entry point, exact bucket and project, fixture digests, and worker deadline matching the task handler.
@@ -165,6 +167,55 @@ firebase --config firebase.json functions:list --project "$PROJECT_ID"
 
 The Firebase predeploy hook runs build, runtime preparation, and deployment preflight again. Expected evidence: the build entry point and artifact checks pass, callable/task/scheduler exports appear in `functions:list`, and Cloud Logs show the worker and scheduler initialize without bucket, signing, or deadline errors. Do not treat a prepared artifact, a successful emulator, or this runbook as a deployment.
 
+## 8b. Fake-only generation rehearsal window (explicit opt-in, then restore)
+
+Ordinary deployments stay generation-disabled and fake-selected. A single
+fake rehearsal job requires an explicit, temporary opt-in that preflight
+permits ONLY with `VIDEO_GENERATION_PROVIDER=fake`:
+
+```sh
+cd backend/functions
+export GCLOUD_PROJECT='<FIREBASE_PROJECT_ID>'
+export STORAGE_BUCKET='<EXISTING_FIREBASE_STORAGE_BUCKET>'
+export VIDEO_GENERATION_PROVIDER=fake
+export GENERATION_ENABLED=true
+export FFMPEG_PATH=/workspace/runtime/bin/ffmpeg FFPROBE_PATH=/workspace/runtime/bin/ffprobe
+export GENERATION_WORKER_TIMEOUT_SECONDS=900 PROVIDER_POLL_TIMEOUT_SECONDS=720 NORMALIZATION_HEADROOM_SECONDS=120
+npx tsx tools/deploy_preflight.ts --target=cloud --project="$GCLOUD_PROJECT" --bucket="$STORAGE_BUCKET" --allow-generation
+cd ..
+firebase --config firebase.json deploy --project "$GCLOUD_PROJECT" --only functions
+```
+
+Without `--allow-generation`, cloud preflight refuses `GENERATION_ENABLED=true`;
+with it, only `VIDEO_GENERATION_PROVIDER=fake` passes. `--allow-generation`
+never applies to emulator targets and never permits a live provider.
+
+Run exactly one explicitly selected guest-bound job through the deployed
+`requestGeneration` + real task queue (defaults to preview; refuses live
+providers and mixed targets; poll observes only, never resubmits):
+
+```sh
+cd backend/functions
+npm run rehearse:fake -- --target=cloud --project="$GCLOUD_PROJECT" \
+  --functions-url='https://us-central1-<FIREBASE_PROJECT_ID>.cloudfunctions.net' \
+  --party='<REHEARSAL_PARTY>' --device='<REGISTERED_TV_DEVICE>' --channel=haunted_surveillance \
+  --job='<REHEARSAL_JOB>' --provider=fake
+# preview first; then repeat with --apply --out=../../docs/rehearsal-<date>/cycle-fake-rehearsal.json
+```
+
+Expected evidence: `providerSelection: fake`, `submissions: 1`, one
+provider slot (CAM-01, normalized to the generated-shape
+H.264/yuv420p/24fps/854x480/2s silent clip) plus three fixture slots,
+`syntheticZeroCameras: 4`, `providerApiCalls: 0`, `fakeCredits: synthetic
+zero`. The consented photo source is a locally generated synthetic JPEG —
+never a real user photo. A second `--apply` with the same `--job` observes
+the stored job and refuses to resubmit (`created=false`).
+
+After the rehearsal, restore the disabled state and redeploy: unset
+`GENERATION_ENABLED` (or set it `false`), re-run cloud preflight WITHOUT
+`--allow-generation`, and deploy functions again. Record both deployed
+revisions in the deployment record.
+
 ## 9. Register and verify a fixture pilot
 
 Use a dedicated party/device and the `haunted_surveillance` channel. Preview first. The emulator form is safe for rehearsal:
@@ -206,6 +257,8 @@ FIREBASE_STORAGE_BUCKET=demo-halloween-tv.appspot.com firebase --config ../fireb
 ```
 
 Expected evidence: four URL DTO entries; independently checked bytes and playable streams; retained files at `backend/functions/delivery-output/...`; two identical ACK IDs; matching Firestore ACK/job state; and no delivery objects. The tool checks the callable response hash against the stored canonical manifest. For a real Firebase project, omit all emulator variables and use explicit `--target=cloud --project=... --bucket=... --functions-url=...`; the cloud path uses actual signed HTTPS URLs and must be run only under a separately approved pilot.
+
+Observer/read-back mode (`--observe-only`, mutually exclusive with `--ack-and-purge`) downloads and independently hash-verifies all four clips and reads back the persisted ACK/job state without sending an ACK — the operator never preempts the TV download or purge. Use it to confirm the generated-shape version landed, then let the TV ACK, then run the destructive `--ack-and-purge` pass (idempotent by device/channel/version) as the operator purge.
 
 ## 9b. Provision the join PIN (QR self-registration)
 

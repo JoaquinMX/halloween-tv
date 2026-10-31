@@ -158,7 +158,13 @@ async function retainClip(directory: string, cameraId: string, bytes: Buffer): P
 async function main(): Promise<void> {
   const target = argument("target");
   if (target !== "emulator" && target !== "cloud") fail("Delivery verification requires explicit --target=emulator or --target=cloud.");
-  if (!process.argv.includes("--ack-and-purge")) fail("Delivery verification requires explicit --ack-and-purge because ACK deletes the four delivery objects.");
+  const observeOnly = process.argv.includes("--observe-only");
+  if (!observeOnly && !process.argv.includes("--ack-and-purge")) {
+    fail("Delivery verification requires explicit --ack-and-purge (ACK deletes the four delivery objects) or --observe-only (read-back without ACKing).");
+  }
+  if (observeOnly && process.argv.includes("--ack-and-purge")) {
+    fail("Delivery verification refuses --observe-only together with --ack-and-purge; the observer never preempts the TV download or purge.");
+  }
   const emulatorServiceSubstitute = process.argv.includes("--emulator-service-substitute");
   const firestoreEmulator = process.env.FIRESTORE_EMULATOR_HOST;
   const storageEmulator = process.env.STORAGE_EMULATOR_HOST;
@@ -190,9 +196,20 @@ async function main(): Promise<void> {
   const deviceId = argument("device");
   const channelId = argument("channel");
   if (!partyId || !deviceId || !channelId) fail("Verification requires explicit --party=..., --device=..., and --channel=... registration IDs.");
-  const outputDirectory = resolve(argument("output-dir") ?? join("delivery-output", `${partyId}-${channelId}`));
-  const ffprobePath = process.env.FFPROBE_PATH ??
-    (existsSync(resolve(process.cwd(), "runtime/bin/ffprobe")) ? resolve(process.cwd(), "runtime/bin/ffprobe") : "ffprobe");
+  const outputDirectory = resolve(argument("output-dir") ?? join(process.cwd(), "delivery-verification", `${partyId}-${deviceId}`));
+  const ffprobePath = nativeFfprobePath();
+/** Native host ffprobe for retained-clip checks. runtime/bin Linux binaries
+ * are never executed on a foreign host: only FFPROBE_NATIVE_PATH or PATH
+ * `ffprobe` is used unless this IS the linux-x64 execution host. */
+function nativeFfprobePath(): string {
+  if (process.env.FFPROBE_NATIVE_PATH) return process.env.FFPROBE_NATIVE_PATH;
+  if (process.platform === "linux" && process.arch === "x64") {
+    const packaged = resolve(process.cwd(), "runtime", "bin", "ffprobe");
+    if (existsSync(packaged)) return packaged;
+    if (process.env.FFPROBE_PATH) return process.env.FFPROBE_PATH;
+  }
+  return "ffprobe";
+}
 
   const requestedFunctionsBase = argument("functions-url");
   if (target === "cloud" && !requestedFunctionsBase) fail("Cloud verification requires explicit --functions-url=https://<region>-<project>.cloudfunctions.net.");
@@ -278,9 +295,51 @@ async function main(): Promise<void> {
     }
 
     const ackInput = { partyId, deviceId, channelId, manifestVersion: manifest.version, clipHashes: hashes };
+    const expectedAckId = ackIdempotencyKey(deviceId, channelId, manifest.version);
+    if (observeOnly) {
+      // Observer/read-back mode: no ACK is sent, so the TV download and purge
+      // are never preempted. Reads the persisted ACK/job state as the TV (or
+      // a prior operator purge) left it, and re-checks retained local bytes.
+      const [ackSnapshot, jobSnapshot] = await Promise.all([
+        db.doc(`parties/${partyId}/deliveryAcks/${expectedAckId}`).get(),
+        db.doc(`parties/${partyId}/jobs/${manifest.jobId}`).get(),
+      ]);
+      const persistedAck = ackSnapshot.exists ? ackSnapshot.data() : undefined;
+      const observedJob = jobSnapshot.exists ? jobSnapshot.data() : undefined;
+      for (const clip of manifest.cameraClips) {
+        const retained = await readFile(retainedFiles[clip.cameraId]);
+        if (retained.byteLength !== clip.sizeBytes || createHash("sha256").update(retained).digest("hex") !== clip.sha256) {
+          fail(`Locally retained clip is unreadable or corrupt after read-back: ${clip.cameraId}`);
+        }
+      }
+      process.stdout.write(`${JSON.stringify({
+        verification: "observed",
+        target,
+        projectId,
+        bucket: bucketName,
+        partyId,
+        deviceId,
+        channelId,
+        manifestVersion: manifest.version,
+        manifestHash,
+        downloadedCameraIds: REQUIRED_CAMERA_IDS,
+        independentlyHashed: true,
+        ffprobeVerifiedPlayable: true,
+        retainedDirectory: outputDirectory,
+        retainedFiles,
+        observerOnly: true,
+        ackSent: false,
+        persistedAck: persistedAck ? { ackId: expectedAckId, manifestVersion: persistedAck.manifestVersion, deviceId: persistedAck.deviceId } : null,
+        jobState: observedJob?.state ?? null,
+        jobDeliveryAckId: observedJob?.deliveryAckId ?? null,
+        urlMode: target === "emulator"
+          ? (requestedFunctionsBase ? "local callable endpoint with emulator signer (test-only)" : "local callable substitute with emulator signer (test-only)")
+          : "public Firebase callable and signed HTTPS URLs",
+      })}\n`);
+      return;
+    }
     const firstAck = await callFunction(`${base}/acknowledgeDelivery`, ackInput);
     const repeatedAck = await callFunction(`${base}/acknowledgeDelivery`, ackInput);
-    const expectedAckId = ackIdempotencyKey(deviceId, channelId, manifest.version);
     if (firstAck.ackId !== expectedAckId || repeatedAck.ackId !== expectedAckId || firstAck.purged !== true || repeatedAck.purged !== true) {
       fail("ACK response did not confirm the exact idempotent manifest ACK and purge.");
     }

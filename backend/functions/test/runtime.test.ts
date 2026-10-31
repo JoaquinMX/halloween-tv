@@ -120,3 +120,155 @@ test("exported-handler runtime composition publishes four offline clips and usag
     await disposeEmulatorContext(app);
   }
 });
+
+test("runtime selects the fake provider from the environment and serves packaged fixtures", {
+  skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
+}, async () => {
+  const { mkdtempSync, rmSync, copyFileSync, mkdirSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join, resolve } = await import("node:path");
+  const { createHash } = await import("node:crypto");
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  const deviceId = "tv-packaged-fixtures";
+  const channelId = "main";
+  const jobId = "job-packaged-fixtures";
+  const idempotencyKey = "idem-packaged-fixtures";
+  // Isolated packaged fixture directory: byte copies of the prepared
+  // runtime/fixtures, with no access to the repository asset directory.
+  const packaged = mkdtempSync(join(tmpdir(), "runtime-packaged-fixtures-"));
+  const previousProvider = process.env.VIDEO_GENERATION_PROVIDER;
+  try {
+    process.env.VIDEO_GENERATION_PROVIDER = "fake";
+    mkdirSync(packaged, { recursive: true });
+    for (const cameraId of REQUIRED_CAMERA_IDS) {
+      const name = `cam${cameraId.slice(-2).toLowerCase()}.mp4`;
+      copyFileSync(resolve(process.cwd(), "runtime", "fixtures", name), join(packaged, name));
+    }
+    await seedParty(db, partyId, deviceId, channelId);
+    const tasks: Array<{ partyId: string; deviceId: string; channelId: string; jobId: string; idempotencyKey: string }> = [];
+    const services = createRuntimeServices({
+      db,
+      bucket,
+      generationEnabled: true,
+      // No explicit provider: selection comes from VIDEO_GENERATION_PROVIDER
+      // and the packaged directory, exactly like the deployed composition.
+      fixtureDirectory: packaged,
+      enqueueGeneration: async (task) => { tasks.push(task); },
+      pollIntervalMs: 1,
+      sleep: async () => undefined,
+    });
+    const request = await services.requestGeneration({ partyId, deviceId, channelId, jobId, idempotencyKey, presetId: "cheap_demo" });
+    assert.deepEqual(request, { jobId, state: "queued", created: true });
+    assert.equal(tasks.length, 1);
+    assert.deepEqual(await services.runGeneration(tasks[0]), { jobId, state: "ready", manifestVersion: 1 });
+    const manifest = await services.getCurrentManifest({ partyId, deviceId, channelId });
+    assert.equal(manifest.version, 1);
+    assert.deepEqual(manifest.cameraClips.map((clip) => clip.cameraId), [...REQUIRED_CAMERA_IDS]);
+    // The pipeline normalizes packaged fixture bytes to the generated-shape
+    // profile, so manifest hashes are the normalized outputs (probed below),
+    // not the raw fixture bytes — but every byte must trace to the packaged
+    // directory through the fake provider.
+    const { spawnSync } = await import("node:child_process");
+    const { writeFileSync } = await import("node:fs");
+    for (const clip of manifest.cameraClips) {
+      const [objectBytes] = await bucket.file(clip.objectPath).download();
+      assert.equal(objectBytes.byteLength, clip.sizeBytes);
+      assert.equal(createHash("sha256").update(objectBytes).digest("hex"), clip.sha256);
+      const tmpClip = join(packaged, `retained-${clip.cameraId}.mp4`);
+      writeFileSync(tmpClip, objectBytes);
+      const result = spawnSync("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries",
+        "stream=codec_name,pix_fmt,r_frame_rate,width,height:format=duration", "-of", "json", tmpClip],
+      { encoding: "utf8", timeout: 30_000 });
+      assert.equal(result.status, 0, result.stderr);
+      const metadata = JSON.parse(result.stdout) as {
+        streams: Array<{ codec_name: string; pix_fmt: string; r_frame_rate: string; width: number; height: number }>;
+        format: { duration: string };
+      };
+      assert.equal(metadata.streams[0].codec_name, "h264", `normalized delivery codec for ${clip.cameraId}`);
+      assert.equal(metadata.streams[0].pix_fmt, "yuv420p");
+      assert.equal(metadata.streams[0].r_frame_rate, "24/1");
+      assert.equal(metadata.streams[0].width, 854);
+      assert.equal(metadata.streams[0].height, 480);
+      assert.equal(Math.round(Number(metadata.format.duration) * 1000), 2000);
+    }
+    for (const cameraId of REQUIRED_CAMERA_IDS) {
+      const ledger = (await db.doc(`parties/${partyId}/costLogs/${usageLedgerId(jobId, cameraId)}`).get()).data();
+      assert.equal(ledger?.success, true);
+      assert.equal(ledger?.credits_charged, 0, `fake provider must record synthetic zero for ${cameraId}`);
+    }
+    assert.deepEqual(await reconcileUsage(db), []);
+    // The packaged directory is load-bearing: an empty directory fails the
+    // same job closed instead of falling back to the repository assets.
+    const emptyDir = mkdtempSync(join(tmpdir(), "runtime-empty-fixtures-"));
+    try {
+      const emptyServices = createRuntimeServices({
+        db,
+        bucket,
+        generationEnabled: true,
+        fixtureDirectory: emptyDir,
+        enqueueGeneration: async () => undefined,
+        pollIntervalMs: 1,
+        sleep: async () => undefined,
+      });
+      await emptyServices.requestGeneration({
+        partyId, deviceId, channelId,
+        jobId: "job-empty-fixtures", idempotencyKey: "idem-empty-fixtures", presetId: "cheap_demo",
+      });
+      await assert.rejects(
+        emptyServices.runGeneration({ partyId, deviceId, channelId, jobId: "job-empty-fixtures", idempotencyKey: "idem-empty-fixtures" }),
+        (error: unknown) => error instanceof BackendError && error.errorCode === "PROVIDER_UNAVAILABLE",
+      );
+    } finally {
+      rmSync(emptyDir, { recursive: true, force: true });
+    }
+  } finally {
+    if (previousProvider === undefined) delete process.env.VIDEO_GENERATION_PROVIDER;
+    else process.env.VIDEO_GENERATION_PROVIDER = previousProvider;
+    rmSync(packaged, { recursive: true, force: true });
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+  }
+});
+
+test("runtime rejects an unknown provider selection instead of silently substituting", {
+  skip: !HAS_FIRESTORE_EMULATOR,
+}, async () => {
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  const previousProvider = process.env.VIDEO_GENERATION_PROVIDER;
+  try {
+    await seedParty(db, partyId, "tv-bad-provider", "main");
+    process.env.VIDEO_GENERATION_PROVIDER = "bogus-live-provider";
+    const services = createRuntimeServices({
+      db,
+      bucket,
+      generationEnabled: true,
+      enqueueGeneration: async () => undefined,
+      pollIntervalMs: 1,
+      sleep: async () => undefined,
+    });
+    await services.requestGeneration({
+      partyId, deviceId: "tv-bad-provider", channelId: "main",
+      jobId: "job-bad-provider", idempotencyKey: "idem-bad-provider", presetId: "cheap_demo",
+    });
+    // Unknown providers fail closed as PROVIDER_UNAVAILABLE: no silent
+    // substitution, no live call, no fabricated task ID.
+    await assert.rejects(
+      services.runGeneration({ partyId, deviceId: "tv-bad-provider", channelId: "main", jobId: "job-bad-provider", idempotencyKey: "idem-bad-provider" }),
+      (error: unknown) => error instanceof BackendError && error.errorCode === "PROVIDER_UNAVAILABLE",
+    );
+    const failed = (await db.doc(`parties/${partyId}/jobs/job-bad-provider`).get()).data();
+    assert.ok(failed?.state === "running" || failed?.state === "queued" || failed?.state === "failed",
+      `failed-closed job must not reach ready (state=${String(failed?.state)})`);
+    assert.deepEqual(failed?.providerTasks ?? {}, {});
+    const ledger = (await db.doc(`parties/${partyId}/costLogs/${usageLedgerId("job-bad-provider", "CAM-01")}`).get()).data();
+    assert.equal(ledger?.success, false);
+    assert.equal(ledger?.provider_task_id, null, "no fabricated provider task ID for an unresolvable provider");
+  } finally {
+    if (previousProvider === undefined) delete process.env.VIDEO_GENERATION_PROVIDER;
+    else process.env.VIDEO_GENERATION_PROVIDER = previousProvider;
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+  }
+});
