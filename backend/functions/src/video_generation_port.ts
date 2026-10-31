@@ -35,7 +35,9 @@ export interface GuestImageReference {
    * persisted in manifests, logs, or Firestore docs: only the server-side
    * objectPath + sha256 + consentRevision binding is stored. The provider
    * cannot fetch private GCS object paths, so a bare objectPath without this
-   * URL is rejected before transport.
+   * URL is rejected before transport. The adapter sends this URL as the
+   * wire-level `input.media` field; the sha256 stays on the request / ledger
+   * path for provenance and is never submitted.
    */
   url?: string;
 }
@@ -47,6 +49,12 @@ export interface ProviderSubmission {
 export interface ProviderTaskStatus {
   state: ProviderTaskState;
   errorCode?: string;
+  /**
+   * Sanitized provider failure reason (code detail / message text, URLs and
+   * credentials redacted, truncated). Present only for FAILED tasks that
+   * carried a reason; empty reasons keep the legacy generic mapping.
+   */
+  errorMessage?: string;
 }
 
 export interface ProviderResult {

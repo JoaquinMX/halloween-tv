@@ -42,6 +42,24 @@ function responseError(value: unknown): string {
   return code.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 80);
 }
 
+/**
+ * Redacts credentials and fetchable URLs from a provider failure reason so
+ * the text is safe to surface in worker errors and persist on the job doc.
+ * Truncated to a bounded length; never emits raw URLs, tokens, or key
+ * material.
+ */
+export function sanitizeProviderReasonText(value: unknown, maxLength = 280): string {
+  let text = typeof value === "string" ? value : "";
+  text = text.replace(/https?:\/\/\S+/gi, "[url]");
+  text = text.replace(/wss?:\/\/\S+/gi, "[url]");
+  text = text.replace(/gs:\/\/\S+/gi, "[url]");
+  text = text.replace(/Bearer\s+[A-Za-z0-9._~+/_=-]+/gi, "Bearer [redacted]");
+  text = text.replace(/sk-[A-Za-z0-9_-]+/g, "[redacted]");
+  text = text.replace(/[\u0000-\u001f\u007f]+/g, " ");
+  text = text.replace(/\s+/g, " ").trim();
+  return text.slice(0, maxLength);
+}
+
 function parseStatus(value: unknown): ProviderTaskStatus {
   const root = record(value);
   const output = record(root?.output);
@@ -49,7 +67,13 @@ function parseStatus(value: unknown): ProviderTaskStatus {
   if (rawState === "PENDING" || rawState === "RUNNING") return { state: rawState };
   if (rawState === "SUCCEEDED") return { state: "SUCCEEDED" };
   if (rawState === "FAILED" || rawState === "CANCELED" || rawState === "CANCELLED") {
-    return { state: "FAILED", errorCode: responseError(output?.code ? output : root) };
+    const source = output?.code !== undefined || output?.message !== undefined ? output : root;
+    const message = sanitizeProviderReasonText(
+      typeof source?.message === "string" ? source.message : source?.reason,
+    );
+    const status: ProviderTaskStatus = { state: "FAILED", errorCode: responseError(source) };
+    if (message) status.errorMessage = message;
+    return status;
   }
   throw new Error("Alibaba returned an unrecognized task state.");
 }
@@ -66,20 +90,17 @@ export function buildAlibabaSubmitBody(request: VideoGenerationRequest): {
     // Provider-fetchable reference form: the worker resolves the guest photo
     // to a short-lived signed https read URL (GCS v4 read signature, 15-min
     // TTL, in-flight API call only, never persisted) and the adapter sends it
-    // as the reference_image URL field, keeping sha256 alongside for ledger
-    // provenance. The previous storage_ref form sent a private bucket object
-    // path the provider cannot fetch, so live submits failed the task.
-    // Base64-embedding the photo was considered and rejected: the photo is
-    // <=10MB validated so it would fit, but it bloats the JSON submit body,
-    // has no support in the checked-in envelope evidence (an object carrying
-    // a reference plus hash), and the minimal correct fix is swapping the
-    // unfetchable private path for a fetchable URL. No objectPath/storage_ref
-    // is ever sent; unsigned or non-https references are rejected here.
+    // as the wire-level `input.media` field, exactly as the r2v endpoint
+    // requires (`input: { prompt, media: <signed https URL> }`). The sha256
+    // stays on the VideoGenerationRequest / usage-ledger path for provenance
+    // and is never part of the submitted JSON: live submits carrying
+    // `input.reference_image` (+ sha256) fail at schedule time with
+    // InvalidParameter "Field required: input.media". Bare paths /
+    // non-https / missing media are rejected by the fetchability gate below
+    // before transport, so an unfetchable reference can never be submitted.
+    // No objectPath/storage_ref is ever sent.
     validateFetchableReferenceImage(request.referenceImage);
-    input.reference_image = {
-      url: request.referenceImage.url,
-      sha256: request.referenceImage.sha256,
-    };
+    input.media = request.referenceImage.url;
   }
   return {
     model: request.modelId,

@@ -417,14 +417,34 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
           throw error;
         }
         if (status.state === "FAILED") {
-          const errorCode = status.errorCode ?? "PROVIDER_FAILED";
-          await store.recordProviderFailure({ ...validTask, presetId: jobPresetId }, cameraId, errorCode);
+          // Surface the provider's failure reason in the worker error and on
+          // the job doc (truncated, sanitized — no credentials/URLs) so the
+          // next diagnosis does not need a manual API query. Empty reasons
+          // keep the legacy generic mapping.
+          const rawCode = typeof status.errorCode === "string" ? status.errorCode : "";
+          const rawMessage = typeof status.errorMessage === "string" ? status.errorMessage : "";
+          const sanitizedMessage = rawMessage
+            .replace(/https?:\/\/\S+/gi, "[url]")
+            .replace(/wss?:\/\/\S+/gi, "[url]")
+            .replace(/gs:\/\/\S+/gi, "[url]")
+            .replace(/Bearer\s+[A-Za-z0-9._~+/_=-]+/gi, "Bearer [redacted]")
+            .replace(/sk-[A-Za-z0-9_-]+/g, "[redacted]")
+            .replace(/[\u0000-\u001f\u007f]+/g, " ")
+            .replace(/\s+/g, " ")
+            .trim()
+            .slice(0, 280);
+          const detail = [rawCode, sanitizedMessage].map((part) => part.trim()).filter(Boolean).join(": ");
+          const persistable = detail ? detail.slice(0, 280) : "PROVIDER_FAILED";
+          await store.recordProviderFailure({ ...validTask, presetId: jobPresetId }, cameraId, persistable);
           await recordUsageOutcome(options.db, ledgerInput(job, cameraId), {
             success: false,
             providerTaskId: providerTask.taskId,
             creditsCharged: null,
             errorCode: "PROVIDER_UNAVAILABLE",
           });
+          if (detail) {
+            throw new BackendError("PROVIDER_UNAVAILABLE", `Provider task failed (${detail.slice(0, 280)}).`);
+          }
           throw new BackendError("PROVIDER_UNAVAILABLE", "Provider task failed.");
         }
         let result: ProviderResult;

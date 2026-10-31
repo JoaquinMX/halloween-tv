@@ -126,10 +126,11 @@ test("guest image reference serializes offline with cheap_demo limits unchanged"
   const body = buildAlibabaSubmitBody(request);
   assert.deepEqual(body, fixture.body);
   assert.equal((body.input as Record<string, unknown>).prompt, request.prompt);
-  assert.deepEqual((body.input as Record<string, unknown>).reference_image, {
-    url: "https://signed.invalid/guest-photo.jpg",
-    sha256: photoSha,
-  });
+  // Corrected r2v envelope: the signed URL rides as input.media; the sha256
+  // stays on the request/ledger path and never enters the submitted JSON.
+  assert.equal((body.input as Record<string, unknown>).media, "https://signed.invalid/guest-photo.jpg");
+  assert.ok(!("reference_image" in (body.input as Record<string, unknown>)));
+  assert.ok(!JSON.stringify(body).includes(photoSha));
   // The private bucket path never leaves the backend: no storage_ref or
   // objectPath key survives serialization.
   assert.ok(!JSON.stringify(body).includes("storage_ref"));
@@ -137,6 +138,7 @@ test("guest image reference serializes offline with cheap_demo limits unchanged"
   assert.deepEqual(body.parameters, { resolution: "480P", ratio: "16:9", duration: 2, audio: false, watermark: false });
   const textOnly = buildAlibabaSubmitBody(buildCheapDemoRequest("job-1", "idem-1", "CAM-02"));
   assert.ok(!("reference_image" in (textOnly.input as Record<string, unknown>)));
+  assert.ok(!("media" in (textOnly.input as Record<string, unknown>)));
 });
 
 test("cameo_demo serializes offline to the r2v model at 5s with a reference (no network)", async () => {
@@ -165,10 +167,11 @@ test("cameo_demo serializes offline to the r2v model at 5s with a reference (no 
   assert.deepEqual(body, fixture.body);
   assert.equal(body.model, "happyhorse-1.1-r2v");
   assert.equal((body.input as Record<string, unknown>).prompt, request.prompt);
-  assert.deepEqual((body.input as Record<string, unknown>).reference_image, {
-    url: "https://signed.invalid/guest-photo.jpg",
-    sha256: photoSha,
-  });
+  // Corrected r2v envelope: input.media carries the signed URL; sha256 stays
+  // off the wire on the request/ledger path.
+  assert.equal((body.input as Record<string, unknown>).media, "https://signed.invalid/guest-photo.jpg");
+  assert.ok(!("reference_image" in (body.input as Record<string, unknown>)));
+  assert.ok(!JSON.stringify(body).includes(photoSha));
   assert.deepEqual(body.parameters, { resolution: "480P", ratio: "16:9", duration: 5, audio: false, watermark: false });
   // The private bucket path never leaves the backend: no storage_ref or
   // objectPath key survives serialization.
@@ -218,10 +221,43 @@ test("resolved reference serializes to the fetchable https URL form (no network)
     url,
   });
   const body = buildAlibabaSubmitBody(request);
-  const reference = (body.input as Record<string, unknown>).reference_image as Record<string, unknown>;
-  assert.equal(reference.url, url);
-  assert.ok(String(reference.url).startsWith("https://"));
-  assert.equal(reference.sha256, photoSha);
-  assert.ok(!("storage_ref" in reference));
-  assert.ok(!("objectPath" in reference));
+  const wire = body.input as Record<string, unknown>;
+  assert.equal(wire.media, url);
+  assert.ok(String(wire.media).startsWith("https://"));
+  assert.ok(!("reference_image" in wire));
+  assert.ok(!JSON.stringify(body).includes(photoSha));
+  assert.ok(!("storage_ref" in wire));
+  assert.ok(!("objectPath" in wire));
+});
+
+test("polled FAILED surfaces the provider code/message and redacts URLs (no network)", async () => {
+  // Zero provider network requests: stubbed transport replays a FAILED poll.
+  const failedBody = {
+    output: {
+      task_status: "FAILED",
+      code: "InvalidParameter",
+      message: "Field required: input.media, see https://provider.invalid/docs and Bearer secret-token",
+    },
+  };
+  const provider = new AlibabaVideoGenerationPort({
+    apiKey: "fixture-key",
+    workspaceId: "workspace",
+    fetchImpl: async () => new Response(JSON.stringify(failedBody), { status: 200 }),
+  });
+  const status = await provider.getStatus("task-fixture-failed");
+  assert.equal(status.state, "FAILED");
+  assert.equal(status.errorCode, "InvalidParameter");
+  assert.ok(typeof status.errorMessage === "string" && status.errorMessage.includes("Field required: input.media"));
+  assert.ok(!status.errorMessage!.includes("https://provider.invalid/docs"));
+  assert.ok(!status.errorMessage!.includes("secret-token"));
+  // Empty reasons keep the legacy generic mapping (code fallback only).
+  const emptyProvider = new AlibabaVideoGenerationPort({
+    apiKey: "fixture-key",
+    workspaceId: "workspace",
+    fetchImpl: async () => new Response(JSON.stringify({ output: { task_status: "FAILED" } }), { status: 200 }),
+  });
+  const empty = await emptyProvider.getStatus("task-fixture-empty");
+  assert.equal(empty.state, "FAILED");
+  assert.equal(empty.errorCode, "PROVIDER_ERROR");
+  assert.equal(empty.errorMessage, undefined);
 });

@@ -25,8 +25,9 @@ export class FakeVideoGenerationPort implements VideoGenerationPort {
   async submit(request: VideoGenerationRequest): Promise<ProviderSubmission> {
     validateVideoGenerationRequest(request);
     // Offline parity with the live adapter: a bound reference must already be
-    // resolved to a fetchable signed https URL. Bare internal bucket paths
-    // without a URL are rejected here, never silently accepted.
+    // resolved to a fetchable signed https URL (the wire-level input.media
+    // field form). Bare internal bucket paths without a URL are rejected
+    // here, never silently accepted.
     if (request.referenceImage !== undefined) {
       const url = (request.referenceImage as { url?: unknown }).url;
       if (typeof url !== "string" || !/^https:\/\//.test(url)) {
