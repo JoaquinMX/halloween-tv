@@ -8,7 +8,7 @@ import { BackendError } from "../src/contracts";
 import { FakeVideoGenerationPort } from "../src/providers/fake";
 import { ProviderResult, ProviderTaskStatus, VideoGenerationRequest } from "../src/video_generation_port";
 import { reconcileUsage, usageLedgerId } from "../src/usage";
-import { buildCheapDemoRequest, validateCheapDemoControls } from "../src/video_generation_port";
+import { buildCheapDemoRequest, validateCheapDemoControls, validateFetchableReferenceImage, validateVideoGenerationRequest } from "../src/video_generation_port";
 import {
   HAS_FIRESTORE_EMULATOR,
   clearParty,
@@ -38,6 +38,24 @@ test("cheap_demo generation request is fixed to one Singapore 480P silent output
   expectCode(() => validateCheapDemoControls({ presetId: "cheap_demo", outputs: 2 }), "INVALID_ARGUMENT");
   expectCode(() => validateCheapDemoControls({ presetId: "cheap_demo", audio: true }), "INVALID_ARGUMENT");
   expectCode(() => validateCheapDemoControls({ presetId: "cheap_demo", media: [{ type: "image" }] }), "INVALID_ARGUMENT");
+});
+
+test("provider-bound references require a signed https URL, never a bare bucket path", () => {
+  // Offline regression for the live-submit defect: the provider cannot fetch
+  // private GCS object paths, so any reference without a resolved signed https
+  // URL fails closed before transport. Consent/tombstone gates are unchanged.
+  const bare = {
+    objectPath: "parties/pilot/guests/p-1/ingest/gsub-1/photo.jpg",
+    sha256: "a".repeat(64),
+    consentRevision: "v1:2026-10-30T00:00:00.000Z",
+  };
+  expectCode(() => validateFetchableReferenceImage({ ...bare }), "INVALID_ARGUMENT");
+  expectCode(() => validateFetchableReferenceImage({ ...bare, url: "http://signed.invalid/photo.jpg" }), "INVALID_ARGUMENT");
+  expectCode(() => validateFetchableReferenceImage({ ...bare, url: "gs://bucket/photo.jpg" }), "INVALID_ARGUMENT");
+  expectCode(() => validateVideoGenerationRequest(buildCheapDemoRequest("job-1", "idem-1", "CAM-01", { ...bare })), "INVALID_ARGUMENT");
+  const resolved = { ...bare, url: "https://signed.invalid/photo.jpg" };
+  validateFetchableReferenceImage({ ...resolved });
+  validateVideoGenerationRequest(buildCheapDemoRequest("job-1", "idem-1", "CAM-01", { ...resolved }));
 });
 
 test("crash reconciliation never repeats an unpersisted billable submission", {

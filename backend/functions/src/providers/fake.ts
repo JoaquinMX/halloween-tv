@@ -24,6 +24,15 @@ export class FakeVideoGenerationPort implements VideoGenerationPort {
 
   async submit(request: VideoGenerationRequest): Promise<ProviderSubmission> {
     validateVideoGenerationRequest(request);
+    // Offline parity with the live adapter: a bound reference must already be
+    // resolved to a fetchable signed https URL. Bare internal bucket paths
+    // without a URL are rejected here, never silently accepted.
+    if (request.referenceImage !== undefined) {
+      const url = (request.referenceImage as { url?: unknown }).url;
+      if (typeof url !== "string" || !/^https:\/\//.test(url)) {
+        throw new Error("Fake provider reference image must carry a signed https URL.");
+      }
+    }
     const oldTaskId = this.byKey.get(request.idempotencyKey);
     if (oldTaskId) return { taskId: oldTaskId };
     const taskId = `${request.cameraId}__${createHash("sha256").update(request.idempotencyKey).digest("hex").slice(0, 24)}`;

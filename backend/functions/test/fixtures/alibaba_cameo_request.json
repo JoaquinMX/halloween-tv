@@ -1,39 +1,40 @@
 {
-  "request": {
-    "jobId": "job-cameo-1",
-    "idempotencyKey": "idem-cameo-1:CAM-01",
-    "cameraId": "CAM-01",
-    "prompt": "Create a 5-second, fully 2D animated clip in the style of classic Scooby-Doo. Use the person in V2 as the character reference, preserving his glasses, hair, beard, and outfit, all fully drawn. In a spooky mansion hallway with crooked portraits, cobwebs, and flickering lamps, the terrified person runs left to right while a goofy, lumbering green monster chases close behind. Use one continuous side-tracking shot, keeping both characters visible. 0-2 seconds: The person sprints with exaggerated cartoon strides while the monster reaches toward him. 2-4 seconds: He glances backward, eyes widening, then accelerates with comically spinning legs. 4-5 seconds: Both race through an open doorway and disappear offscreen. Bold ink outlines, flat cel shading, hand-painted purple-and-teal backgrounds, expressive faces, elastic cartoon movement, and playful spooky slapstick. No photorealism, 3D rendering, gore, text, or changes to the person's identity.",
-    "modelId": "happyhorse-1.1-r2v",
-    "presetId": "cameo_demo",
-    "region": "singapore",
-    "resolution": "480P",
-    "secondsOut": 5,
-    "aspectRatio": "16:9",
-    "audio": false,
-    "outputs": 1,
-    "autoUpscale": false,
-    "referenceImage": {
-      "objectPath": "parties/pilot/guests/p-guest001/ingest/gsub-guest001/photo.jpg",
-      "sha256": "990113ea6cec90564cdc9e64917fd5fc2b1172a6220d20f8848225c084eb316a",
-      "consentRevision": "v1:2026-10-30T00:00:00.000Z"
-    }
-  },
   "body": {
-    "model": "happyhorse-1.1-r2v",
     "input": {
       "prompt": "Create a 5-second, fully 2D animated clip in the style of classic Scooby-Doo. Use the person in V2 as the character reference, preserving his glasses, hair, beard, and outfit, all fully drawn. In a spooky mansion hallway with crooked portraits, cobwebs, and flickering lamps, the terrified person runs left to right while a goofy, lumbering green monster chases close behind. Use one continuous side-tracking shot, keeping both characters visible. 0-2 seconds: The person sprints with exaggerated cartoon strides while the monster reaches toward him. 2-4 seconds: He glances backward, eyes widening, then accelerates with comically spinning legs. 4-5 seconds: Both race through an open doorway and disappear offscreen. Bold ink outlines, flat cel shading, hand-painted purple-and-teal backgrounds, expressive faces, elastic cartoon movement, and playful spooky slapstick. No photorealism, 3D rendering, gore, text, or changes to the person's identity.",
       "reference_image": {
-        "storage_ref": "parties/pilot/guests/p-guest001/ingest/gsub-guest001/photo.jpg",
-        "sha256": "990113ea6cec90564cdc9e64917fd5fc2b1172a6220d20f8848225c084eb316a"
+        "sha256": "990113ea6cec90564cdc9e64917fd5fc2b1172a6220d20f8848225c084eb316a",
+        "url": "https://signed.invalid/guest-photo.jpg"
       }
     },
+    "model": "happyhorse-1.1-r2v",
     "parameters": {
-      "resolution": "480P",
-      "ratio": "16:9",
-      "duration": 5,
       "audio": false,
+      "duration": 5,
+      "ratio": "16:9",
+      "resolution": "480P",
       "watermark": false
     }
+  },
+  "request": {
+    "aspectRatio": "16:9",
+    "audio": false,
+    "autoUpscale": false,
+    "cameraId": "CAM-01",
+    "idempotencyKey": "idem-cameo-1:CAM-01",
+    "jobId": "job-cameo-1",
+    "modelId": "happyhorse-1.1-r2v",
+    "outputs": 1,
+    "presetId": "cameo_demo",
+    "prompt": "Create a 5-second, fully 2D animated clip in the style of classic Scooby-Doo. Use the person in V2 as the character reference, preserving his glasses, hair, beard, and outfit, all fully drawn. In a spooky mansion hallway with crooked portraits, cobwebs, and flickering lamps, the terrified person runs left to right while a goofy, lumbering green monster chases close behind. Use one continuous side-tracking shot, keeping both characters visible. 0-2 seconds: The person sprints with exaggerated cartoon strides while the monster reaches toward him. 2-4 seconds: He glances backward, eyes widening, then accelerates with comically spinning legs. 4-5 seconds: Both race through an open doorway and disappear offscreen. Bold ink outlines, flat cel shading, hand-painted purple-and-teal backgrounds, expressive faces, elastic cartoon movement, and playful spooky slapstick. No photorealism, 3D rendering, gore, text, or changes to the person's identity.",
+    "referenceImage": {
+      "consentRevision": "v1:2026-10-30T00:00:00.000Z",
+      "objectPath": "parties/pilot/guests/p-guest001/ingest/gsub-guest001/photo.jpg",
+      "sha256": "990113ea6cec90564cdc9e64917fd5fc2b1172a6220d20f8848225c084eb316a",
+      "url": "https://signed.invalid/guest-photo.jpg"
+    },
+    "region": "singapore",
+    "resolution": "480P",
+    "secondsOut": 5
   }
 }

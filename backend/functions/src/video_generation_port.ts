@@ -29,6 +29,15 @@ export interface GuestImageReference {
   objectPath: string;
   sha256: string;
   consentRevision: string;
+  /**
+   * Short-lived signed HTTPS read URL for the guest photo, resolved by the
+   * worker at submission time (15-min TTL, in-flight API call only). Never
+   * persisted in manifests, logs, or Firestore docs: only the server-side
+   * objectPath + sha256 + consentRevision binding is stored. The provider
+   * cannot fetch private GCS object paths, so a bare objectPath without this
+   * URL is rejected before transport.
+   */
+  url?: string;
 }
 
 export interface ProviderSubmission {
@@ -186,6 +195,23 @@ export function validateGuestImageReference(value: unknown): asserts value is Gu
   if (typeof reference.consentRevision !== "string" || !reference.consentRevision) {
     throw new BackendError("INVALID_ARGUMENT", "Guest image consent revision is required.");
   }
+  if (reference.url !== undefined && (typeof reference.url !== "string" || !/^https:\/\//.test(reference.url))) {
+    throw new BackendError("INVALID_ARGUMENT", "Guest image URL must be a signed https URL.");
+  }
+}
+
+/**
+ * Provider-bound gate: a reference image is only fetchable when the worker
+ * has resolved it to a short-lived signed https URL. Bare internal bucket
+ * paths (objectPath / storage_ref), http URLs, and gs:// paths are rejected
+ * here so they can never reach provider transport.
+ */
+export function validateFetchableReferenceImage(value: unknown): asserts value is GuestImageReference {
+  validateGuestImageReference(value);
+  const reference = value as GuestImageReference;
+  if (typeof reference.url !== "string" || !/^https:\/\//.test(reference.url)) {
+    throw new BackendError("INVALID_ARGUMENT", "Guest image must resolve to a signed https URL for provider submission.");
+  }
 }
 
 export function validateVideoGenerationRequest(value: unknown): asserts value is VideoGenerationRequest {
@@ -214,8 +240,13 @@ export function validateVideoGenerationRequest(value: unknown): asserts value is
     if (request.referenceImage === undefined) {
       throw new BackendError("INVALID_ARGUMENT", "The cameo_demo preset requires a consent-bound reference image.");
     }
+    validateFetchableReferenceImage(request.referenceImage);
     if (request.prompt !== CAMEO_DEMO_PROMPT) {
       throw new BackendError("INVALID_ARGUMENT", "Generation prompts are fixed server-side for cameo_demo.");
     }
+  } else if (request.referenceImage !== undefined) {
+    // Guest-bound cheap_demo jobs share the same provider-fetchability gate:
+    // a resolved signed https URL is required whenever a reference is sent.
+    validateFetchableReferenceImage(request.referenceImage);
   }
 }

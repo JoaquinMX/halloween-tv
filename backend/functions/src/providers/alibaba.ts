@@ -4,6 +4,7 @@ import {
   ProviderTaskStatus,
   VideoGenerationPort,
   VideoGenerationRequest,
+  validateFetchableReferenceImage,
   validateVideoGenerationRequest,
 } from "../video_generation_port";
 
@@ -62,12 +63,21 @@ export function buildAlibabaSubmitBody(request: VideoGenerationRequest): {
   validateVideoGenerationRequest(request);
   const input: Record<string, unknown> = { prompt: request.prompt };
   if (request.referenceImage !== undefined) {
-    // Consent-bound guest photo for the cameo camera. The object reference is
-    // server-side storage state; provider credentials never leave the backend.
-    // Supported for both the 2s cheap_demo guest job and the 5s cameo_demo
-    // batch (happyhorse-1.1-r2v); duration is carried through per-request.
+    // Provider-fetchable reference form: the worker resolves the guest photo
+    // to a short-lived signed https read URL (GCS v4 read signature, 15-min
+    // TTL, in-flight API call only, never persisted) and the adapter sends it
+    // as the reference_image URL field, keeping sha256 alongside for ledger
+    // provenance. The previous storage_ref form sent a private bucket object
+    // path the provider cannot fetch, so live submits failed the task.
+    // Base64-embedding the photo was considered and rejected: the photo is
+    // <=10MB validated so it would fit, but it bloats the JSON submit body,
+    // has no support in the checked-in envelope evidence (an object carrying
+    // a reference plus hash), and the minimal correct fix is swapping the
+    // unfetchable private path for a fetchable URL. No objectPath/storage_ref
+    // is ever sent; unsigned or non-https references are rejected here.
+    validateFetchableReferenceImage(request.referenceImage);
     input.reference_image = {
-      storage_ref: request.referenceImage.objectPath,
+      url: request.referenceImage.url,
       sha256: request.referenceImage.sha256,
     };
   }

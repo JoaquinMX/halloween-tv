@@ -31,7 +31,26 @@ class TrackingFakeProvider extends FakeVideoGenerationPort {
   }
 }
 
+function stubReferenceSigning(bucket: Bucket): void {
+  // Stub GCS v4 signing for the emulator: the worker resolves the guest photo
+  // to a short-lived signed https URL via bucket.getSignedUrl (same machinery
+  // as delivery signReadUrl). The stub keeps save/download on the real file
+  // object and only replaces signing with a deterministic https URL.
+  // Idempotent: safe to call for a bucket that is already stubbed.
+  const current = bucket.file as Bucket["file"] & { __referenceSigningStubbed?: boolean };
+  if (current.__referenceSigningStubbed) return;
+  const originalFile = bucket.file.bind(bucket);
+  const stubbed = ((path: string, ...rest: unknown[]) => {
+    const ref = (originalFile as (...args: unknown[]) => ReturnType<Bucket["file"]>)(path, ...rest);
+    ref.getSignedUrl = (async () => [`https://signed.invalid/${encodeURIComponent(String(path))}`]) as unknown as typeof ref.getSignedUrl;
+    return ref;
+  }) as Bucket["file"] & { __referenceSigningStubbed?: boolean };
+  stubbed.__referenceSigningStubbed = true;
+  (bucket as unknown as { file: Bucket["file"] }).file = stubbed;
+}
+
 function servicesFor(db: Firestore, bucket: Bucket, provider: TrackingFakeProvider) {
+  stubReferenceSigning(bucket);
   return createRuntimeServices({
     db,
     bucket,
@@ -91,11 +110,18 @@ test("consent-bound generation: one provider camera, three fixture slots, truthf
     assert.equal(submitted.secondsOut, 2);
     assert.equal(submitted.audio, false);
     assert.equal(submitted.outputs, 1);
+    // The worker resolved the private bucket path to a fetchable signed https
+    // URL for the in-flight submit; the server-side binding is unchanged.
+    assert.ok(typeof submitted.referenceImage?.url === "string" && submitted.referenceImage.url.startsWith("https://"));
     assert.deepEqual(submitted.referenceImage, {
       objectPath: requested.objectPath,
       sha256: photoHash,
       consentRevision: completed.consentRevision,
+      url: submitted.referenceImage?.url,
     });
+    // No signed URL is persisted on the stored job doc.
+    const reloadedJob = (await db.doc(`parties/${partyId}/jobs/${jobId}`).get()).data()!;
+    assert.ok(!JSON.stringify(reloadedJob).includes("signed.invalid"));
 
     // Four playable published clips on the canonical four-camera manifest.
     const manifest = (await db.doc(`parties/${partyId}/manifests/current_${channelId}`).get()).data()!;
@@ -171,6 +197,7 @@ test("mid-run withdrawal discards an already-staged provider result", {
   const deviceId = "p-guest-midrun";
   const channelId = "main";
   try {
+    stubReferenceSigning(bucket);
     await seedParty(db, partyId, deviceId, channelId);
     let withdrawNow: (() => Promise<unknown>) | undefined;
     class MidRunProvider extends FakeVideoGenerationPort {
