@@ -56,6 +56,32 @@ test("provider-bound references require a signed https URL, never a bare bucket 
   validateVideoGenerationRequest(buildCheapDemoRequest("job-1", "idem-1", "CAM-01", { ...resolved }));
 });
 
+test("offline fake keeps the live fetchability gate for cheap_demo references", async () => {
+  // Layering regression for the cycle-11 merge interaction: the offline fake
+  // resolves local bytes and never fetches, but it still enforces the same
+  // signed-https fetchability gate as the live adapter, so an unfetchable
+  // bare object-path reference can never be submitted on either boundary.
+  // The worker resolves the consented photo through signReferenceReadUrl
+  // (emulator tests wire the signing transport for that step); anything
+  // unresolved fails here with the same signed-URL shape. Consent and
+  // tombstone gates live one layer up and are unchanged.
+  const bare = {
+    objectPath: "parties/pilot/guests/p-1/ingest/gsub-1/photo.jpg",
+    sha256: "a".repeat(64),
+    consentRevision: "v1:2026-10-30T00:00:00.000Z",
+  };
+  const provider = new FakeVideoGenerationPort();
+  await assert.rejects(
+    provider.submit(buildCheapDemoRequest("job-cheap-bare", "idem-cheap-bare", "CAM-01", { ...bare })),
+    /signed https URL/,
+  );
+  const submitted = await provider.submit(buildCheapDemoRequest("job-cheap-signed", "idem-cheap-signed", "CAM-01", {
+    ...bare,
+    url: "https://signed.invalid/photo.jpg",
+  }));
+  assert.ok(submitted.taskId.startsWith("CAM-01__"));
+});
+
 test("crash reconciliation never repeats an unpersisted billable submission", {
   skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
 }, async () => {
