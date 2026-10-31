@@ -57,6 +57,37 @@ function exposedTimestamp(value: unknown): unknown {
   return value;
 }
 
+/**
+ * Fake-only rehearsal marker. The operator rehearsal tool always sends
+ * `rehearsalOnly: true`; the marker is persisted on the job document and the
+ * worker resolves ONLY the offline fake provider for marked jobs, regardless
+ * of the deployed provider configuration. Requests without the marker take
+ * the unchanged default path. Any other marker value is rejected fail-closed
+ * so the flag can never be weakened into a live-looking request.
+ */
+function extractRehearsalOnly(value: unknown): boolean {
+  if (value && typeof value === "object" && !Array.isArray(value) && "rehearsalOnly" in value) {
+    if ((value as Record<string, unknown>).rehearsalOnly !== true) {
+      throw new BackendError("INVALID_ARGUMENT", "rehearsalOnly must be true when present.");
+    }
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Strips the rehearsal marker before shared cheap_demo control validation and
+ * request parsing, which only accept the fixed preset fields. The marker is
+ * handled (validated, bound, persisted) by the store itself.
+ */
+function stripRehearsalOnly(value: unknown): unknown {
+  if (value && typeof value === "object" && !Array.isArray(value) && "rehearsalOnly" in value) {
+    const { rehearsalOnly: _ignored, ...rest } = value as Record<string, unknown>;
+    return rest;
+  }
+  return value;
+}
+
 export class FirestoreGenerationStore {
   readonly db: Firestore;
   readonly bucket: Bucket;
@@ -69,11 +100,13 @@ export class FirestoreGenerationStore {
   }
 
   async requestGeneration(value: unknown): Promise<RequestGenerationResult> {
-    validateCheapDemoControls(value);
-    if (value && typeof value === "object" && !Array.isArray(value) && "prompt" in value) {
+    const rehearsalOnly = extractRehearsalOnly(value);
+    const sanitized = stripRehearsalOnly(value);
+    validateCheapDemoControls(sanitized);
+    if (sanitized && typeof sanitized === "object" && !Array.isArray(sanitized) && "prompt" in sanitized) {
       throw new BackendError("INVALID_ARGUMENT", "Generation prompts are fixed server-side for cheap_demo.");
     }
-    const input = parseRequestGeneration(value);
+    const input = parseRequestGeneration(sanitized);
     const registered = await assertRegisteredPartyDevice(this.db, input);
     if (registered.channel.status !== "active") throw new BackendError("FORBIDDEN", "Channel is not active for this party.");
     // Consent-bound request gate: the guest photo must be eligible right now.
@@ -89,7 +122,8 @@ export class FirestoreGenerationStore {
       if (existing.exists) {
         const old = existing.data()!;
         if (old.idempotencyKey !== input.idempotencyKey || old.deviceId !== input.deviceId || old.channelId !== input.channelId ||
-            (old.guestMediaId ?? undefined) !== (input.guestMediaId ?? undefined)) {
+            (old.guestMediaId ?? undefined) !== (input.guestMediaId ?? undefined) ||
+            (old.rehearsalOnly === true) !== rehearsalOnly) {
           throw new BackendError("FORBIDDEN", "jobId is already bound to a different request.");
         }
         return {
@@ -154,6 +188,7 @@ export class FirestoreGenerationStore {
         idempotencyKey: input.idempotencyKey,
         presetId: "cheap_demo",
         modelId: "wan3.0-video",
+        ...(rehearsalOnly ? { rehearsalOnly: true as const } : {}),
         ...(guestBinding ? { guestMedia: guestBinding, guestMediaId: input.guestMediaId } : {}),
         costEstimate: { modelId: CHEAP_DEMO_PRESET.modelId, presetId: CHEAP_DEMO_PRESET.presetId, secondsOut: CHEAP_DEMO_PRESET.secondsOut },
         expiresAt: Timestamp.fromDate(new Date(this.now().getTime() + MEDIA_RETENTION_MS)),
@@ -210,7 +245,8 @@ export class FirestoreGenerationStore {
 
   async getGenerationStatus(value: unknown): Promise<Record<string, unknown>> {
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new BackendError("INVALID_ARGUMENT", "Status query must be an object.");
-    const query = value as Record<string, unknown>;
+    extractRehearsalOnly(value);
+    const query = stripRehearsalOnly(value) as Record<string, unknown>;
     validateCheapDemoControls(query);
     if ("prompt" in query) throw new BackendError("INVALID_ARGUMENT", "Generation prompts are fixed server-side for cheap_demo.");
     const input: RequestGenerationInput = parseRequestGeneration({ ...query, presetId: query.presetId ?? "cheap_demo" });

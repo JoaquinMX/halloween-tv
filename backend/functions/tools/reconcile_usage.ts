@@ -69,10 +69,16 @@ async function main(): Promise<void> {
       }
     }
     const issues = [...initialIssues, ...fieldIssues];
-    // Ledger-derived provider call count: only rows with a recorded (possibly
-    // real) credit value can imply a billable provider call. Synthetic-zero
-    // fake rows and fixture rows with null task IDs imply zero provider calls.
-    const providerApiCalls = details.filter((row) => row.creditStatus === "recorded_value_unverified").length;
+    // Ledger-derived provider call count is provenance-based, never
+    // credit-based: every durable submitted task that is NOT an offline
+    // fake-shaped ID implies a live provider call, even when the realized
+    // charge is still unknown (null credits stay `unknown`, never zero).
+    // Synthetic-zero fake rows (fake-shaped IDs) and fixture rows (null task
+    // IDs) imply zero provider calls and are excluded.
+    const isOfflineFakeTask = (row: Record<string, unknown>): boolean =>
+      typeof row.providerTaskId === "string" &&
+      new RegExp(`^${String(row.cameraId)}__[a-f0-9]{24}$`).test(row.providerTaskId);
+    const providerApiCalls = details.filter((row) => typeof row.providerTaskId === "string" && !isOfflineFakeTask(row)).length;
     const unknownCreditRows = details.filter((row) => row.creditStatus === "unknown").length;
     process.stdout.write(`${JSON.stringify({ mode: "read-only", target, projectId, jobCameraCount: details.length, issueCount: issues.length, issues, providerApiCalls, unknownCreditRows, cameras: details })}\n`);
     if (issues.length) process.exitCode = 2;

@@ -12,7 +12,7 @@ import { normalizeProviderVideo, NormalizationOptions, removeNormalizedVideo } f
 import { publishManifest as commitManifest } from "./publish";
 import { AlibabaSubmissionError } from "./providers/alibaba";
 import { recordUsageOutcome, UsageLedgerInput } from "./usage";
-import { createVideoGenerationProviderFromEnvironment } from "./providers/fake";
+import { createVideoGenerationProviderFromEnvironment, FakeVideoGenerationPort } from "./providers/fake";
 import {
   buildCheapDemoRequest,
   CameraId,
@@ -59,6 +59,26 @@ function ledgerInput(job: FirebaseFirestore.DocumentData, cameraId: CameraId): U
 export function createGenerationServices(options: GenerationServiceOptions): GenerationServices {
   let provider = options.provider;
   const getProvider = () => provider ??= createVideoGenerationProviderFromEnvironment();
+  let rehearsalProvider: FakeVideoGenerationPort | undefined;
+  const getRehearsalProvider = () => (rehearsalProvider ??= new FakeVideoGenerationPort(
+    options.fixtureDirectory == null || options.fixtureDirectory.trim() === "" ? undefined : options.fixtureDirectory,
+  ));
+  /**
+   * Fake-only rehearsal binding: a job carrying the server-persisted
+   * `rehearsalOnly` marker resolves ONLY the offline fake provider,
+   * regardless of the deployed/injected provider configuration, and fails
+   * closed before any submit when the resolution is not the fake provider.
+   * Jobs without the marker resolve lazily through the unchanged default
+   * path (so unknown-provider failures keep their exact fail-closed shape).
+   */
+  const resolveRehearsalProvider = (job: FirebaseFirestore.DocumentData): VideoGenerationPort | undefined => {
+    if ((job as Record<string, unknown>).rehearsalOnly !== true) return undefined;
+    const fake = getRehearsalProvider();
+    if (!(fake instanceof FakeVideoGenerationPort)) {
+      throw new BackendError("PROVIDER_UNAVAILABLE", "Rehearsal jobs resolve only the fake provider; refusing a live submission.");
+    }
+    return fake;
+  };
   const store = new FirestoreGenerationStore({ db: options.db, bucket: options.bucket, now: options.now });
   const sleep = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
   const now = options.now ?? (() => new Date());
@@ -216,9 +236,16 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
     return commitManifest(store, partyId, jobId, idempotencyKey);
   }
 
-  async function pollUntilComplete(taskId: string, deadline = now().getTime() + providerTimeoutMs): Promise<ProviderTaskStatus> {
+  async function pollUntilComplete(
+    taskId: string,
+    rehearsalProvider: VideoGenerationPort | undefined,
+    deadline = now().getTime() + providerTimeoutMs,
+  ): Promise<ProviderTaskStatus> {
+    // Default-path resolution stays lazy (exactly as before) so unknown or
+    // misconfigured providers fail at the same point with the same shape.
+    const active = rehearsalProvider ?? getProvider();
     while (true) {
-      const status = await getProvider().getStatus(taskId);
+      const status = await active.getStatus(taskId);
       if (status.state === "SUCCEEDED" || status.state === "FAILED") return status;
       if (now().getTime() >= deadline) throw new BackendError("PROVIDER_UNAVAILABLE", "Provider task polling timed out; task ID is retained for reconciliation.");
       await sleep(pollIntervalMs);
@@ -236,6 +263,10 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
     await assertRegisteredPartyDevice(options.db, validTask);
     const claim = await store.claimWorker(validTask);
     if (!claim.claimed) return { jobId: validTask.jobId, state: String(claim.job.state), manifestVersion: Number(claim.job.manifestVersion) };
+    // Rehearsal-marked jobs bind to the fake provider before any submit;
+    // unmarked jobs keep `undefined` so every default-path call site resolves
+    // lazily through getProvider() exactly as before.
+    const activeProvider = resolveRehearsalProvider(claim.job);
     // Consent-bound guest execution plan: exactly ONE provider-generated camera
     // slot (CAM-01, bound to the validated guest photo) plus three locally
     // prepared fixture slots. Text-only jobs keep four provider cameras.
@@ -280,7 +311,7 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
           if (!cameraResult || cameraResult.providerState !== "SUCCEEDED") {
             let result;
             try {
-              result = await getProvider().getResult(providerTask.taskId);
+              result = await (activeProvider ?? getProvider()).getResult(providerTask.taskId);
             } catch (error) {
               if (error instanceof BackendError) throw error;
               throw new BackendError("PROVIDER_UNAVAILABLE", `Provider result is unavailable; task ID ${String(providerTask.taskId)} retained for reconciliation.`);
@@ -335,7 +366,7 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
               providerTask = (job.providerTasks ?? {})[cameraId] as { taskId?: unknown } | undefined;
             } else {
               const request = buildCheapDemoRequest(validTask.jobId, validTask.idempotencyKey, cameraId, guestReference);
-              const submitted = await getProvider().submit(request);
+              const submitted = await (activeProvider ?? getProvider()).submit(request);
               await store.recordSubmission(validTask.partyId, validTask.jobId, cameraId, submitted.taskId);
               providerTask = { taskId: submitted.taskId };
             }
@@ -358,7 +389,7 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
         await store.heartbeat(validTask.partyId, validTask.jobId);
         let status: ProviderTaskStatus;
         try {
-          status = await pollUntilComplete(providerTask.taskId, jobDeadline);
+          status = await pollUntilComplete(providerTask.taskId, activeProvider, jobDeadline);
         } catch (error) {
           await store.releaseWorker(validTask.partyId, validTask.jobId);
           throw error;
@@ -376,7 +407,7 @@ export function createGenerationServices(options: GenerationServiceOptions): Gen
         }
         let result: ProviderResult;
         try {
-          result = await getProvider().getResult(providerTask.taskId);
+          result = await (activeProvider ?? getProvider()).getResult(providerTask.taskId);
         } catch (error) {
           if (error instanceof BackendError) throw error;
           throw new BackendError("PROVIDER_UNAVAILABLE", `Provider result is unavailable; task ID ${String(providerTask.taskId)} retained for reconciliation.`);
