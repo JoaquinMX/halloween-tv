@@ -385,3 +385,18 @@ firebase --config firebase.json functions:list --project "$PROJECT_ID"
 ```
 
 Use the approved release pipeline and the exact previously deployed commit/artifact, not an arbitrary branch. Verify the prior release ID, function health, task/scheduler state, rules/index state, and TV offline playback. Do not remove lifecycle policy or loosen security rules during rollback.
+
+## Cycle-13 fix-p4 status note (repo-ready vs deployed)
+
+Provenance-scoped delivery (`evaluateDeliveryProvenance`, cartoon
+still-to-video chain gate, seed-provenance bindings) and the cartoon
+batch planner (`tools/prepare_cartoon_batch.ts`, preview-only with a
+mandatory `--max-credits` ceiling) are implemented and emulator-covered
+in this repository only. Deployment authority is unchanged: nothing in
+this cycle was deployed, no cloud migration or live provider request was
+made, and the predeploy/preflight gates above still decide readiness.
+Offline preflight now additionally verifies the packaged
+`runtime/scenarios` inventory (both versioned catalogs + all 16
+reference stills, hash-matched to `runtime-manifest.json`) alongside the
+existing fixture/binary/profile checks. Physical-TV and live-provider
+validation remain pending until separately authorized.

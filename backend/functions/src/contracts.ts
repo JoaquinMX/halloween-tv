@@ -623,6 +623,21 @@ export function isExplicitlySupportedLegacyArtifact(
   if (seed.partyId !== job.partyId || seed.channelId !== job.channelId) return false;
   if (seed.status === "deleted") return false;
   if (seed.status === "failed" || seed.status === "expired" || seed.status === "withdrawn") return false;
+  // Host-pipeline authorization (cycle-13 fix-p4): seeds minted server-side
+  // through the registered-host gate (generateHostVideo) carry the
+  // server-minted `hv-{seedId}` job link on both the job and the
+  // callable-only seed doc, with matching party/channel. That pipeline
+  // binding IS the explicit host approval, so no separate operator flag is
+  // required; the host pipeline never writes operatorApproved/approved.
+  // Live pipeline states (queued/running/ready/approved) deliver; terminal
+  // states stay denied above with their explicit codes.
+  if (binding.kind === "host" &&
+      job.jobId === `hv-${binding.seedId}` &&
+      seed.jobId === `hv-${binding.seedId}` &&
+      (seed.status === "queued" || seed.status === "running" ||
+       seed.status === "ready" || seed.status === "approved")) {
+    return true;
+  }
   if (seed.status !== "ready" && seed.status !== "approved") return false;
   if (seed.operatorApproved !== true && (seed as Record<string, unknown>).approved !== true) return false;
   return true;
