@@ -308,6 +308,33 @@ function buildArtifact(options: ArtifactOptions = {}): { root: string; functions
   copyFileSync(join(PACKAGE_ROOT, "runtime", "fixtures", "fixture_manifest.json"), join(functions, "runtime", "fixtures", "fixture_manifest.json"));
   if (options.omitFixture) rmSync(join(functions, "runtime", "fixtures", options.omitFixture));
 
+  // Cartoon scenario inventory: both versioned catalog JSONs plus all 16
+  // reference stills ship inside the artifact so preflight can hash-verify
+  // them against the manifest scenarios section (same contract as
+  // tools/prepare_runtime.ts; bytes are copied verbatim so digests match).
+  mkdirSync(join(functions, "runtime", "scenarios", "scenario_refs"), { recursive: true });
+  copyFileSync(join(PACKAGE_ROOT, "assets", "scenario_catalog.v1.json"), join(functions, "runtime", "scenarios", "scenario_catalog.v1.json"));
+  copyFileSync(join(PACKAGE_ROOT, "assets", "situations.v1.json"), join(functions, "runtime", "scenarios", "situations.v1.json"));
+  const scenarioCatalog = JSON.parse(readFileSync(join(PACKAGE_ROOT, "assets", "scenario_catalog.v1.json"), "utf8")) as {
+    records: Array<{ id: string; sourceFilename: string; referencePath: string; sha256: string; sizeBytes: number }>;
+  };
+  const scenarioRecords = scenarioCatalog.records.map((record) => {
+    copyFileSync(join(PACKAGE_ROOT, record.referencePath), join(functions, "runtime", "scenarios", "scenario_refs", record.sourceFilename));
+    return {
+      id: record.id, sourceFilename: record.sourceFilename, referencePath: record.referencePath,
+      sha256: record.sha256, sizeBytes: record.sizeBytes,
+    };
+  });
+  const scenarios = {
+    catalogVersion: "v1",
+    situationsVersion: "v1",
+    catalogPath: "runtime/scenarios/scenario_catalog.v1.json",
+    situationsPath: "runtime/scenarios/situations.v1.json",
+    refDirectory: "runtime/scenarios/scenario_refs",
+    count: scenarioRecords.length,
+    records: scenarioRecords,
+  };
+
   const linkBinary = (packageName: string, name: string): { path: string; sha256: string; sizeBytes: number } => {
     // Symlink the real packaged bytes: preflight hash-verifies them read-only
     // and never executes them, so identity holds without a 147MB copy.
@@ -333,6 +360,7 @@ function buildArtifact(options: ArtifactOptions = {}): { root: string; functions
       fixtureDirectory: "runtime/fixtures",
       fixtures,
       normalization: { codec: "h264", pixelFormat: "yuv420p", frameRate: "24/1", width: 854, height: 480, durationMs: 2000 },
+      scenarios,
       runtimeBytes: ffmpeg.sizeBytes + ffprobe.sizeBytes,
     }, null, 2));
   }

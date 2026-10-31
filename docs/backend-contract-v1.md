@@ -409,3 +409,49 @@ generation refusal, retained host-preview cleanup), `guest_upload_e2e.test.ts` (
 truthful usage, withdrawal races), and `alibaba.test.ts` (offline guest-image
 serialization fixture, zero network). Emulator-backed cases skip when `FIRESTORE_EMULATOR_HOST` is unset;
 run `npm run test:emulator` (project `demo-halloween-tv`) for the full suite.
+
+## Provenance-scoped delivery (cycle-13 p4, repo-ready — not deployed)
+
+Wall delivery authorization is provenance-scoped, evaluated both at
+publication replay and immediately before delivery URLs are issued
+(`evaluateDeliveryProvenance` in `contracts.ts`, enforced in
+`src/publish.ts` and `src/delivery.ts`):
+
+- Guest-bound jobs require a live eligible consent binding (same
+  submission, source hash, consent revision, party/channel, unexpired).
+  Withdrawal, expiry, changed source, or unknown bindings fail closed
+  with stage-specific `[authorization]` diagnostics.
+- Explicitly supported seed artifacts are deliverable WITHOUT fabricated
+  mobile consent: legacy/operator seeds require `status: ready|approved`
+  plus operator approval; host-pipeline seeds (`kind: host`, `jobId:
+  hv-{seedId}`, live pipeline status `queued|running|ready|approved`) are
+  authorized by their server-side registered-host creation binding (the
+  host pipeline never writes an operator flag).
+  Deletion, withdrawal, failure, expiry, cross-party/channel binding, or
+  unreadable authorization records fail closed (`NOT_FOUND`/`FORBIDDEN`/
+  `CLIP_EXPIRED`/`INTERNAL` — never treated as "no consent needed").
+- Cartoon jobs require a completed still-to-video chain
+  (`cartoonChain`: still `completed`, video `completed|staged`,
+  `videoStillSha256 == stillSha256`); portrait-bound chains re-evaluate
+  the cited guest consent exactly like a guest job.
+- Failure diagnostics carry an explicit stage prefix (`[manifest]`,
+  `[authorization]`, `[signing]`, `[download]`, `[hash]`, `[ack]`).
+- The 1/2/4-camera manifest contract, canonical hash, idempotent ACK,
+  purge semantics, signed-URL handling (in-flight only, never persisted),
+  and TTL/orphan sweeps are unchanged.
+
+## Cartoon catalog batch gate (cycle-13 p4, repo-ready — not deployed)
+
+`tools/prepare_cartoon_batch.ts` is a preview-only planner: 16 rows, 16
+still submissions (`qwen-image-3.0-pro`, Alibaba Singapore) + 16 2s video
+submissions (`wan3.0-video` STANDARD, 2s/480P/silent/no-watermark/
+`prompt_extend=false`), 32 generated seconds, 48 non-billable fixture
+slots (3 per row, `fixture: true`, null task ID, null charge). It never
+submits live work, never writes Firestore/Storage, and refuses to run
+without an explicit owner-supplied `--max-credits` ceiling. Token Plan
+prices are never stated. Fixed plan IDs/versions/seeds live in
+`CARTOON_CATALOG_SCENARIOS`; pinned video controls are enforced by
+`validateCartoonVideoControls` (Alibaba Singapore only — Google/Veo/
+Imagen rejected). Operator fixtures: `test/fixtures/legacy_seed_delivery.json`
+(legacy-seed wall case). Status: repository implementation + emulator
+coverage only; no live request, cloud migration, or deploy was performed.

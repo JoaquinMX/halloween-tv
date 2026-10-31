@@ -231,3 +231,16 @@ beyond the ceiling need a fresh approval per §1.
   submission, and publication; tombstone/withdrawal races fail closed);
   fake provider reports the 5s shape offline for emulator proof; spend guard
   unchanged (fake under the rehearsal marker, configured provider otherwise).
+
+## Appendix B — Cycle-13 fix-p4 provenance/batch note (gate discipline unchanged)
+
+Provenance-scoped delivery (legacy/operator/host seeds deliverable
+without fabricated mobile consent; withdrawn/expired/deleted/unknown
+bindings fail closed with stage-specific diagnostics) and the cartoon
+sample-batch planner (preview-only, mandatory owner `--max-credits`
+ceiling, 16 stills + 16 2s videos + 48 fixture slots, Alibaba Singapore
+only) change no spend authorization in this gate: exactly ONE live
+generation per approval (§5), attempts 2–5 need fresh approvals (§1),
+and physical-TV/live-provider validation stays pending until separately
+authorized. Batch preparation and emulator verification performed in the
+repository are not a deployment and do not enable live mode.

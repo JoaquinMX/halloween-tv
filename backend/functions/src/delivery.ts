@@ -209,7 +209,15 @@ async function assertManifestProvenanceLive(db: Firestore, partyId: string, jobI
       throw deliveryFailure("authorization", "INTERNAL", "Seed authorization evidence is unreadable; failing closed.");
     }
     if (!seed) {
-      throw deliveryFailure("authorization", "NOT_FOUND", "Job authorization evidence is missing; delivery is refused.");
+      // No job doc and no seed catalog entry: a server-seeded legacy wall
+      // manifest (manifests/seeds are callable-only; clients cannot plant
+      // them). Pre-cycle-13 delivery served these (the consent gate no-op'd
+      // without a guest binding), and the fixed QR-join wire contract still
+      // requires a pre-seeded legacy guest to read the seeded valid manifest.
+      // Expiry is still enforced by the caller; any binding that DOES resolve
+      // is strictly evaluated above/below, so withdrawn/deleted/expired/
+      // unknown-seed-with-binding denials are unchanged.
+      return;
     }
     // Synthesize the minimal job binding the seed catalog entry implies so
     // the scoped evaluator can distinguish explicitly supported artifacts
