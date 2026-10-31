@@ -7,8 +7,8 @@
 /// callable time; nothing here implies a code is valid.
 ///
 /// Session QR JSON (TV display, companion parse) contains exactly
-/// `partyId` + `channelId` plus optional six-digit `joinPin`. It never
-/// carries a deviceId, URL, or secret.
+/// `partyId` + `channelId` + `role` (`'guest'`) plus optional six-digit
+/// `joinPin`. It never carries a deviceId, URL, or secret.
 library;
 
 import 'dart:convert';
@@ -16,8 +16,7 @@ import 'dart:convert';
 import 'package:cloud_functions/cloud_functions.dart';
 
 /// Validates the optional six-digit session PIN (leading zeros significant).
-bool isValidJoinPin(String value) =>
-    RegExp(r'^[0-9]{6}$').hasMatch(value);
+bool isValidJoinPin(String value) => RegExp(r'^[0-9]{6}$').hasMatch(value);
 
 /// One per-guest device visible to the host.
 ///
@@ -50,8 +49,7 @@ final class GuestCodeEntry {
 
   /// Neutral display label: the custom label when present, else a generic
   /// fallback that never echoes the device id.
-  String get displayLabel =>
-      hasCustomLabel ? label!.trim() : 'Guest device';
+  String get displayLabel => hasCustomLabel ? label!.trim() : 'Guest device';
 
   @override
   bool operator ==(Object other) =>
@@ -71,9 +69,17 @@ final class GuestCodeEntry {
 
 /// Builds the anonymous session QR/join payload as a JSON object.
 ///
-/// Contains exactly `partyId` + `channelId` plus the optional six-digit
-/// `joinPin` (omitted when null). Never includes a deviceId, URL, or secret.
-/// Throws [ArgumentError] when [joinPin] is non-null but malformed.
+/// Contains exactly `partyId` + `channelId` + `role` (`'guest'`) plus the
+/// optional six-digit `joinPin` (omitted when null). Never includes a
+/// deviceId, URL, or secret. Throws [ArgumentError] when [joinPin] is
+/// non-null but malformed.
+///
+/// Rationale: the companion offers a dedicated host entry screen (Scan Host
+/// QR + an explicit Join-as-guest route), so the two QR kinds must be
+/// visibly distinct on the wire. The guest QR always carries
+/// `role: 'guest'`; legacy payloads without `role` remain parseable by
+/// consumers (role-absent means guest), with vectors in
+/// `test/fixtures/join_roles_v1.json`.
 String buildJoinPayload({
   required String partyId,
   required String channelId,
@@ -85,6 +91,7 @@ String buildJoinPayload({
   final Map<String, String> payload = <String, String>{
     'partyId': partyId,
     'channelId': channelId,
+    'role': 'guest',
   };
   if (joinPin != null) {
     payload['joinPin'] = joinPin;
@@ -206,9 +213,7 @@ final class GuestCodeListing {
         } else if (rawLabel is String) {
           label = rawLabel.trim().isEmpty ? null : rawLabel.trim();
         } else {
-          throw const GuestCodeException(
-            'Guest list entry is missing fields.',
-          );
+          throw const GuestCodeException('Guest list entry is missing fields.');
         }
       }
       String? role;
@@ -219,9 +224,7 @@ final class GuestCodeListing {
         } else if (rawRole is String && rawRole.isNotEmpty) {
           role = rawRole;
         } else {
-          throw const GuestCodeException(
-            'Guest list entry is missing fields.',
-          );
+          throw const GuestCodeException('Guest list entry is missing fields.');
         }
       }
       String? status;
@@ -232,9 +235,7 @@ final class GuestCodeListing {
         } else if (rawStatus is String && rawStatus.isNotEmpty) {
           status = rawStatus;
         } else {
-          throw const GuestCodeException(
-            'Guest list entry is missing fields.',
-          );
+          throw const GuestCodeException('Guest list entry is missing fields.');
         }
       }
       entries.add(
@@ -279,7 +280,9 @@ final class GuestCodeClient {
           .call(payload);
       final Object? data = result.data;
       if (data is! Map) {
-        throw const GuestCodeException('Guest list response was not an object.');
+        throw const GuestCodeException(
+          'Guest list response was not an object.',
+        );
       }
       return Map<String, Object?>.from(data);
     },
@@ -307,14 +310,14 @@ final class GuestCodeClient {
   /// response is malformed. Authorization failures surface as the caller's
   /// error.
   Future<GuestCodeListing> fetchListing() async {
-    final Map<String, Object?> data = await invoker('listPartyDevices', <
-      String,
-      Object?
-    >{
-      'partyId': partyId,
-      'deviceId': deviceId,
-      'channelId': channelId,
-    });
+    final Map<String, Object?> data = await invoker(
+      'listPartyDevices',
+      <String, Object?>{
+        'partyId': partyId,
+        'deviceId': deviceId,
+        'channelId': channelId,
+      },
+    );
     return GuestCodeListing.fromResponse(
       data,
       expectedPartyId: partyId,

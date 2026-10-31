@@ -258,8 +258,7 @@ class _GuestCodePanelState extends State<GuestCodePanel> {
                               focusNode: widget.primaryFocusNode,
                               onPressed: widget.onBack!,
                             ),
-                          if (widget.onBack != null)
-                            const SizedBox(height: 10),
+                          if (widget.onBack != null) const SizedBox(height: 10),
                           _PanelButton(
                             actionKey: kGuestCodeCloseKey,
                             label: 'CLOSE',
@@ -371,10 +370,7 @@ class _GuestCodePanelState extends State<GuestCodePanel> {
               child: Text(
                 'Refresh failed: $_error — showing last session.',
                 key: kGuestCodeErrorKey,
-                style: const TextStyle(
-                  color: Color(0xFFFFC107),
-                  fontSize: 18,
-                ),
+                style: const TextStyle(color: Color(0xFFFFC107), fontSize: 18),
               ),
             ),
         ],
@@ -399,10 +395,7 @@ class _GuestCodePanelState extends State<GuestCodePanel> {
             child: Text(
               'Refresh failed: $_error — showing last session.',
               key: kGuestCodeErrorKey,
-              style: const TextStyle(
-                color: Color(0xFFFFC107),
-                fontSize: 18,
-              ),
+              style: const TextStyle(color: Color(0xFFFFC107), fontSize: 18),
             ),
           ),
       ],

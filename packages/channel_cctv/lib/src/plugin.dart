@@ -17,12 +17,13 @@ import 'cctv_tiles.dart';
 /// The channel never touches a concrete player: the app layer implements
 /// this callback (owning `VideoPlayerController` lifecycles) and the wall
 /// wraps the returned surface in [CctvTile] chrome.
-typedef CctvTileBuilder = Widget Function(
-  BuildContext context,
-  int index,
-  String label,
-  String cameraId,
-);
+typedef CctvTileBuilder =
+    Widget Function(
+      BuildContext context,
+      int index,
+      String label,
+      String cameraId,
+    );
 
 /// Placeholder surface used when the app supplies no [CctvTileBuilder].
 Widget _defaultTileSurface(
@@ -30,16 +31,12 @@ Widget _defaultTileSurface(
   int index,
   String label,
   String cameraId,
-) =>
-    Container(
-      color: Colors.black,
-      child: Center(
-        child: Text(
-          'NO FEED · $cameraId',
-          style: CctvTheme.timestampStyle,
-        ),
-      ),
-    );
+) => Container(
+  color: Colors.black,
+  child: Center(
+    child: Text('NO FEED · $cameraId', style: CctvTheme.timestampStyle),
+  ),
+);
 
 /// Channel id for the haunted-surveillance feed.
 const String hauntedSurveillanceChannelId = 'haunted_surveillance';
@@ -63,6 +60,86 @@ class CctvWallSettingsKeys {
 
   /// Optional per-camera label overrides (`{cameraId: label}`).
   static const String labels = 'labels';
+
+  /// Party-scoped display cap for the number of visible cameras.
+  ///
+  /// Encoding: the string `'1'`, `'2'`, or `'4'` (persisted through the
+  /// contracts-layer `SettingsPort` as a string, scoped by party id).
+  /// Absent, invalid, or unreadable values default to `'4'` (four cameras).
+  ///
+  /// This is a DISPLAY CAP only: `effectiveCount = min(configuredCount,
+  /// manifest clip count)`. Reduced layouts still prepare + ACK the complete
+  /// received manifest, and generation presets keep producing 4 clips. See
+  /// [cctvCameraCountFromSettings] and [cctvEffectiveCount].
+  static const String cameraCount = 'cameraCount';
+
+  /// Transient hero-zoom target: the camera id shown fullscreen, or absent
+  /// for the grid. Never persisted; validated against the active slots
+  /// (unknown ids are ignored). See [cctvHeroCameraIdFromSettings].
+  static const String heroCameraId = 'heroCameraId';
+}
+
+/// Animation duration for grid relayouts and hero zoom in/out.
+///
+/// Shared by the wall and its tests so intermediate hero geometry can be
+/// asserted deterministically (pump a fraction of this duration).
+const Duration kWallLayoutDuration = Duration(milliseconds: 250);
+
+/// Key of the wall root (layout + hero geometry assertions).
+const ValueKey<String> kCctvWallKey = ValueKey<String>('cctv-wall');
+
+/// Reads the configured camera display cap from [settings].
+///
+/// Accepts the documented string encoding (`'1'`/`'2'`/`'4'`, surrounding
+/// whitespace tolerated) and, defensively, a raw int. Anything absent,
+/// invalid, or unreadable (wrong type, unparsable, unsupported count such
+/// as `3`) defaults to [kDefaultCctvClipCount] (four cameras).
+int cctvCameraCountFromSettings(ChannelSettings settings) {
+  final Object? raw = settings.values[CctvWallSettingsKeys.cameraCount];
+  final int? parsed = raw is String
+      ? int.tryParse(raw.trim())
+      : raw is int
+      ? raw
+      : null;
+  if (parsed == null || !isSupportedCctvClipCount(parsed)) {
+    return kDefaultCctvClipCount;
+  }
+  return parsed;
+}
+
+/// Reads the transient hero-zoom target from [settings].
+///
+/// Returns the camera id when a non-empty string is present, else null
+/// (grid). Membership in the active slot set is validated by the wall, not
+/// here, so unknown ids degrade to the grid instead of taking it down.
+String? cctvHeroCameraIdFromSettings(ChannelSettings settings) {
+  final Object? raw = settings.values[CctvWallSettingsKeys.heroCameraId];
+  if (raw is! String || raw.isEmpty) {
+    return null;
+  }
+  return raw;
+}
+
+/// Derives the number of tiles the wall renders.
+///
+/// `effectiveCount = min(configuredCount, manifestClipCount)`: the setting
+/// can only ever HIDE cameras, never invent them. Both inputs are sanitized
+/// to supported counts first (unsupported configured values fall back to
+/// [kDefaultCctvClipCount]; an unsupported manifest length falls back to the
+/// full slot map so per-slot defaults degrade instead of crashing). Because
+/// the supported counts `{1, 2, 4}` are closed under `min`, the result is
+/// always a supported count.
+int cctvEffectiveCount({
+  required int configuredCount,
+  required int manifestClipCount,
+}) {
+  final int configured = isSupportedCctvClipCount(configuredCount)
+      ? configuredCount
+      : kDefaultCctvClipCount;
+  final int manifest = isSupportedCctvClipCount(manifestClipCount)
+      ? manifestClipCount
+      : cctvSlots.length;
+  return configured < manifest ? configured : manifest;
 }
 
 /// Reads per-camera label overrides from [settings].
@@ -97,9 +174,9 @@ EffectProfile effectProfileFromOverlay(OverlaySettings overlay) =>
 /// Haunted-surveillance CCTV channel plugin.
 ///
 /// Descriptor id is [hauntedSurveillanceChannelId] with video-playback,
-/// effects, and timed-events capabilities. [build] assembles the 2x2 wall
-/// shell, delegating video surfaces to the app layer via PlaybackHandle +
-/// [tileBuilder].
+/// effects, and timed-events capabilities. [build] assembles the adaptive
+/// 1/2/4-camera wall shell, delegating video surfaces to the app layer via
+/// PlaybackHandle + [tileBuilder].
 final class HauntedSurveillancePlugin implements ChannelPlugin {
   /// Creates the plugin.
   const HauntedSurveillancePlugin({
@@ -109,6 +186,8 @@ final class HauntedSurveillancePlugin implements ChannelPlugin {
     this.clock = const SystemClock(),
     this.disableEffects = false,
     this.glitchSeed = 0xc0ffee,
+    this.cameraCount = kDefaultCctvClipCount,
+    this.heroCameraId,
   });
 
   /// Builds per-tile video surfaces (app-owned player lifecycles).
@@ -117,8 +196,12 @@ final class HauntedSurveillancePlugin implements ChannelPlugin {
   /// Effect profile applied to tile overlays; defaults to [cctvProfile].
   final EffectProfile? profile;
 
-  /// Optional playback manifest; when it carries exactly four clips their
-  /// camera ids drive the wall slots, otherwise [tileFor] defaults apply.
+  /// Optional playback manifest; clip camera ids drive the wall slots via
+  /// [tileForClip] (canonical [cctvSlots] order, never manifest clip order),
+  /// otherwise [tileFor] defaults apply. Manifests with 1, 2, or 4 clips
+  /// (the supported layouts) map their clips onto the matching slots;
+  /// anything else degrades to per-slot defaults instead of taking the
+  /// wall down. The rendered tile count is capped by [cameraCount].
   final PlaybackManifest? manifest;
 
   /// Clock source for tile HUD timestamps.
@@ -130,29 +213,51 @@ final class HauntedSurveillancePlugin implements ChannelPlugin {
   /// Seed for the wall glitch controller (deterministic replay).
   final int glitchSeed;
 
+  /// Configured camera display cap (1, 2, or 4; defaults to 4).
+  ///
+  /// Direct-use default only: [build] prefers [CctvWallSettingsKeys.cameraCount]
+  /// from [ChannelContext.settings] when present. The rendered tile count is
+  /// `min(configured, manifest clips)` (see [cctvEffectiveCount]).
+  final int cameraCount;
+
+  /// Transient hero-zoom target (camera id shown fullscreen), or null for
+  /// the grid. Direct-use default only: [build] prefers
+  /// [CctvWallSettingsKeys.heroCameraId] when present.
+  final String? heroCameraId;
+
   @override
   ChannelDescriptor get descriptor => const ChannelDescriptor(
-        id: hauntedSurveillanceChannelId,
-        title: 'Haunted Surveillance',
-        version: 1,
-        capabilities: ChannelCapability(
-          videoPlayback: true,
-          effects: true,
-          timedEvents: true,
-        ),
-      );
+    id: hauntedSurveillanceChannelId,
+    title: 'Haunted Surveillance',
+    version: 1,
+    capabilities: ChannelCapability(
+      videoPlayback: true,
+      effects: true,
+      timedEvents: true,
+    ),
+  );
 
   @override
   Widget build(ChannelContext context) {
     // Wall config flows through the channel contract: settings published by
     // the host win over constructor defaults, so the registry object never
     // needs to be discarded/re-instantiated to change wall behaviour.
-    final bool settingsDisabled = context.settings
-        .get<bool>(CctvWallSettingsKeys.effectsDisabled, false);
+    final bool settingsDisabled = context.settings.get<bool>(
+      CctvWallSettingsKeys.effectsDisabled,
+      false,
+    );
+    // `cameraCount` follows the same rule (present settings win, absent
+    // settings keep the constructor default for direct use); the hero target
+    // is transient UI state that is never persisted, so a settings value
+    // wins when present and the constructor default applies otherwise.
+    final bool hasCountOverride = context.settings.values.containsKey(
+      CctvWallSettingsKeys.cameraCount,
+    );
     return CctvWall(
       playbackHandle: context.playbackHandle,
       tileBuilder: tileBuilder,
-      profile: profile ??
+      profile:
+          profile ??
           (manifest == null
               ? cctvProfile()
               : effectProfileFromOverlay(manifest!.overlay)),
@@ -161,16 +266,30 @@ final class HauntedSurveillancePlugin implements ChannelPlugin {
       disableEffects: disableEffects || settingsDisabled,
       glitchSeed: glitchSeed,
       labelOverrides: cctvLabelOverridesFromSettings(context.settings),
+      cameraCount: hasCountOverride
+          ? cctvCameraCountFromSettings(context.settings)
+          : cameraCount,
+      heroCameraId:
+          cctvHeroCameraIdFromSettings(context.settings) ?? heroCameraId,
     );
   }
 }
 
-/// 2x2 CCTV wall shell.
+/// Adaptive CCTV wall shell (1, 2, or 4 cameras + decoder-preserving hero).
 ///
-/// Boots by preparing the app-owned [PlaybackHandle], then shows four
-/// [CctvTile]s (video surface + HUD + effect overlay). A single tile
+/// Boots by preparing the app-owned [PlaybackHandle], then shows one
+/// full-size tile, two side-by-side tiles in one row, or a 2x2 grid in
+/// canonical camera order, driven by [cameraCount] (display cap) and the
+/// received manifest (see [cctvEffectiveCount]). A single tile
 /// failure never takes down the wall: surface builders that throw are
 /// caught per tile and render [SignalLost].
+///
+/// Grid and hero geometry live in one full-viewport [Stack] with
+/// camera-keyed [AnimatedPositioned] children whose ancestry remains stable:
+/// opening the hero ([heroCameraId]) animates the selected existing tile to
+/// the viewport rectangle and fades its siblings (they stay mounted, so no
+/// decoder is created or disposed during the zoom). The host (app layer)
+/// owns focus and key handling; the wall only presents geometry.
 class CctvWall extends StatefulWidget {
   /// Creates the wall shell.
   CctvWall({
@@ -184,6 +303,8 @@ class CctvWall extends StatefulWidget {
     this.glitchSeed = 0xc0ffee,
     this.glitchTick = const Duration(milliseconds: 700),
     this.labelOverrides = const <String, String>{},
+    this.cameraCount = kDefaultCctvClipCount,
+    this.heroCameraId,
   }) : profile = profile ?? cctvProfile();
 
   /// Opaque app-owned playback control surface.
@@ -214,6 +335,19 @@ class CctvWall extends StatefulWidget {
   /// (`{cameraId: label}`); empty means no overrides.
   final Map<String, String> labelOverrides;
 
+  /// Configured camera display cap (1, 2, or 4).
+  ///
+  /// Unsupported values degrade to [kDefaultCctvClipCount]. The rendered
+  /// tile count is `min(cameraCount, manifest clips)` (see
+  /// [cctvEffectiveCount]): a display cap only, never a prepare/ACK filter —
+  /// the host still prepares and acknowledges the complete received
+  /// manifest.
+  final int cameraCount;
+
+  /// Transient hero-zoom target (camera id shown fullscreen), or null for
+  /// the grid. Unknown ids (not in the active slots) degrade to the grid.
+  final String? heroCameraId;
+
   @override
   State<CctvWall> createState() => _CctvWallState();
 }
@@ -229,8 +363,7 @@ class _CctvWallState extends State<CctvWall> {
     super.initState();
     _glitch = GlitchController(seed: widget.glitchSeed);
     if (!widget.disableEffects) {
-      _glitchTimer =
-          Timer.periodic(widget.glitchTick, (_) => _glitch.tick());
+      _glitchTimer = Timer.periodic(widget.glitchTick, (_) => _glitch.tick());
     }
     unawaited(_boot());
   }
@@ -273,10 +406,7 @@ class _CctvWallState extends State<CctvWall> {
     } else if (!widget.disableEffects &&
         oldWidget.glitchTick != widget.glitchTick) {
       _glitchTimer?.cancel();
-      _glitchTimer = Timer.periodic(
-        widget.glitchTick,
-        (_) => _glitch.tick(),
-      );
+      _glitchTimer = Timer.periodic(widget.glitchTick, (_) => _glitch.tick());
     }
   }
 
@@ -287,42 +417,94 @@ class _CctvWallState extends State<CctvWall> {
     super.dispose();
   }
 
-  /// Wall slots in canonical order, one per `core_playlist` [CctvSlot].
+  /// Active wall slots in canonical order: the first `effectiveCount`
+  /// `core_playlist` [CctvSlot]s, where `effectiveCount =
+  /// min(cameraCount, manifest clips)` (see [cctvEffectiveCount]).
   ///
   /// Slot placement always follows camera identity (`cctvSlots` order), never
   /// manifest clip order, so a reordered control-plane payload cannot move a
-  /// feed to the wrong tile. When the manifest carries one clip per slot, the
-  /// clip drives the tile via [tileForClip]: its `label` wins when present,
-  /// else the `core_playlist` slot default applies (owner Q3). Manifests that
-  /// are short, oversized, or name unknown cameras fall back to the static
+  /// feed to the wrong tile. Clips present in the manifest drive their slot
+  /// via [tileForClip]: the clip `label` wins when present, else the
+  /// `core_playlist` slot default applies (owner Q3). Manifests with
+  /// unsupported lengths, or naming unknown cameras, fall back to the static
   /// [tileFor] defaults per slot instead of taking the wall down.
   /// Per-camera label overrides from [ChannelContext.settings] apply on top.
+  ///
+  /// Only the active slots are returned, so the host builds sources and
+  /// decoders for active ids only. Reducing the count never filters the
+  /// manifest itself: the host still prepares and ACKs the complete
+  /// received manifest.
   List<({String label, String cameraId})> _slots() {
     final PlaybackManifest? manifest = widget.manifest;
     final Map<String, ClipDescriptor> byCamera = <String, ClipDescriptor>{};
-    if (manifest != null && manifest.clips.length == cctvSlots.length) {
+    if (manifest != null && isSupportedCctvClipCount(manifest.clips.length)) {
       for (final ClipDescriptor clip in manifest.clips) {
         byCamera.putIfAbsent(clip.cameraId, () => clip);
       }
     }
     final List<({String label, String cameraId})> base =
         <({String label, String cameraId})>[
-      for (final CctvSlot slot in cctvSlots)
-        if (byCamera[slot.id] case final ClipDescriptor clip)
-          tileForClip(clip)
-        else
-          tileFor(slot.index),
-    ];
-    if (widget.labelOverrides.isEmpty) {
-      return base;
+          for (final CctvSlot slot in cctvSlots)
+            if (byCamera[slot.id] case final ClipDescriptor clip)
+              tileForClip(clip)
+            else
+              tileFor(slot.index),
+        ];
+    final List<({String label, String cameraId})> labelled =
+        widget.labelOverrides.isEmpty
+        ? base
+        : <({String label, String cameraId})>[
+            for (final ({String label, String cameraId}) slot in base)
+              (
+                label: widget.labelOverrides[slot.cameraId] ?? slot.label,
+                cameraId: slot.cameraId,
+              ),
+          ];
+    final int effective = cctvEffectiveCount(
+      configuredCount: widget.cameraCount,
+      manifestClipCount: manifest?.clips.length ?? cctvSlots.length,
+    );
+    return labelled.take(effective).toList();
+  }
+
+  /// Grid cell rectangles tiling [size] for [count] tiles.
+  ///
+  /// One tile fills the padded viewport; two tiles sit side by side in one
+  /// row; four tiles form the canonical 2x2 grid (index 0 top-left, reading
+  /// order). The 4px outer pad preserves the gutter look of the previous
+  /// Column/Row layout; every rect stays inside [size] (viewport bounds).
+  List<Rect> _gridRects(Size size, int count) {
+    const double pad = 4;
+    const double gap = 4;
+    final double width = size.width;
+    final double height = size.height;
+    switch (count) {
+      case 1:
+        return <Rect>[
+          Rect.fromLTWH(pad, pad, width - pad * 2, height - pad * 2),
+        ];
+      case 2:
+        final double cellWidth = (width - pad * 2 - gap) / 2;
+        final double cellHeight = height - pad * 2;
+        return <Rect>[
+          Rect.fromLTWH(pad, pad, cellWidth, cellHeight),
+          Rect.fromLTWH(pad + cellWidth + gap, pad, cellWidth, cellHeight),
+        ];
+      default:
+        final double cellWidth = (width - pad * 2 - gap) / 2;
+        final double cellHeight = (height - pad * 2 - gap) / 2;
+        return <Rect>[
+          Rect.fromLTWH(pad, pad, cellWidth, cellHeight),
+          Rect.fromLTWH(pad + cellWidth + gap, pad, cellWidth, cellHeight),
+          Rect.fromLTWH(pad, pad + cellHeight + gap, cellWidth, cellHeight),
+          Rect.fromLTWH(
+            pad + cellWidth + gap,
+            pad + cellHeight + gap,
+            cellWidth,
+            cellHeight,
+          ),
+        ];
     }
-    return <({String label, String cameraId})>[
-      for (final ({String label, String cameraId}) slot in base)
-        (
-          label: widget.labelOverrides[slot.cameraId] ?? slot.label,
-          cameraId: slot.cameraId,
-        ),
-    ];
   }
 
   @override
@@ -330,44 +512,70 @@ class _CctvWallState extends State<CctvWall> {
     if (!_ready) {
       return const Center(child: CircularProgressIndicator());
     }
-    // 2x2 wall sized by the viewport: Column/Row of Expanded cells fills
-    // exactly the incoming constraints (720p through 1080p, including the
-    // host's overscan-safe padding) with no scrollable and no overflow.
-    // A fixed GridView cross-axis layout cannot guarantee this: without a
-    // viewport-derived childAspectRatio the bottom row renders off-screen.
+    // One full-viewport Stack sizes the wall from the incoming constraints
+    // (720p through 1080p, including the host's overscan-safe padding) with
+    // no scrollable and no overflow. Camera-keyed AnimatedPositioned
+    // children keep a stable ancestry across grid relayouts and hero zoom,
+    // so shared camera elements (and their decoders) survive both.
     final List<({String label, String cameraId})> slots = _slots();
-    Widget cell(int index) => Expanded(
-          child: Padding(
-            padding: const EdgeInsets.all(2),
-            child: _WallTile(
-              index: index,
-              label: slots[index].label,
-              cameraId: slots[index].cameraId,
-              tileBuilder: widget.tileBuilder,
-              profile: widget.profile,
-              clock: widget.clock,
-              disableEffects: widget.disableEffects,
-              glitch: _glitch,
-              bootFailed: _bootFailed,
-            ),
-          ),
-        );
+    final String? hero =
+        widget.heroCameraId != null &&
+            slots.any(
+              (({String label, String cameraId}) slot) =>
+                  slot.cameraId == widget.heroCameraId,
+            )
+        ? widget.heroCameraId
+        : null;
     return Container(
+      key: kCctvWallKey,
       color: CctvTheme.gutter,
-      padding: const EdgeInsets.all(4),
-      child: Column(
-        children: <Widget>[
-          Expanded(
-            child: Row(
-              children: <Widget>[cell(0), cell(1)],
-            ),
-          ),
-          Expanded(
-            child: Row(
-              children: <Widget>[cell(2), cell(3)],
-            ),
-          ),
-        ],
+      child: LayoutBuilder(
+        builder: (BuildContext context, BoxConstraints constraints) {
+          final Size size = constraints.biggest;
+          final List<Rect> rects = _gridRects(size, slots.length);
+          return Stack(
+            children: <Widget>[
+              for (int index = 0; index < slots.length; index++)
+                AnimatedPositioned(
+                  key: ValueKey<String>('wall-slot-${slots[index].cameraId}'),
+                  duration: kWallLayoutDuration,
+                  left: hero == slots[index].cameraId ? 0 : rects[index].left,
+                  top: hero == slots[index].cameraId ? 0 : rects[index].top,
+                  width: hero == slots[index].cameraId
+                      ? size.width
+                      : rects[index].width,
+                  height: hero == slots[index].cameraId
+                      ? size.height
+                      : rects[index].height,
+                  child: AnimatedOpacity(
+                    duration: kWallLayoutDuration,
+                    opacity: hero == null || hero == slots[index].cameraId
+                        ? 1
+                        : 0,
+                    // Faded siblings stay mounted (decoders alive) but leave
+                    // hit-testing to the hero tile.
+                    child: IgnorePointer(
+                      ignoring: hero != null && hero != slots[index].cameraId,
+                      child: Padding(
+                        padding: const EdgeInsets.all(2),
+                        child: _WallTile(
+                          index: index,
+                          label: slots[index].label,
+                          cameraId: slots[index].cameraId,
+                          tileBuilder: widget.tileBuilder,
+                          profile: widget.profile,
+                          clock: widget.clock,
+                          disableEffects: widget.disableEffects,
+                          glitch: _glitch,
+                          bootFailed: _bootFailed,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -406,10 +614,7 @@ class _WallTile extends StatelessWidget {
     try {
       surface = tileBuilder(context, index, label, cameraId);
     } catch (_) {
-      return const CctvTile(
-        hasError: true,
-        child: SizedBox.shrink(),
-      );
+      return const CctvTile(hasError: true, child: SizedBox.shrink());
     }
     Widget? effects;
     if (!disableEffects) {
@@ -433,10 +638,10 @@ class _TileEffects extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => ListenableBuilder(
-        listenable: glitch,
-        builder: (BuildContext context, Widget? _) => CctvEffectsOverlay(
-          profile: profile,
-          glitchIntensity: glitch.currentIntensity,
-        ),
-      );
+    listenable: glitch,
+    builder: (BuildContext context, Widget? _) => CctvEffectsOverlay(
+      profile: profile,
+      glitchIntensity: glitch.currentIntensity,
+    ),
+  );
 }

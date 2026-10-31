@@ -78,10 +78,13 @@ WallBoot _bootWith({
   return WallBoot(
     store: store ?? InMemoryManifestStore(),
     partyId: partyId,
-    fixtureLoader: ({required String partyId, required String channelId}) async =>
-        fixtureManifest,
+    fixtureLoader:
+        ({required String partyId, required String channelId}) async =>
+            fixtureManifest,
     assetBytesLoader: _bytesLoader(bytesByAsset),
-    bundleLoader: bundleLoader ?? ((String key) async => throw StateError('no bundle in unit tests')),
+    bundleLoader:
+        bundleLoader ??
+        ((String key) async => throw StateError('no bundle in unit tests')),
   );
 }
 
@@ -89,35 +92,43 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   group('WallBoot', () {
-    test('restores effects-disabled setting from the party-scoped port', () async {
-      final Map<String, List<int>> bytesByAsset = _realBytes();
-      final InMemorySettings settings = InMemorySettings();
-      await settings.setBool(
-        partyId: PartyId('local-party'),
-        key: CctvWallSettingsKeys.effectsDisabled,
-        value: true,
-      );
-      final WallBoot boot = WallBoot(
-        store: InMemoryManifestStore(),
-        settings: settings,
-        fixture: ({required String partyId, required String channelId}) =>
-            _manifestFor(bytesByAsset, partyId: partyId, channelId: channelId),
-        assetBytesLoader: _bytesLoader(bytesByAsset),
-        bundleLoader: (_) async => throw StateError('fixture override is used'),
-      );
-
-      final result = await boot.boot();
-
-      expect(result.isReady, isTrue, reason: result.unavailableReason);
-      expect(result.initialEffectsDisabled, isTrue);
-      expect(
-        await settings.getBool(
-          partyId: PartyId('someone-else'),
+    test(
+      'restores effects-disabled setting from the party-scoped port',
+      () async {
+        final Map<String, List<int>> bytesByAsset = _realBytes();
+        final InMemorySettings settings = InMemorySettings();
+        await settings.setBool(
+          partyId: PartyId('local-party'),
           key: CctvWallSettingsKeys.effectsDisabled,
-        ),
-        isNull,
-      );
-    });
+          value: true,
+        );
+        final WallBoot boot = WallBoot(
+          store: InMemoryManifestStore(),
+          settings: settings,
+          fixture: ({required String partyId, required String channelId}) =>
+              _manifestFor(
+                bytesByAsset,
+                partyId: partyId,
+                channelId: channelId,
+              ),
+          assetBytesLoader: _bytesLoader(bytesByAsset),
+          bundleLoader: (_) async =>
+              throw StateError('fixture override is used'),
+        );
+
+        final result = await boot.boot();
+
+        expect(result.isReady, isTrue, reason: result.unavailableReason);
+        expect(result.initialEffectsDisabled, isTrue);
+        expect(
+          await settings.getBool(
+            partyId: PartyId('someone-else'),
+            key: CctvWallSettingsKeys.effectsDisabled,
+          ),
+          isNull,
+        );
+      },
+    );
 
     test('boots from the bundled fixture when bytes verify', () async {
       final bytesByAsset = _realBytes();
@@ -150,10 +161,12 @@ void main() {
         isTrue,
         reason: 'boot must hand the wall a valid manifest',
       );
-      expect(
-        manifest.clips.map((ClipDescriptor c) => c.cameraId),
-        <String>['CAM-01', 'CAM-02', 'CAM-03', 'CAM-04'],
-      );
+      expect(manifest.clips.map((ClipDescriptor c) => c.cameraId), <String>[
+        'CAM-01',
+        'CAM-02',
+        'CAM-03',
+        'CAM-04',
+      ]);
       // The fixture is persisted so the next cold start restores a wall.
       expect(store.writes, 1);
       expect(store.stored!.version, manifest.version);
@@ -179,10 +192,12 @@ void main() {
         channelId: hauntedSurveillanceChannelId,
       );
       expect(validateCctvManifest(parsed).isOk, isTrue);
-      expect(
-        parsed.clips.map((c) => c.id),
-        <String>['clip-01', 'clip-02', 'clip-03', 'clip-04'],
-      );
+      expect(parsed.clips.map((c) => c.id), <String>[
+        'clip-01',
+        'clip-02',
+        'clip-03',
+        'clip-04',
+      ]);
 
       final store = InMemoryManifestStore();
       final boot = _bootWith(
@@ -192,8 +207,12 @@ void main() {
       );
       final result = await boot.boot();
       expect(result.isReady, isTrue, reason: result.unavailableReason);
-      expect(result.manifest!.clips.map((c) => c.cameraId),
-          <String>['CAM-01', 'CAM-02', 'CAM-03', 'CAM-04']);
+      expect(result.manifest!.clips.map((c) => c.cameraId), <String>[
+        'CAM-01',
+        'CAM-02',
+        'CAM-03',
+        'CAM-04',
+      ]);
     });
 
     test('restores the last cached manifest instead of the fixture', () async {
@@ -216,8 +235,11 @@ void main() {
 
     test('rejects a cached manifest for another party', () async {
       final bytesByAsset = _realBytes();
-      final cached = _manifestFor(bytesByAsset,
-          partyId: 'someone-elses-party', version: 7);
+      final cached = _manifestFor(
+        bytesByAsset,
+        partyId: 'someone-elses-party',
+        version: 7,
+      );
       final fixture = _manifestFor(bytesByAsset, version: 3);
       final store = InMemoryManifestStore(cached);
 
@@ -235,8 +257,11 @@ void main() {
 
     test('rejects a cached manifest for another channel', () async {
       final bytesByAsset = _realBytes();
-      final cached = _manifestFor(bytesByAsset,
-          channelId: 'retro_horror_test', version: 7);
+      final cached = _manifestFor(
+        bytesByAsset,
+        channelId: 'retro_horror_test',
+        version: 7,
+      );
       final fixture = _manifestFor(bytesByAsset, version: 3);
       final store = InMemoryManifestStore(cached);
 
@@ -416,8 +441,9 @@ void main() {
       final boot = WallBoot(
         store: InMemoryManifestStore(),
         registryFactory: _retroOnlyRegistry,
-        fixtureLoader: ({required String partyId, required String channelId}) async =>
-            _manifestFor(bytesByAsset),
+        fixtureLoader:
+            ({required String partyId, required String channelId}) async =>
+                _manifestFor(bytesByAsset),
         assetBytesLoader: _bytesLoader(bytesByAsset),
       );
 
@@ -429,26 +455,28 @@ void main() {
       expect(result.manifest, isNull);
     });
 
-    test('reports no wall when even the fixture violates the CCTV contract',
-        () async {
-      final boot = WallBoot(
-        store: InMemoryManifestStore(),
-        fixture: ({required String partyId, required String channelId}) =>
-            PlaybackManifest(
-          partyId: partyId,
-          channelId: channelId,
-          version: 1,
-          clips: const <ClipDescriptor>[],
-          publishedAt: DateTime.utc(2026, 10, 31),
-        ),
-        assetBytesLoader: _bytesLoader(_realBytes()),
-      );
+    test(
+      'reports no wall when even the fixture violates the CCTV contract',
+      () async {
+        final boot = WallBoot(
+          store: InMemoryManifestStore(),
+          fixture: ({required String partyId, required String channelId}) =>
+              PlaybackManifest(
+                partyId: partyId,
+                channelId: channelId,
+                version: 1,
+                clips: const <ClipDescriptor>[],
+                publishedAt: DateTime.utc(2026, 10, 31),
+              ),
+          assetBytesLoader: _bytesLoader(_realBytes()),
+        );
 
-      final result = await boot.boot();
+        final result = await boot.boot();
 
-      expect(result.isReady, isFalse);
-      expect(result.unavailableReason, contains('WALL UNAVAILABLE'));
-    });
+        expect(result.isReady, isFalse);
+        expect(result.unavailableReason, contains('WALL UNAVAILABLE'));
+      },
+    );
 
     test('survives a broken manifest store', () async {
       final bytesByAsset = _realBytes();
@@ -468,11 +496,14 @@ void main() {
       final bytesByAsset = _realBytes();
       final good = _manifestFor(bytesByAsset);
       final store = InMemoryManifestStore(
+        // Three clips is not a supported layout (1, 2, or 4): a two-clip
+        // prefix manifest WOULD be valid here, so the invalid shape must
+        // use an unsupported count.
         PlaybackManifest(
           partyId: good.partyId,
           channelId: good.channelId,
           version: 1,
-          clips: good.clips.take(2).toList(),
+          clips: good.clips.take(3).toList(),
           publishedAt: good.publishedAt,
         ),
       );
@@ -504,24 +535,35 @@ void main() {
 
     test('sha256Hex matches the real committed cam01 bytes', () async {
       final manifestFile = File('assets/fixture_manifest.json');
-      expect(await manifestFile.exists(), isTrue,
-          reason: 'run from the tv_app package directory');
-      final manifestJson = jsonDecode(await manifestFile.readAsString())
-          as Map<String, Object?>;
-      final clips = (manifestJson['clips'] as List).cast<Map<String, Object?>>();
+      expect(
+        await manifestFile.exists(),
+        isTrue,
+        reason: 'run from the tv_app package directory',
+      );
+      final manifestJson =
+          jsonDecode(await manifestFile.readAsString()) as Map<String, Object?>;
+      final clips = (manifestJson['clips'] as List)
+          .cast<Map<String, Object?>>();
       final cam01 = clips.singleWhere(
         (c) => c['cameraId'] == 'CAM-01',
-        orElse: () => throw StateError('CAM-01 missing from fixture_manifest.json'),
+        orElse: () =>
+            throw StateError('CAM-01 missing from fixture_manifest.json'),
       );
       final expectedSize = cam01['sizeBytes'] as int;
       final expectedSha = cam01['sha256'] as String;
       final file = File('assets/cam01.mp4');
-      expect(await file.exists(), isTrue,
-          reason: 'run from the tv_app package directory');
+      expect(
+        await file.exists(),
+        isTrue,
+        reason: 'run from the tv_app package directory',
+      );
       final bytes = await file.readAsBytes();
-      expect(bytes.length, expectedSize,
-          reason:
-              'on-disk cam01 bytes must match the committed fixture_manifest.json');
+      expect(
+        bytes.length,
+        expectedSize,
+        reason:
+            'on-disk cam01 bytes must match the committed fixture_manifest.json',
+      );
       expect(
         sha256Hex(bytes),
         expectedSha,
@@ -532,10 +574,16 @@ void main() {
       // bytes must disagree with the committed manifest entry.
       final tampered = List<int>.of(bytes);
       tampered[0] ^= 0xff;
-      expect(sha256Hex(tampered), isNot(equals(expectedSha)),
-          reason: 'tampered bytes must mismatch the manifest sha256');
-      expect(tampered.length + 1, isNot(equals(expectedSize)),
-          reason: 'a wrong size must mismatch the manifest sizeBytes');
+      expect(
+        sha256Hex(tampered),
+        isNot(equals(expectedSha)),
+        reason: 'tampered bytes must mismatch the manifest sha256',
+      );
+      expect(
+        tampered.length + 1,
+        isNot(equals(expectedSize)),
+        reason: 'a wrong size must mismatch the manifest sizeBytes',
+      );
     });
 
     test('boots the real committed fixture manifest end to end', () async {
@@ -544,8 +592,11 @@ void main() {
       // parseFixtureManifestJson), validates, and verifies all four clips
       // against file-backed asset bytes through the real WallBoot.boot.
       final manifestFile = File('assets/fixture_manifest.json');
-      expect(await manifestFile.exists(), isTrue,
-          reason: 'run from the tv_app package directory');
+      expect(
+        await manifestFile.exists(),
+        isTrue,
+        reason: 'run from the tv_app package directory',
+      );
       final String raw = await manifestFile.readAsString();
       final PlaybackManifest parsed = await loadBundledFixtureManifest(
         partyId: 'local-party',
@@ -555,20 +606,26 @@ void main() {
           return raw;
         },
       );
-      expect(validateCctvManifest(parsed).isOk, isTrue,
-          reason: 'committed fixture must satisfy the CCTV contract');
       expect(
-        parsed.clips.map((ClipDescriptor c) => c.cameraId),
-        <String>['CAM-01', 'CAM-02', 'CAM-03', 'CAM-04'],
+        validateCctvManifest(parsed).isOk,
+        isTrue,
+        reason: 'committed fixture must satisfy the CCTV contract',
       );
+      expect(parsed.clips.map((ClipDescriptor c) => c.cameraId), <String>[
+        'CAM-01',
+        'CAM-02',
+        'CAM-03',
+        'CAM-04',
+      ]);
 
       Future<List<int>> fileBytes(String assetPath) =>
           File(assetPath).readAsBytes();
       final store = InMemoryManifestStore();
       final boot = WallBoot(
         store: store,
-        fixtureLoader: ({required String partyId, required String channelId}) async =>
-            parsed,
+        fixtureLoader:
+            ({required String partyId, required String channelId}) async =>
+                parsed,
         assetBytesLoader: fileBytes,
       );
       final result = await boot.boot();
@@ -577,10 +634,16 @@ void main() {
       // Every committed clip file exists and matches its manifest entry.
       for (final ClipDescriptor clip in result.manifest!.clips) {
         final List<int> bytes = await File(clip.storageObjectId).readAsBytes();
-        expect(bytes.length, clip.sizeBytes,
-            reason: '${clip.cameraId} on-disk size must match the manifest');
-        expect(sha256Hex(bytes), clip.sha256,
-            reason: '${clip.cameraId} on-disk sha must match the manifest');
+        expect(
+          bytes.length,
+          clip.sizeBytes,
+          reason: '${clip.cameraId} on-disk size must match the manifest',
+        );
+        expect(
+          sha256Hex(bytes),
+          clip.sha256,
+          reason: '${clip.cameraId} on-disk sha must match the manifest',
+        );
       }
       // The bundle key boot loads by default is the pubspec asset entry.
       final String pubspec = await File('pubspec.yaml').readAsString();
@@ -600,10 +663,10 @@ ChannelRegistry _retroOnlyRegistry() {
 final class _ChannelPluginStub implements ChannelPlugin {
   @override
   ChannelDescriptor get descriptor => const ChannelDescriptor(
-        id: 'retro_horror_test',
-        title: 'Retro',
-        version: 1,
-      );
+    id: 'retro_horror_test',
+    title: 'Retro',
+    version: 1,
+  );
 
   @override
   Widget build(ChannelContext context) => const SizedBox.shrink();

@@ -105,6 +105,7 @@ class _WallGateState extends State<WallGate> {
           partyId: widget.boot.partyId,
           tvDeviceId: widget.boot.tvDeviceId,
           guestCodeClient: widget.boot.guestCodeClient,
+          hostInviteClient: result.hostInviteClient,
           clock: widget.clock,
           tileControllerFactory: widget.tileControllerFactory,
           onRetryCached: widget.boot.readCached,
@@ -113,6 +114,7 @@ class _WallGateState extends State<WallGate> {
           liveSession: result.liveSession,
           settings: result.settings,
           initialEffectsDisabled: result.initialEffectsDisabled,
+          initialCameraCount: result.initialCameraCount,
         );
       },
     );

@@ -16,8 +16,7 @@ import 'package:tv_app/src/wall/guest_codes.dart';
 import 'package:tv_app/src/wall/wall_screen.dart';
 
 import 'support/fakes.dart';
-import 'wall_test.dart'
-    show pumpWall, teardownWall, wallHarness, wallManifest;
+import 'wall_test.dart' show pumpWall, teardownWall, wallHarness, wallManifest;
 
 Map<String, Object?> listingResponse({
   String partyId = 'party-1',
@@ -113,10 +112,12 @@ void main() {
         partyId: 'party-1',
         channelId: 'haunted_surveillance',
       );
-      final Map<String, Object?> decoded =
-          Map<String, Object?>.from(jsonDecode(payload) as Map);
-      expect(decoded.keys.toSet(), <String>{'partyId', 'channelId'});
+      final Map<String, Object?> decoded = Map<String, Object?>.from(
+        jsonDecode(payload) as Map,
+      );
+      expect(decoded.keys.toSet(), <String>{'partyId', 'channelId', 'role'});
       expect(decoded['partyId'], 'party-1');
+      expect(decoded['role'], 'guest');
       expect(payload.contains('http'), isFalse);
       expect(payload.contains('deviceId'), isFalse);
     });
@@ -127,17 +128,21 @@ void main() {
         channelId: 'c',
         joinPin: '004201',
       );
-      final Map<String, Object?> decoded =
-          Map<String, Object?>.from(jsonDecode(payload) as Map);
-      expect(
-        decoded,
-        <String, Object?>{
-          'partyId': 'party-1',
-          'channelId': 'c',
-          'joinPin': '004201',
-        },
+      final Map<String, Object?> decoded = Map<String, Object?>.from(
+        jsonDecode(payload) as Map,
       );
-      expect(decoded.keys.toSet(), <String>{'partyId', 'channelId', 'joinPin'});
+      expect(decoded, <String, Object?>{
+        'partyId': 'party-1',
+        'channelId': 'c',
+        'joinPin': '004201',
+        'role': 'guest',
+      });
+      expect(decoded.keys.toSet(), <String>{
+        'partyId',
+        'channelId',
+        'joinPin',
+        'role',
+      });
     });
 
     test('rejects malformed PIN shapes', () {
@@ -155,6 +160,25 @@ void main() {
         throwsArgumentError,
       );
     });
+
+    test(
+      'legacy payloads without role remain parseable as guest sessions',
+      () async {
+        // Guests admitted before the explicit role existed carry no `role`
+        // key; consumers treat a missing role as guest (vectors in
+        // test/fixtures/join_roles_v1.json pin the role side separately).
+        const String legacy =
+            '{"partyId":"party-1",'
+            '"channelId":"haunted_surveillance","joinPin":"004201"}';
+        final Map<String, Object?> decoded = Map<String, Object?>.from(
+          jsonDecode(legacy) as Map,
+        );
+        expect(decoded['partyId'], 'party-1');
+        expect(decoded['channelId'], 'haunted_surveillance');
+        expect(decoded['joinPin'], '004201');
+        expect(decoded['role'] ?? 'guest', 'guest');
+      },
+    );
 
     test('no caller uses the removed deviceId argument', () {
       // Compile-time proof: the old signature no longer exists. A dynamic
@@ -232,24 +256,14 @@ void main() {
       }
 
       await expectBad(<String, Object?>{'devices': <Object?>[]});
-      await expectBad(
-        listingResponse(devices: const <Object?>[], partyId: ''),
-      );
-      await expectBad(
-        listingResponse(partyId: 'other-party'),
-      );
-      await expectBad(
-        listingResponse(channelId: 'other-channel'),
-      );
-      await expectBad(
-        listingResponse(tvDeviceId: 'tv-other'),
-      );
+      await expectBad(listingResponse(devices: const <Object?>[], partyId: ''));
+      await expectBad(listingResponse(partyId: 'other-party'));
+      await expectBad(listingResponse(channelId: 'other-channel'));
+      await expectBad(listingResponse(tvDeviceId: 'tv-other'));
       await expectBad(listingResponse(joinPin: '12345'));
       await expectBad(listingResponse(joinPin: 'abcdef'));
       await expectBad(listingResponse(joinPin: 123456));
-      await expectBad(
-        listingResponse(devices: <Object?>['nope']),
-      );
+      await expectBad(listingResponse(devices: <Object?>['nope']));
       await expectBad(
         listingResponse(
           devices: <Object?>[
@@ -276,8 +290,9 @@ void main() {
   });
 
   group('GuestCodePanel widget', () {
-    testWidgets('shows TV code large with exactly one QR from session',
-        (WidgetTester tester) async {
+    testWidgets('shows TV code large with exactly one QR from session', (
+      WidgetTester tester,
+    ) async {
       final GuestCodeClient client = listingClient(
         listingResponse(
           joinPin: '004201',
@@ -292,16 +307,15 @@ void main() {
       expect(find.text('GUEST CODES'), findsOneWidget);
       expect(find.text('tv-abc'), findsOneWidget);
       expect(find.byType(QrImageView), findsOneWidget);
-      final Map<String, Object?> decoded =
-          Map<String, Object?>.from(jsonDecode(qrDataOf(tester)) as Map);
-      expect(
-        decoded,
-        <String, Object?>{
-          'partyId': 'party-1',
-          'channelId': hauntedSurveillanceChannelId,
-          'joinPin': '004201',
-        },
+      final Map<String, Object?> decoded = Map<String, Object?>.from(
+        jsonDecode(qrDataOf(tester)) as Map,
       );
+      expect(decoded, <String, Object?>{
+        'partyId': 'party-1',
+        'channelId': hauntedSurveillanceChannelId,
+        'joinPin': '004201',
+        'role': 'guest',
+      });
       expect(find.textContaining('004201'), findsWidgets);
       expect(find.text('Guest 1: g-1'), findsOneWidget);
       expect(find.byKey(kGuestCodeCloseKey), findsOneWidget);
@@ -309,22 +323,26 @@ void main() {
       await disposePanel(tester);
     });
 
-    testWidgets('PIN-free session yields exact two-key QR + no-PIN text',
-        (WidgetTester tester) async {
+    testWidgets('PIN-free session yields exact three-key QR + no-PIN text', (
+      WidgetTester tester,
+    ) async {
       final GuestCodeClient client = listingClient(listingResponse());
       await pumpPanel(tester, client);
       await tester.pump();
       await tester.pump();
       expect(find.byType(QrImageView), findsOneWidget);
-      final Map<String, Object?> decoded =
-          Map<String, Object?>.from(jsonDecode(qrDataOf(tester)) as Map);
-      expect(decoded.keys.toSet(), <String>{'partyId', 'channelId'});
+      final Map<String, Object?> decoded = Map<String, Object?>.from(
+        jsonDecode(qrDataOf(tester)) as Map,
+      );
+      expect(decoded.keys.toSet(), <String>{'partyId', 'channelId', 'role'});
+      expect(decoded['role'], 'guest');
       expect(find.textContaining('no PIN required'), findsOneWidget);
       await disposePanel(tester);
     });
 
-    testWidgets('label-absent rows use neutral fallback, id shown once',
-        (WidgetTester tester) async {
+    testWidgets('label-absent rows use neutral fallback, id shown once', (
+      WidgetTester tester,
+    ) async {
       final GuestCodeClient client = listingClient(
         listingResponse(
           devices: <Object?>[
@@ -346,8 +364,9 @@ void main() {
       await disposePanel(tester);
     });
 
-    testWidgets('loading shows no fabricated QR; error shows no QR',
-        (WidgetTester tester) async {
+    testWidgets('loading shows no fabricated QR; error shows no QR', (
+      WidgetTester tester,
+    ) async {
       final Completer<Map<String, Object?>> gate =
           Completer<Map<String, Object?>>();
       final GuestCodeClient slow = GuestCodeClient(
@@ -370,8 +389,9 @@ void main() {
       await disposePanel(tester);
     });
 
-    testWidgets('empty list states no seed instructions',
-        (WidgetTester tester) async {
+    testWidgets('empty list states no seed instructions', (
+      WidgetTester tester,
+    ) async {
       final GuestCodeClient client = listingClient(listingResponse());
       await pumpPanel(tester, client);
       await tester.pump();
@@ -382,8 +402,9 @@ void main() {
       await disposePanel(tester);
     });
 
-    testWidgets('type-or-paste instructions with camera-deferred status',
-        (WidgetTester tester) async {
+    testWidgets('type-or-paste instructions with camera-deferred status', (
+      WidgetTester tester,
+    ) async {
       final GuestCodeClient client = listingClient(listingResponse());
       await pumpPanel(tester, client);
       await tester.pump();
@@ -395,62 +416,65 @@ void main() {
       await disposePanel(tester);
     });
 
-    testWidgets('refresh after new joins updates rows + retains QR on failure',
-        (WidgetTester tester) async {
-      int calls = 0;
-      final GuestCodeClient client = GuestCodeClient(
-        invoker: (String name, Map<String, Object?> payload) async {
-          calls++;
-          if (calls == 1) {
-            return listingResponse(
-              devices: <Object?>[
-                <String, Object?>{'deviceId': 'g-1', 'label': 'Guest 1'},
-              ],
-            );
-          }
-          if (calls == 2) {
-            return listingResponse(
-              devices: <Object?>[
-                <String, Object?>{'deviceId': 'g-1', 'label': 'Guest 1'},
-                <String, Object?>{'deviceId': 'g-2'},
-              ],
-            );
-          }
-          throw const GuestCodeException('flaky');
-        },
-        partyId: 'party-1',
-        deviceId: 'tv-abc',
-        channelId: hauntedSurveillanceChannelId,
-      );
-      await pumpPanel(
-        tester,
-        client,
-        refreshInterval: const Duration(milliseconds: 50),
-      );
-      await tester.pump();
-      await tester.pump();
-      expect(find.text('Guest 1: g-1'), findsOneWidget);
-      final String firstQr = qrDataOf(tester);
+    testWidgets(
+      'refresh after new joins updates rows + retains QR on failure',
+      (WidgetTester tester) async {
+        int calls = 0;
+        final GuestCodeClient client = GuestCodeClient(
+          invoker: (String name, Map<String, Object?> payload) async {
+            calls++;
+            if (calls == 1) {
+              return listingResponse(
+                devices: <Object?>[
+                  <String, Object?>{'deviceId': 'g-1', 'label': 'Guest 1'},
+                ],
+              );
+            }
+            if (calls == 2) {
+              return listingResponse(
+                devices: <Object?>[
+                  <String, Object?>{'deviceId': 'g-1', 'label': 'Guest 1'},
+                  <String, Object?>{'deviceId': 'g-2'},
+                ],
+              );
+            }
+            throw const GuestCodeException('flaky');
+          },
+          partyId: 'party-1',
+          deviceId: 'tv-abc',
+          channelId: hauntedSurveillanceChannelId,
+        );
+        await pumpPanel(
+          tester,
+          client,
+          refreshInterval: const Duration(milliseconds: 50),
+        );
+        await tester.pump();
+        await tester.pump();
+        expect(find.text('Guest 1: g-1'), findsOneWidget);
+        final String firstQr = qrDataOf(tester);
 
-      await tester.pump(const Duration(milliseconds: 60));
-      await tester.pump();
-      await tester.pump();
-      expect(find.text('Guest device: g-2'), findsOneWidget);
+        await tester.pump(const Duration(milliseconds: 60));
+        await tester.pump();
+        await tester.pump();
+        expect(find.text('Guest device: g-2'), findsOneWidget);
 
-      await tester.pump(const Duration(milliseconds: 60));
-      await tester.pump();
-      await tester.pump();
-      // Last valid session retained through the refresh failure.
-      expect(find.byType(QrImageView), findsOneWidget);
-      expect(qrDataOf(tester), firstQr);
-      expect(find.text('Guest device: g-2'), findsOneWidget);
-      expect(find.byKey(kGuestCodeErrorKey), findsOneWidget);
-      expect(calls, greaterThanOrEqualTo(3));
-      await disposePanel(tester);
-    });
+        await tester.pump(const Duration(milliseconds: 60));
+        await tester.pump();
+        await tester.pump();
+        // Last valid session retained through the refresh failure.
+        expect(find.byType(QrImageView), findsOneWidget);
+        expect(qrDataOf(tester), firstQr);
+        expect(find.text('Guest device: g-2'), findsOneWidget);
+        expect(find.byKey(kGuestCodeErrorKey), findsOneWidget);
+        expect(calls, greaterThanOrEqualTo(3));
+        await disposePanel(tester);
+      },
+    );
 
-    testWidgets('overlapping refreshes never run concurrently',
-        (WidgetTester tester) async {
+    testWidgets('overlapping refreshes never run concurrently', (
+      WidgetTester tester,
+    ) async {
       int calls = 0;
       final Completer<Map<String, Object?>> gate =
           Completer<Map<String, Object?>>();
@@ -489,8 +513,9 @@ void main() {
       await disposePanel(tester);
     });
 
-    testWidgets('hung fetch times out and the panel retries to recovery',
-        (WidgetTester tester) async {
+    testWidgets('hung fetch times out and the panel retries to recovery', (
+      WidgetTester tester,
+    ) async {
       int calls = 0;
       final GuestCodeClient client = GuestCodeClient(
         invoker: (_, __) {
@@ -557,8 +582,9 @@ void main() {
       await disposePanel(tester);
     });
 
-    testWidgets('dispose cancels timer and ignores late responses',
-        (WidgetTester tester) async {
+    testWidgets('dispose cancels timer and ignores late responses', (
+      WidgetTester tester,
+    ) async {
       int calls = 0;
       final Completer<Map<String, Object?>> late =
           Completer<Map<String, Object?>>();
@@ -592,8 +618,9 @@ void main() {
       // Already disposed; nothing further to tear down.
     });
 
-    testWidgets('D-pad back/close keys invoke callbacks',
-        (WidgetTester tester) async {
+    testWidgets('D-pad back/close keys invoke callbacks', (
+      WidgetTester tester,
+    ) async {
       bool backed = false;
       bool closed = false;
       final FocusNode primary = FocusNode(debugLabel: 'panel-primary');
@@ -621,8 +648,9 @@ void main() {
       await disposePanel(tester);
     });
 
-    testWidgets('escape falls back to onClose when no onBack',
-        (WidgetTester tester) async {
+    testWidgets('escape falls back to onClose when no onBack', (
+      WidgetTester tester,
+    ) async {
       bool closed = false;
       final FocusNode primary = FocusNode(debugLabel: 'panel-primary');
       addTearDown(primary.dispose);
@@ -645,8 +673,9 @@ void main() {
       await disposePanel(tester);
     });
 
-    testWidgets('1920x1080 layout smoke: no overflow, one QR',
-        (WidgetTester tester) async {
+    testWidgets('1920x1080 layout smoke: no overflow, one QR', (
+      WidgetTester tester,
+    ) async {
       addTearDown(tester.view.resetPhysicalSize);
       addTearDown(tester.view.resetDevicePixelRatio);
       tester.view.physicalSize = const Size(1920, 1080);
@@ -688,8 +717,9 @@ void main() {
           channelId: hauntedSurveillanceChannelId,
         );
 
-    testWidgets('no client means no GUEST CODES button',
-        (WidgetTester tester) async {
+    testWidgets('no client means no GUEST CODES button', (
+      WidgetTester tester,
+    ) async {
       final FakeClock clock = FakeClock(DateTime.utc(2026, 10, 31, 20));
       await tester.pumpWidget(
         wallHarness(
@@ -713,8 +743,9 @@ void main() {
       await teardownWall(tester);
     });
 
-    testWidgets('GUEST CODES opens session QR panel, BACK returns',
-        (WidgetTester tester) async {
+    testWidgets('GUEST CODES opens session QR panel, BACK returns', (
+      WidgetTester tester,
+    ) async {
       final FakeClock clock = FakeClock(DateTime.utc(2026, 10, 31, 20));
       await tester.pumpWidget(
         wallHarness(
@@ -749,6 +780,7 @@ void main() {
           'partyId': 'party-1',
           'channelId': hauntedSurveillanceChannelId,
           'joinPin': '004201',
+          'role': 'guest',
         },
       );
       expect(find.text('Guest 1: g-1'), findsOneWidget);
@@ -765,8 +797,9 @@ void main() {
       await teardownWall(tester);
     });
 
-    testWidgets('guest list failure shows error with no QR, TV code stays',
-        (WidgetTester tester) async {
+    testWidgets('guest list failure shows error with no QR, TV code stays', (
+      WidgetTester tester,
+    ) async {
       final FakeClock clock = FakeClock(DateTime.utc(2026, 10, 31, 20));
       await tester.pumpWidget(
         wallHarness(

@@ -1,4 +1,9 @@
-/// Minimal D-pad focus traversal for the 2x2 wall (no touch assumption).
+/// Minimal D-pad focus traversal for the adaptive wall (no touch assumption).
+///
+/// The wall shows 1, 2, or 4 cameras (always the first-N canonical slots in
+/// wall order); traversal geometry follows the active layout and stale focus
+/// is clamped when the count shrinks. Four pre-created nodes keep camera
+/// element identity stable across count changes.
 library;
 
 import 'package:flutter/services.dart';
@@ -15,13 +20,13 @@ enum WallMove { left, right, up, down }
 final class WallFocusController {
   /// Creates a controller for a [columns] x [tiles ~/ columns] grid.
   WallFocusController({this.columns = 2, this.tiles = 4})
-      : assert(columns > 0),
-        assert(tiles > 0),
-        _nodes = List<FocusNode>.generate(
-          tiles,
-          (int index) => FocusNode(debugLabel: 'wall-tile-$index'),
-          growable: false,
-        );
+    : assert(columns > 0),
+      assert(tiles > 0),
+      _nodes = List<FocusNode>.generate(
+        tiles,
+        (int index) => FocusNode(debugLabel: 'wall-tile-$index'),
+        growable: false,
+      );
 
   /// Grid width.
   final int columns;
@@ -31,6 +36,20 @@ final class WallFocusController {
 
   final List<FocusNode> _nodes;
   int _focusedIndex = -1;
+
+  /// Tiles (and columns) of the currently active layout.
+  ///
+  /// Defaults to the full 2x2 grid; [setActiveLayout] narrows them when the
+  /// wall shows fewer cameras. Nodes are pre-created for all four slots so
+  /// camera element identity survives count changes.
+  int _activeTiles = 4;
+  int _activeColumns = 2;
+
+  /// Active tile count of the current layout (1, 2, or 4).
+  int get activeTiles => _activeTiles;
+
+  /// Active grid width of the current layout.
+  int get activeColumns => _activeColumns;
 
   /// Focus node for wall slot [index].
   FocusNode nodeAt(int index) => _nodes[index];
@@ -46,16 +65,37 @@ final class WallFocusController {
     _focusedIndex = index;
   }
 
-  /// Focuses slot [index]; ignores out-of-range values.
+  /// Focuses slot [index]; out-of-range and inactive values are ignored.
   void focusTile(int index) {
-    if (index < 0 || index >= tiles) {
+    if (index < 0 || index >= _activeTiles) {
       return;
     }
     _nodes[index].requestFocus();
   }
 
+  /// Narrows (or restores) traversal to an active 1/2/4 layout.
+  ///
+  /// Counts outside 1..4 fall back to the full grid so the wall never loses
+  /// traversal. When the focused slot leaves the active set, focus is
+  /// clamped to the last remaining tile.
+  void setActiveLayout({required int tiles, required int columns}) {
+    final int saneTiles = tiles == 1 || tiles == 2 || tiles == 4 ? tiles : 4;
+    final int saneColumns = columns > 0 ? columns : 2;
+    _activeTiles = saneTiles;
+    _activeColumns = saneColumns;
+    if (_focusedIndex >= _activeTiles) {
+      _focusedIndex = _activeTiles - 1;
+      focusTile(_focusedIndex);
+    }
+  }
+
   /// Index a [move] from [from] would land on, or `-1` when blocked.
-  static int targetFor(int from, WallMove move, {int columns = 2, int tiles = 4}) {
+  static int targetFor(
+    int from,
+    WallMove move, {
+    int columns = 2,
+    int tiles = 4,
+  }) {
     if (from < 0 || from >= tiles) {
       return -1;
     }
@@ -74,7 +114,12 @@ final class WallFocusController {
 
   /// Applies [move] from the current slot; returns the new index or `-1`.
   int moveFrom(int from, WallMove move) {
-    final int target = targetFor(from, move, columns: columns, tiles: tiles);
+    final int target = targetFor(
+      from,
+      move,
+      columns: _activeColumns,
+      tiles: _activeTiles,
+    );
     if (target < 0) {
       return -1;
     }

@@ -13,8 +13,9 @@ import 'package:tv_app/src/wall/wall_boot.dart';
 import 'support/fakes.dart';
 
 void main() {
-  testWidgets('boots the kernel registry into the live 2x2 wall',
-      (WidgetTester tester) async {
+  testWidgets('boots the kernel registry into the live 2x2 wall', (
+    WidgetTester tester,
+  ) async {
     final FakeClock clock = FakeClock(DateTime.utc(2026, 10, 31, 23, 59, 58));
 
     await tester.pumpWidget(
@@ -38,8 +39,10 @@ void main() {
       'CAM-03',
       'CAM-04',
     ]) {
-      expect(find.byKey(ValueKey<String>('video-surface-$cameraId')),
-          findsOneWidget);
+      expect(
+        find.byKey(ValueKey<String>('video-surface-$cameraId')),
+        findsOneWidget,
+      );
     }
     // The retro-horror stub is registered with the kernel but must not be
     // the active channel.
@@ -49,8 +52,9 @@ void main() {
     await tester.pump();
   });
 
-  testWidgets('shows an app-level status + retry when no wall is available',
-      (WidgetTester tester) async {
+  testWidgets('shows an app-level status + retry when no wall is available', (
+    WidgetTester tester,
+  ) async {
     var registryBuilds = 0;
 
     ChannelRegistry onlyRetroStub() {

@@ -11,16 +11,16 @@ import 'package:core_playlist/core_playlist.dart';
 /// Camera room names in wall order (top-left reading order).
 ///
 /// Derived from `cctvSlots`; kept for callers that only need rooms.
-final List<String> cctvRooms = List<String>.unmodifiable(
-  <String>[for (final CctvSlot slot in cctvSlots) slot.room],
-);
+final List<String> cctvRooms = List<String>.unmodifiable(<String>[
+  for (final CctvSlot slot in cctvSlots) slot.room,
+]);
 
 /// Camera ids in wall order.
 ///
 /// Derived from `cctvSlots`; kept for callers that only need ids.
-final List<String> cctvCameraIds = List<String>.unmodifiable(
-  <String>[for (final CctvSlot slot in cctvSlots) slot.id],
-);
+final List<String> cctvCameraIds = List<String>.unmodifiable(<String>[
+  for (final CctvSlot slot in cctvSlots) slot.id,
+]);
 
 /// Resolves wall slot [index] to its label and camera id.
 ///
@@ -56,11 +56,7 @@ final List<String> cctvCameraIds = List<String>.unmodifiable(
 }) {
   final CctvSlot? slot = slotForCameraId(cameraId);
   if (slot == null) {
-    throw ArgumentError.value(
-      cameraId,
-      'cameraId',
-      'unknown CCTV camera id',
-    );
+    throw ArgumentError.value(cameraId, 'cameraId', 'unknown CCTV camera id');
   }
   return tileFor(slot.index, label: label);
 }

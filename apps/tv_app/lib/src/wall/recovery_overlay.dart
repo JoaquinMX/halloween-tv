@@ -21,6 +21,9 @@ class RecoveryOverlay extends StatelessWidget {
     this.primaryFocusNode,
     this.statusMessage,
     this.onShowGuestCodes,
+    this.onShowHostCodes,
+    this.cameraCount = 4,
+    this.onSelectCameraCount,
   });
 
   /// Whether effects are currently disabled (drives the toggle label).
@@ -46,12 +49,35 @@ class RecoveryOverlay extends StatelessWidget {
   /// (offline builds stay on the recovery actions only).
   final VoidCallback? onShowGuestCodes;
 
-  /// MENU closes the panel again, like it opens it.
+  /// Opens the host invite (HOST QR) page; null hides the HOST QR button
+  /// (offline builds stay on the recovery actions only).
+  final VoidCallback? onShowHostCodes;
+
+  /// Configured camera display cap (1, 2, or 4; unsupported values fall back
+  /// to the 4-camera layout). Drives the selector's selected marker.
+  final int cameraCount;
+
+  /// Selects the camera display cap; null hides the 1/2/4 selector.
+  ///
+  /// Persists through the existing party-scoped `SettingsPort` string key
+  /// (`CctvWallSettingsKeys.cameraCount`); the port interface is unchanged.
+  final ValueChanged<int>? onSelectCameraCount;
+
+  /// MENU closes the panel again, like it opens it; BACK/escape also close
+  /// so a D-pad can always leave without picking an action.
+  ///
+  /// A select held long enough to open this panel never leaks into it: the
+  /// wall keeps focus on the tile until that held key is released (deferred
+  /// panel focus), so auto-repeat arrivals while the key is still down can
+  /// never reach — and activate — the focused button.
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
-    if (event is KeyDownEvent &&
-        event.logicalKey == LogicalKeyboardKey.contextMenu) {
-      onClose();
-      return KeyEventResult.handled;
+    if (event is KeyDownEvent) {
+      if (event.logicalKey == LogicalKeyboardKey.contextMenu ||
+          event.logicalKey == LogicalKeyboardKey.goBack ||
+          event.logicalKey == LogicalKeyboardKey.escape) {
+        onClose();
+        return KeyEventResult.handled;
+      }
     }
     return KeyEventResult.ignored;
   }
@@ -122,6 +148,49 @@ class RecoveryOverlay extends StatelessWidget {
                             : 'DISABLE EFFECTS',
                         onPressed: onToggleEffects,
                       ),
+                      if (onSelectCameraCount != null) ...<Widget>[
+                        const SizedBox(height: 10),
+                        const Text(
+                          'CAMERAS',
+                          style: TextStyle(
+                            color: Color(0xFFFFC107),
+                            fontSize: 20,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Row(
+                          children: <Widget>[
+                            for (final int count in <int>[1, 2, 4])
+                              Expanded(
+                                child: Padding(
+                                  padding: EdgeInsets.only(
+                                    right: count == 4 ? 0 : 10,
+                                  ),
+                                  child: _RecoveryButton(
+                                    actionKey: ValueKey<String>(
+                                      'recovery-camera-$count',
+                                    ),
+                                    label: count == cameraCount
+                                        ? '● $count'
+                                        : '$count',
+                                    onPressed: () =>
+                                        onSelectCameraCount!(count),
+                                  ),
+                                ),
+                              ),
+                          ],
+                        ),
+                      ],
+                      if (onShowHostCodes != null) ...<Widget>[
+                        const SizedBox(height: 10),
+                        _RecoveryButton(
+                          actionKey: const ValueKey<String>(
+                            'recovery-host-codes',
+                          ),
+                          label: 'HOST QR',
+                          onPressed: onShowHostCodes!,
+                        ),
+                      ],
                       if (onShowGuestCodes != null) ...<Widget>[
                         const SizedBox(height: 10),
                         _RecoveryButton(

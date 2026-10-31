@@ -25,6 +25,7 @@ import 'package:flutter/services.dart';
 import 'package:kernel_app/kernel_app.dart';
 import 'package:tv_app/src/media/feed_assets.dart';
 import 'package:tv_app/src/wall/guest_codes.dart';
+import 'package:tv_app/src/wall/host_codes.dart';
 import 'package:tv_app/src/wall/live_wall_session.dart';
 import 'package:tv_app/src/wall/manifest_store.dart';
 
@@ -44,6 +45,8 @@ final class WallBootResult {
     this.liveSession,
     this.settings,
     this.initialEffectsDisabled = false,
+    this.initialCameraCount = kDefaultCctvClipCount,
+    this.hostInviteClient,
     this.remoteUnavailableReason,
   }) : unavailableReason = null;
 
@@ -57,6 +60,8 @@ final class WallBootResult {
       liveSession = null,
       settings = null,
       initialEffectsDisabled = false,
+      initialCameraCount = kDefaultCctvClipCount,
+      hostInviteClient = null,
       remoteUnavailableReason = null;
 
   /// Channel registry built during boot.
@@ -82,6 +87,18 @@ final class WallBootResult {
 
   /// Restored effect setting for this party.
   final bool initialEffectsDisabled;
+
+  /// Restored camera display cap for this party (1, 2, or 4).
+  ///
+  /// Party-scoped `SettingsPort` string key
+  /// ([CctvWallSettingsKeys.cameraCount], encoding `'1'`/`'2'`/`'4'`);
+  /// absent, invalid, or unreadable values default to 4. Passed through
+  /// [WallGate] as the wall's initial count before wall construction.
+  final int initialCameraCount;
+
+  /// Host-invite minter for the HOST QR destination; null keeps the
+  /// recovery panel on its guest/offline actions only.
+  final HostInviteClient? hostInviteClient;
 
   /// Why configured live playback was disabled, if applicable.
   final String? remoteUnavailableReason;
@@ -243,6 +260,7 @@ final class WallBoot {
     this.partyId = 'local-party',
     this.tvDeviceId = '',
     this.guestCodeClient,
+    this.hostInviteClient,
     this.registryFactory = defaultWallRegistry,
     this.fixture,
     this.fixtureLoader,
@@ -267,6 +285,9 @@ final class WallBoot {
 
   /// Host guest-code reader; null keeps the recovery panel offline-only.
   final GuestCodeClient? guestCodeClient;
+
+  /// Host-invite minter; null keeps the recovery panel without HOST QR.
+  final HostInviteClient? hostInviteClient;
 
   /// Registry factory (channel registration).
   final WallRegistryFactory registryFactory;
@@ -313,14 +334,39 @@ final class WallBoot {
     }
   }
 
-  WallBootResult _ready({
+  /// Restores the party-scoped camera display cap before wall construction.
+  ///
+  /// Party-scoped string key [CctvWallSettingsKeys.cameraCount] with encoding
+  /// `'1'`/`'2'`/`'4'`; absent, invalid, or unreadable values default to 4
+  /// ([kDefaultCctvClipCount]), keeping the existing four-camera default.
+  Future<int> _readCameraCount() async {
+    final SettingsPort? port = settings;
+    if (port == null) return kDefaultCctvClipCount;
+    try {
+      final String? raw = await port.getString(
+        partyId: PartyId(partyId),
+        key: CctvWallSettingsKeys.cameraCount,
+      );
+      if (raw != null) {
+        final int? parsed = int.tryParse(raw.trim());
+        if (parsed != null && isSupportedCctvClipCount(parsed)) {
+          return parsed;
+        }
+      }
+    } on Object {
+      // Unreadable counts keep the four-camera default.
+    }
+    return kDefaultCctvClipCount;
+  }
+
+  Future<WallBootResult> _ready({
     required ChannelRegistry registry,
     required ChannelPlugin plugin,
     required PlaybackManifest manifest,
     required bool usedCachedManifest,
     Map<String, CachedMedia> mediaByClipId = const <String, CachedMedia>{},
     bool effectsDisabled = false,
-  }) => WallBootResult.ready(
+  }) async => WallBootResult.ready(
     registry: registry,
     plugin: plugin,
     manifest: manifest,
@@ -329,6 +375,8 @@ final class WallBoot {
     liveSession: liveSession,
     settings: settings,
     initialEffectsDisabled: effectsDisabled,
+    initialCameraCount: await _readCameraCount(),
+    hostInviteClient: hostInviteClient,
     remoteUnavailableReason: remoteUnavailableReason,
   );
 
@@ -424,7 +472,7 @@ final class WallBoot {
       if (offline.state == PlaybackSyncState.usingCache &&
           offline.hasCompleteMedia &&
           offline.manifest != null) {
-        return _ready(
+        return await _ready(
           registry: registry,
           plugin: plugin,
           manifest: offline.manifest!,
@@ -451,7 +499,7 @@ final class WallBoot {
       final Result<PlaybackManifest> cachedCheck = validateCctvManifest(cached);
       if (cachedCheck is Ok<PlaybackManifest> &&
           await _verifyManifestBytes(cachedCheck.value)) {
-        return _ready(
+        return await _ready(
           registry: registry,
           plugin: plugin,
           manifest: cachedCheck.value,
@@ -495,7 +543,7 @@ final class WallBoot {
       // Non-fatal: the wall still plays, it just will not be cached.
     }
 
-    return _ready(
+    return await _ready(
       registry: registry,
       plugin: plugin,
       manifest: manifest,

@@ -19,6 +19,7 @@ import 'package:path_provider/path_provider.dart';
 
 import 'package:tv_app/src/config/backend_config.dart';
 import 'package:tv_app/src/wall/guest_codes.dart';
+import 'package:tv_app/src/wall/host_codes.dart';
 import 'package:tv_app/src/wall/live_wall_session.dart';
 import 'package:tv_app/src/wall/manifest_store.dart';
 import 'package:tv_app/src/wall/wall_boot.dart';
@@ -37,6 +38,7 @@ final class PlaybackDependencies {
     required this.manifestIndexStore,
     required this.cacheStore,
     required this.guestCodeClient,
+    required this.hostInviteClient,
   });
 
   final BackendConfig config;
@@ -48,6 +50,13 @@ final class PlaybackDependencies {
   ///
   /// Null keeps the recovery panel on its offline actions only.
   final GuestCodeClient? guestCodeClient;
+
+  /// Host-invite minter for the HOST QR destination; null unless the live
+  /// backend is configured.
+  ///
+  /// Null hides the HOST QR button (offline builds stay on the recovery
+  /// actions only).
+  final HostInviteClient? hostInviteClient;
   final String? remoteUnavailableReason;
   final ManifestIndexStore manifestIndexStore;
   final CacheStore cacheStore;
@@ -119,6 +128,7 @@ final class PlaybackDependencies {
     late final PreparePlayback prepare;
     LiveWallSession? live;
     GuestCodeClient? guestCodes;
+    HostInviteClient? hostInvites;
     if (resolved.isLiveConfigured &&
         unavailable == null &&
         firestore != null &&
@@ -173,6 +183,15 @@ final class PlaybackDependencies {
         deviceId: resolved.deviceId,
         channelId: hauntedSurveillanceChannelId,
       );
+      // Host invite minter: the TV device mints scoped host invites over the
+      // TV-only createHostInvite callable. Null when live is unavailable
+      // hides the HOST QR destination.
+      hostInvites = HostInviteClient.cloudFunctions(
+        functions: functions,
+        partyId: resolved.partyId,
+        deviceId: resolved.deviceId,
+        channelId: hauntedSurveillanceChannelId,
+      );
     } else {
       prepare = PreparePlayback(
         manifestSource: _UnavailableManifestSource(),
@@ -190,6 +209,7 @@ final class PlaybackDependencies {
       settings: settings,
       liveSession: live,
       guestCodeClient: guestCodes,
+      hostInviteClient: hostInvites,
       remoteUnavailableReason: unavailable,
       manifestIndexStore: manifestIndex,
       cacheStore: cache,
@@ -205,6 +225,7 @@ final class PlaybackDependencies {
     partyId: config.partyIdOrOffline,
     tvDeviceId: config.deviceId,
     guestCodeClient: guestCodeClient,
+    hostInviteClient: hostInviteClient,
     preparePlayback: preparePlayback,
     liveSession: liveSession,
     settings: settings,
