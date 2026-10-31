@@ -237,11 +237,23 @@ test("fix-5a host portrait real path: upload -> generateHostVideo enqueues once 
     assert.equal(dispatchedThroughRealEnqueue, 0, "host upload completion must not auto-enqueue");
     assert.equal((await db.collection(`parties/${partyId}/jobs`).get()).size, 0);
 
+    // Fix-5d HIGH: caller-supplied rehearsalOnly is rejected on the public
+    // callable — rehearsal mode is server-derived only and can never gate
+    // fixture stills to publish via client input.
+    await assert.rejects(
+      services.generateHostVideo({
+        partyId, deviceId: "p-host-1", channelId,
+        seedId: "seed-host-1", idempotencyKey: "idem-host-1",
+        guestMediaId: requested.submissionId, rehearsalOnly: true,
+      } as unknown as Record<string, unknown>),
+      (e: unknown) => e instanceof BackendError && e.errorCode === "INVALID_ARGUMENT",
+    );
+
     // The real exported runtime host request (no bypassing the public path).
     const generated = await services.generateHostVideo({
       partyId, deviceId: "p-host-1", channelId,
       seedId: "seed-host-1", idempotencyKey: "idem-host-1",
-      guestMediaId: requested.submissionId, rehearsalOnly: true,
+      guestMediaId: requested.submissionId,
     });
     assert.equal(generated.created, true);
     assert.equal(generated.jobId, "hv-seed-host-1");
@@ -258,6 +270,11 @@ test("fix-5a host portrait real path: upload -> generateHostVideo enqueues once 
     assert.equal(job.cartoonPlan.version, 1);
     assert.ok(typeof job.cartoonPlan.scenarioId === "string" && typeof job.cartoonPlan.situationId === "string");
     assert.deepEqual(job.seedProvenance, { seedId: "seed-host-1", kind: "host" });
+    // Fix-5d: callable never persists a rehearsal marker; the operator tool
+    // derives it server-side. Simulate that derivation so the offline fake
+    // still may publish as a rehearsal artifact in the emulator.
+    assert.equal(job.rehearsalOnly, undefined);
+    await db.doc(`parties/${partyId}/jobs/hv-seed-host-1`).update({ rehearsalOnly: true });
 
     // A genuinely different scope while the first is in flight surfaces the
     // typed busy outcome (never a silent wedge).
@@ -289,7 +306,7 @@ test("fix-5a host portrait real path: upload -> generateHostVideo enqueues once 
     const repeat = await services.generateHostVideo({
       partyId, deviceId: "p-host-1", channelId,
       seedId: "seed-host-1", idempotencyKey: "idem-host-1",
-      guestMediaId: requested.submissionId, rehearsalOnly: true,
+      guestMediaId: requested.submissionId,
     });
     assert.equal(repeat.created, false);
     assert.equal(repeat.jobId, "hv-seed-host-1");

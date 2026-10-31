@@ -250,7 +250,6 @@ export function createHostMediaService(options: HostMediaServiceOptions): {
         old.idempotencyKey !== input.idempotencyKey ||
         old.deviceId !== host.deviceId ||
         (old.guestMediaId ?? undefined) !== (input.guestMediaId ?? undefined) ||
-        (old.rehearsalOnly === true) !== (input.rehearsalOnly === true) ||
         old.presetId !== input.presetId
       ) {
         throw new BackendError("FORBIDDEN", "seedId is already bound to a different request.");
@@ -286,7 +285,6 @@ export function createHostMediaService(options: HostMediaServiceOptions): {
         idempotencyKey: input.idempotencyKey,
         presetId: input.presetId,
         ...(input.guestMediaId ? { guestMediaId: input.guestMediaId } : {}),
-        ...(input.rehearsalOnly ? { rehearsalOnly: true as const } : {}),
         status: "queued",
         cameraIds: [...REQUIRED_CAMERA_IDS],
         previewPaths: [],
@@ -321,7 +319,6 @@ export function createHostMediaService(options: HostMediaServiceOptions): {
           idempotencyKey: input.idempotencyKey,
           guestMediaId: input.guestMediaId,
           seedId: input.seedId,
-          ...(input.rehearsalOnly ? { rehearsalOnly: input.rehearsalOnly } : {}),
         })
         : await store.requestGeneration({
           partyId: host.partyId,
@@ -330,7 +327,6 @@ export function createHostMediaService(options: HostMediaServiceOptions): {
           jobId,
           idempotencyKey: input.idempotencyKey,
           presetId: input.presetId,
-          ...(input.rehearsalOnly ? { rehearsalOnly: input.rehearsalOnly } : {}),
         }, { seedProvenance: { ...seedBinding } });
       await ref.update({ status: request.state === "queued" ? "queued" : request.state, updatedAt: FieldValue.serverTimestamp() }).catch(() => undefined);
       // Persist the binding on the job so delivery/publish resolve it

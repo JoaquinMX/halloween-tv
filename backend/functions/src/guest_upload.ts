@@ -78,6 +78,7 @@ export interface GuestMediaStatusResult {
 
 export interface WithdrawGuestMediaResult {
   submissionId: string;
+  partyId: string;
   status: "withdrawn";
   deletedObjects: string[];
   verifiedAbsent: boolean;
@@ -154,13 +155,30 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
       // Upload stays fully operational when generation is disabled,
       // misconfigured, or the queue is unavailable. BUDGET_EXCEEDED keeps
       // the durable pending intent for bounded dispatch after capacity
-      // releases; any other failure marks the intent TERMINAL unavailable
-      // (visible via getGuestMediaStatus, never silent eligible-forever).
+      // releases. TERMINAL unavailable is reserved for genuine
+      // admission/terminal errors: queue rejection (enqueue failed after the
+      // job was created and failed via failEnqueue, surfaced as
+      // PROVIDER_UNAVAILABLE "could not be queued") and consent/permission
+      // denial (FORBIDDEN/CLIP_EXPIRED/NOT_FOUND). Transient INTERNAL /
+      // other PROVIDER_UNAVAILABLE stay pending with attempt accounting for
+      // the next bounded pass.
       if (error instanceof BackendError && error.errorCode === "BUDGET_EXCEEDED") return;
-      const code = error instanceof BackendError ? error.errorCode : "PROVIDER_UNAVAILABLE";
+      const isQueueRejection = error instanceof BackendError &&
+        error.errorCode === "PROVIDER_UNAVAILABLE" &&
+        /could not be queued/i.test(error.message);
+      if ((error instanceof BackendError &&
+          (error.errorCode === "FORBIDDEN" || error.errorCode === "CLIP_EXPIRED" || error.errorCode === "NOT_FOUND")) ||
+          isQueueRejection) {
+        const code = error instanceof BackendError ? error.errorCode : "PROVIDER_UNAVAILABLE";
+        await db.doc(pendingCartoonIntentPath(info.partyId, info.submissionId)).update({
+          status: "unavailable",
+          errorCode: code,
+          updatedAt: FieldValue.serverTimestamp(),
+        }).catch(() => undefined);
+        return;
+      }
       await db.doc(pendingCartoonIntentPath(info.partyId, info.submissionId)).update({
-        status: "unavailable",
-        errorCode: code,
+        attempts: FieldValue.increment(1),
         updatedAt: FieldValue.serverTimestamp(),
       }).catch(() => undefined);
       return;
@@ -680,8 +698,11 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
       pendingDeletions: [],
       updatedAt: FieldValue.serverTimestamp(),
     }, { merge: false });
-    // Withdrawn pending never dispatches: remove the durable intent first so
-    // a concurrent dispatch cannot queue it after the tombstone.
+    // Withdrawn pending never dispatches: best-effort intent cleanup after the
+    // tombstone write. Safety comes from the dispatch/publish rechecks (the
+    // flush gate re-reads eligibility and the worker/publication paths recheck
+    // consent transactionally), so a concurrent dispatch racing this cleanup
+    // cannot queue or publish after withdrawal.
     await db.doc(pendingCartoonIntentPath(identity.partyId, submissionId)).delete().catch(() => undefined);
     // Discard every attributable object: the source plus staged, delivered,
     // and generated derivatives of all bound jobs plus the published manifest
@@ -861,7 +882,7 @@ export function createGuestUploadService(options: GuestUploadServiceOptions) {
       revokedManifestPaths,
       updatedAt: FieldValue.serverTimestamp(),
     }).catch(() => undefined);
-    return { submissionId, status: "withdrawn", deletedObjects: orderedDeleted, verifiedAbsent };
+    return { submissionId, partyId: identity.partyId, status: "withdrawn", deletedObjects: orderedDeleted, verifiedAbsent };
   }
 
   /**

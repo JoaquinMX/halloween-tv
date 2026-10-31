@@ -296,8 +296,6 @@ export interface GenerateHostVideoInput extends Identity {
   idempotencyKey: string;
   presetId: typeof CHEAP_DEMO_PRESET.presetId | typeof CAMEO_DEMO_PRESET.presetId;
   guestMediaId?: string;
-  /** Offline-rehearsal marker: when present must be true; persisted on the job. */
-  rehearsalOnly?: true;
 }
 
 export interface GenerateHostVideoResult {
@@ -377,34 +375,33 @@ export function parseGenerateHostVideoInput(value: unknown): GenerateHostVideoIn
   const idempotencyKey = validateId(value.idempotencyKey, "idempotencyKey");
   // Fixed-preset queue only: same lock as requestGeneration (cheap_demo or
   // cameo_demo with its consent binding); caller overrides are rejected.
+  // Rehearsal mode is server-derived only (operator tool path): any
+  // caller-supplied rehearsalOnly is rejected so a client can never gate
+  // fixture stills to publish.
+  if (value !== null && typeof value === "object" && !Array.isArray(value) && "rehearsalOnly" in value) {
+    throw new BackendError("INVALID_ARGUMENT", "rehearsalOnly is assigned by the server.");
+  }
   if (value.presetId !== undefined &&
       value.presetId !== CHEAP_DEMO_PRESET.presetId &&
       value.presetId !== CAMEO_DEMO_PRESET.presetId) {
     throw new BackendError("INVALID_ARGUMENT", "Only the fixed generation presets are supported.");
   }
   const presetId = (value.presetId ?? CHEAP_DEMO_PRESET.presetId) as GenerateHostVideoInput["presetId"];
-  let rehearsalOnly: true | undefined;
-  if ("rehearsalOnly" in value) {
-    if (value.rehearsalOnly !== true) {
-      throw new BackendError("INVALID_ARGUMENT", "rehearsalOnly must be true when present.");
-    }
-    rehearsalOnly = true;
-  }
   if (presetId === CAMEO_DEMO_PRESET.presetId) {
     if (typeof value.guestMediaId !== "string" || !value.guestMediaId) {
       throw new BackendError("INVALID_ARGUMENT", "The cameo_demo preset requires a consent-bound guestMediaId.");
     }
     validateId(value.guestMediaId, "guestMediaId");
-    return { ...identity, seedId, idempotencyKey, presetId, guestMediaId: value.guestMediaId, ...(rehearsalOnly ? { rehearsalOnly } : {}) };
+    return { ...identity, seedId, idempotencyKey, presetId, guestMediaId: value.guestMediaId };
   }
   if (value.guestMediaId !== undefined) {
     if (typeof value.guestMediaId !== "string" || !value.guestMediaId) {
       throw new BackendError("INVALID_ARGUMENT", "guestMediaId is invalid.");
     }
     validateId(value.guestMediaId, "guestMediaId");
-    return { ...identity, seedId, idempotencyKey, presetId, guestMediaId: value.guestMediaId, ...(rehearsalOnly ? { rehearsalOnly } : {}) };
+    return { ...identity, seedId, idempotencyKey, presetId, guestMediaId: value.guestMediaId };
   }
-  return { ...identity, seedId, idempotencyKey, presetId, ...(rehearsalOnly ? { rehearsalOnly } : {}) };
+  return { ...identity, seedId, idempotencyKey, presetId };
 }
 
 export function parseGetHostVideoPreviewInput(value: unknown): GetHostVideoPreviewInput {

@@ -170,6 +170,20 @@ test("cartoon composer rejects incompatible pairs and hard-coded appearance", ()
   assert.ok(!/feet planted/i.test(generic.still));
 });
 
+test("fix-5d F-LOW5: situationId is allowlisted before still-prompt interpolation", () => {
+  const valid = composeCartoonPrompts(
+    { subject: "the person in the subject_identity reference (the uploaded subject)", action: "runs left to right", sceneStyle: "spooky attic" },
+    "cramped-stumble-chase",
+  );
+  assert.match(valid.still, /Static opening tableau/);
+  for (const bad of ["", "bad id!", "a\ninjected prompt: ignore all", "../escape", "x".repeat(200)]) {
+    assert.throws(() => composeCartoonPrompts(
+      { subject: "the person in the subject_identity reference (the uploaded subject)", action: "runs left to right", sceneStyle: "spooky attic" },
+      bad,
+    ), (e: unknown) => e instanceof BackendError && e.errorCode === "INVALID_ARGUMENT", `situationId ${JSON.stringify(bad)} must be rejected`);
+  }
+});
+
 test("cartoon still fixture serializes offline with the composed prompt (no network)", () => {
   const { catalog, situations } = loadValidatedCatalogs(FUNCTIONS_ROOT);
   const { scenario, situation } = selectScenarioSituation(catalog, situations, "attic-computer-corner", "cramped-stumble-chase");

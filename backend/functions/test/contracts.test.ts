@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BackendError, HOST_MAX_DEVICES, HOST_SOURCE_CONSENT_PURPOSE, HOST_SOURCE_CONSENT_TEXT_VERSION, isHostSourceConsent, isSupportedConsent, parseAck, parseJoinPartyInput, parseRequestGeneration, requireIdentity, validateCanonicalClips, parseCreateHostInviteInput, parseJoinHostInput, parseDeleteHostVideoInput, parseRevokeHostDeviceInput } from "../src/contracts";
+import { BackendError, HOST_MAX_DEVICES, HOST_SOURCE_CONSENT_PURPOSE, HOST_SOURCE_CONSENT_TEXT_VERSION, isHostSourceConsent, isSupportedConsent, parseAck, parseJoinPartyInput, parseRequestGeneration, requireIdentity, validateCanonicalClips, parseCreateHostInviteInput, parseJoinHostInput, parseDeleteHostVideoInput, parseGenerateHostVideoInput, parseRevokeHostDeviceInput } from "../src/contracts";
 import { buildCheapDemoRequest, validateCheapDemoControls, validateGuestImageReference } from "../src/video_generation_port";
 import { createVideoGenerationProviderFromEnvironment, FakeVideoGenerationPort } from "../src/providers/fake";
 import { AlibabaVideoGenerationPort } from "../src/providers/alibaba";
@@ -283,4 +283,26 @@ test("cartoon chain gate: incomplete or mismatched still-to-video stages are ref
     job: { partyId: "p", channelId: "main", jobId: "job-cartoon", cartoonChain: { stillSha256: still, videoStillSha256: "b".repeat(64), stillStatus: "completed" } },
     nowMs: Date.now(),
   }), (e: unknown) => e instanceof BackendError && e.errorCode === "MANIFEST_MISMATCH");
+});
+
+test("fix-5d HIGH: generateHostVideo callable rejects caller-supplied rehearsalOnly", () => {
+  const base = { partyId: "p", deviceId: "h", channelId: "main", seedId: "seed-1", idempotencyKey: "idem-1" };
+  const parsed = parseGenerateHostVideoInput(base);
+  assert.ok(!("rehearsalOnly" in parsed));
+  for (const rehearsalOnly of [true, false, "true", 1]) {
+    assert.throws(() => parseGenerateHostVideoInput({ ...base, rehearsalOnly }),
+      (e: unknown) => e instanceof BackendError && e.errorCode === "INVALID_ARGUMENT",
+      `rehearsalOnly ${String(rehearsalOnly)} must be rejected`);
+  }
+});
+
+test("fix-5d HIGH: fixture stills never publish without the server-derived rehearsal marker", async () => {
+  const { assertCartoonChainComplete } = await import("../src/contracts");
+  const still = "a".repeat(64);
+  const fixtureChain = { stillSha256: still, videoStillSha256: still, stillStatus: "completed", videoStatus: "completed", stillFixture: true };
+  assert.throws(() => assertCartoonChainComplete({ cartoonChain: fixtureChain } as unknown as Record<string, unknown>),
+    (e: unknown) => e instanceof BackendError && e.errorCode === "MANIFEST_MISMATCH");
+  assertCartoonChainComplete({ rehearsalOnly: true, cartoonChain: fixtureChain } as unknown as Record<string, unknown>);
+  assert.throws(() => assertCartoonChainComplete({ rehearsalOnly: false, cartoonChain: fixtureChain } as unknown as Record<string, unknown>),
+    (e: unknown) => e instanceof BackendError && e.errorCode === "MANIFEST_MISMATCH");
 });
