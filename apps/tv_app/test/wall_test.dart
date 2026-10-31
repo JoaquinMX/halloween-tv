@@ -19,6 +19,7 @@ import 'package:testing_toolkit/testing_toolkit.dart';
 import 'package:tv_app/src/playback/camera_tile.dart';
 import 'package:tv_app/src/playback/tile_video_controller.dart';
 import 'package:tv_app/src/wall/guest_codes.dart';
+import 'package:tv_app/src/wall/host_codes.dart';
 import 'package:tv_app/src/wall/wall_screen.dart';
 
 import 'support/fakes.dart';
@@ -34,6 +35,8 @@ Widget wallHarness({
   bool initialEffectsDisabled = false,
   bool recoveryEnabled = true,
   GuestCodeClient? guestCodeClient,
+  HostInviteClient? hostInviteClient,
+  HostDeviceClient? hostDeviceClient,
   String partyId = 'local-party',
   String tvDeviceId = '',
 }) {
@@ -52,6 +55,8 @@ Widget wallHarness({
       fileExists: fileExists,
       recoveryEnabled: recoveryEnabled,
       guestCodeClient: guestCodeClient,
+      hostInviteClient: hostInviteClient,
+      hostDeviceClient: hostDeviceClient,
       partyId: partyId,
       tvDeviceId: tvDeviceId,
     ),
@@ -810,6 +815,118 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
     expect(liveDecoders, 0);
+  });
+
+  testWidgets(
+    'held-arrow repeats keep moving focus; held-select never retriggers hero',
+    (WidgetTester tester) async {
+      await tester.pumpWidget(
+        wallHarness(
+          manifest: wallManifest(),
+          clock: clock,
+          factory: fakeControllerFactory(),
+        ),
+      );
+      await pumpWall(tester);
+      expect(
+        find.byKey(const ValueKey<String>('tile-focus-ring-0')),
+        findsOneWidget,
+      );
+
+      // A held D-pad direction keeps traversing through repeat events.
+      await tester.sendKeyRepeatEvent(LogicalKeyboardKey.arrowRight);
+      await tester.pump();
+      expect(
+        find.byKey(const ValueKey<String>('tile-focus-ring-1')),
+        findsOneWidget,
+      );
+      await tester.sendKeyRepeatEvent(LogicalKeyboardKey.arrowDown);
+      await tester.pump();
+      expect(
+        find.byKey(const ValueKey<String>('tile-focus-ring-3')),
+        findsOneWidget,
+      );
+
+      // A short select opens the hero on the focused tile (CAM-04 expands
+      // to the full wall rectangle).
+      final Size wall = tester.getSize(find.byKey(kCctvWallKey));
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.select);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.select);
+      await tester.pumpAndSettle();
+      Rect heroRect() => tester.getRect(
+        find.byKey(const ValueKey<String>('wall-slot-CAM-04')),
+      );
+      expect(heroRect().width, wall.width);
+      expect(heroRect().height, wall.height);
+
+      // Held-select repeats while the hero is open never retrigger it: the
+      // hero geometry is untouched and no overlay/rebuild fires.
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.select);
+      await tester.sendKeyRepeatEvent(LogicalKeyboardKey.select);
+      await tester.sendKeyRepeatEvent(LogicalKeyboardKey.select);
+      await tester.pump();
+      expect(heroRect().width, wall.width);
+      expect(heroRect().height, wall.height);
+      expect(find.byKey(kRecoveryOverlayKey), findsNothing);
+      // The release is the ordinary short-press toggle (closes the hero);
+      // the repeats in between neither wedged nor doubled it.
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.select);
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey<String>('tile-focus-ring-3')),
+        findsOneWidget,
+      );
+      expect(tester.takeException(), isNull);
+
+      await teardownWall(tester);
+    },
+  );
+
+  testWidgets('unsupported manifest length degrades instead of throwing', (
+    WidgetTester tester,
+  ) async {
+    // A hypothetical bad-length manifest (3 clips is not a supported
+    // 1/2/4 layout) must fail closed: no StateError out of construction,
+    // SIGNAL-LOST frame + cache status instead, recovery still available.
+    final PlaybackManifest full = wallManifest();
+    final PlaybackManifest bad = PlaybackManifest(
+      partyId: full.partyId,
+      channelId: full.channelId,
+      version: full.version,
+      clips: full.clips.take(3).toList(),
+      publishedAt: full.publishedAt,
+    );
+    await tester.pumpWidget(
+      wallHarness(
+        manifest: bad,
+        clock: clock,
+        factory: fakeControllerFactory(),
+      ),
+    );
+    await pumpWall(tester);
+    expect(tester.takeException(), isNull);
+    expect(
+      find.byKey(const ValueKey<String>('wall-unsupported-manifest')),
+      findsOneWidget,
+    );
+    expect(find.byKey(kWallStatusBannerKey), findsOneWidget);
+    expect(find.textContaining('UNSUPPORTED MANIFEST'), findsOneWidget);
+
+    // The wall is still operable: MENU opens recovery over the degraded
+    // frame, and closing returns to it without exceptions.
+    await tester.sendKeyEvent(LogicalKeyboardKey.contextMenu);
+    await tester.pump();
+    expect(find.byKey(kRecoveryOverlayKey), findsOneWidget);
+    await tester.sendKeyEvent(LogicalKeyboardKey.contextMenu);
+    await tester.pump();
+    expect(find.byKey(kRecoveryOverlayKey), findsNothing);
+    expect(
+      find.byKey(const ValueKey<String>('wall-unsupported-manifest')),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+
+    await teardownWall(tester);
   });
 }
 

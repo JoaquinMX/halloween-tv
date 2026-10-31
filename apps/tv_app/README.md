@@ -63,3 +63,21 @@ re-verifies the app-private committed files before changing the wall;
 restored on the next boot. Live manifests are staged and acknowledged before
 activation, and each changed tile is replaced in sequence so the wall never
 allocates more than four decoders.
+
+## Host QR + guest codes
+
+The recovery panel links two separately labelled destinations:
+
+- `HOST QR`: the TV mints a short-lived host invite (`createHostInvite`)
+  and shows exactly one QR plus the 6-digit pairing code beside it. Both
+  are required on the companion host entry; a wrong code denies exactly
+  like an unknown invite. Below the invite, active hosts are listed by
+  label only (device ids never render) with a confirmed revoke action
+  (`revokeHostDevice`, TV-only).
+- `GUEST CODES`: party/channel scope plus one session QR for guests. The
+  TV device id authorizes the listing request but is never displayed.
+
+An unsupported manifest clip count (anything but 1, 2, or 4) fails
+closed to a SIGNAL-LOST/cache state instead of throwing during
+construction; a held D-pad direction keeps traversing through key
+repeats while held select never retriggers the hero.

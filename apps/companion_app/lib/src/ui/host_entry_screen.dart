@@ -13,9 +13,13 @@
 /// are redeemed here — anything else fails visibly without network traffic.
 library;
 
+import 'dart:convert';
+
 import 'package:companion_app/src/join/device_identity_store.dart';
 import 'package:companion_app/src/join/guest_join_data.dart';
 import 'package:companion_app/src/join/join_payload_scanner.dart';
+import 'package:companion_app/src/session/host_session.dart'
+    show HostJoinException;
 import 'package:core_foundation/core_foundation.dart';
 import 'package:flutter/material.dart';
 
@@ -24,6 +28,7 @@ final class HostEntryScreen extends StatefulWidget {
     super.key,
     required this.onHostJoin,
     required this.onJoinAsGuest,
+    this.onHostJoinWithCode,
     this.configurationIssue,
     this.identityStore,
     this.scanner = const UnavailableJoinPayloadScanner(),
@@ -31,7 +36,16 @@ final class HostEntryScreen extends StatefulWidget {
 
   /// Redeems a validated host payload. Throws a sanitized message on
   /// denial so the failure stays visible on this screen.
+  ///
+  /// Legacy path: used when [onHostJoinWithCode] is null. The server
+  /// requires the pairing code, so this path only survives for callers
+  /// that have not migrated yet and fails with the generic denial.
   final Future<void> Function(GuestJoinData data) onHostJoin;
+
+  /// Redeems a validated host payload together with its 6-digit pairing
+  /// code. Preferred over [onHostJoin] whenever the app wires it.
+  final Future<void> Function(GuestJoinData data, String pairingCode)?
+  onHostJoinWithCode;
 
   /// Explicit guest route: shows the anonymous guest join form.
   final VoidCallback onJoinAsGuest;
@@ -41,6 +55,7 @@ final class HostEntryScreen extends StatefulWidget {
   final JoinPayloadScanner scanner;
 
   static const Key payloadFieldKey = Key('host-entry-payload');
+  static const Key pairingCodeFieldKey = Key('host-entry-pairing-code');
   static const Key submitKey = Key('host-entry-submit');
   static const Key errorKey = Key('host-entry-error');
   static const Key scanKey = Key('host-entry-scan');
@@ -52,6 +67,7 @@ final class HostEntryScreen extends StatefulWidget {
 
 final class _HostEntryScreenState extends State<HostEntryScreen> {
   final _payload = TextEditingController();
+  final _pairingCode = TextEditingController();
   late final DeviceIdentityStore _identityStore =
       widget.identityStore ?? DeviceIdentityStore();
   String? _hostDeviceId;
@@ -82,7 +98,40 @@ final class _HostEntryScreenState extends State<HostEntryScreen> {
   @override
   void dispose() {
     _payload.dispose();
+    _pairingCode.dispose();
     super.dispose();
+  }
+
+  /// Extracts a 6-digit pairing code from a scanned/pasted Host QR payload,
+  /// when the mint included one. Never throws: unparseable text simply
+  /// yields no prefill and the manual field stays authoritative.
+  static String? extractPairingCode(String raw) {
+    try {
+      final Object? decoded = jsonDecode(raw.trim());
+      if (decoded is! Map) {
+        return null;
+      }
+      final Map<String, Object?> json = Map<String, Object?>.from(
+        decoded.map((Object? k, Object? v) => MapEntry(k.toString(), v)),
+      );
+      final Object? code = json['pairingCode'] ?? json['pairing_code'];
+      if (code is String && RegExp(r'^[0-9]{6}$').hasMatch(code)) {
+        return code;
+      }
+    } on FormatException {
+      // Not JSON (or not an object): manual entry stays authoritative.
+    }
+    return null;
+  }
+
+  void _prefillPairingCode(String raw) {
+    if (_pairingCode.text.trim().isNotEmpty) {
+      return;
+    }
+    final String? code = extractPairingCode(raw);
+    if (code != null) {
+      _pairingCode.text = code;
+    }
   }
 
   Future<void> _submit() async {
@@ -90,6 +139,17 @@ final class _HostEntryScreenState extends State<HostEntryScreen> {
     final pasted = _payload.text.trim();
     if (pasted.isEmpty) {
       setState(() => _error = 'Paste a host invitation or scan a Host QR.');
+      return;
+    }
+    // A manual entry stays authoritative; a minted code inside the payload
+    // only prefills an empty field (scan/paste parity).
+    _prefillPairingCode(pasted);
+    final String code = _pairingCode.text.trim();
+    if (!RegExp(r'^[0-9]{6}$').hasMatch(code)) {
+      setState(
+        () => _error =
+            'Enter the 6-digit pairing code shown next to the Host QR.',
+      );
       return;
     }
     final Result<GuestJoinData> result = parseGuestJoinPayload(
@@ -111,9 +171,25 @@ final class _HostEntryScreenState extends State<HostEntryScreen> {
           _submitting = true;
         });
         try {
-          await widget.onHostJoin(value);
-        } on Object catch (error) {
-          if (mounted) setState(() => _error = '$error');
+          final onWithCode = widget.onHostJoinWithCode;
+          if (onWithCode != null) {
+            await onWithCode(value, code);
+          } else {
+            await widget.onHostJoin(value);
+          }
+        } on HostJoinException catch (error) {
+          // Already sanitized by the session (generic denial, no backend
+          // detail); surface it verbatim.
+          if (mounted) setState(() => _error = error.message);
+        } on Object catch (_) {
+          // Never leak raw transport detail on this screen.
+          if (mounted) {
+            setState(
+              () => _error =
+                  'Host entry failed. Check the invitation and pairing code '
+                  'and try again.',
+            );
+          }
         } finally {
           if (mounted) setState(() => _submitting = false);
         }
@@ -133,6 +209,7 @@ final class _HostEntryScreenState extends State<HostEntryScreen> {
       if (!mounted) return;
       if (result case JoinPayloadText(:final text)) {
         setState(() => _payload.text = text);
+        _prefillPairingCode(text);
         await _submit();
       } else if (result case JoinPayloadPermissionDenied(:final permanently)) {
         setState(
@@ -162,7 +239,8 @@ final class _HostEntryScreenState extends State<HostEntryScreen> {
             children: <Widget>[
               const Text(
                 'Scan the Host QR shown on the organizer TV, or paste the '
-                'host invitation. Host access is a separate short-lived '
+                'host invitation, then type the 6-digit pairing code shown '
+                'next to it. Host access is a separate short-lived '
                 'invite — a guest PIN can never open it.',
                 style: TextStyle(fontSize: 18),
               ),
@@ -176,11 +254,23 @@ final class _HostEntryScreenState extends State<HostEntryScreen> {
                   labelText: 'Host invitation (paste or scan)',
                   hintText:
                       '{"partyId":"…","channelId":"…","role":"host",'
-                      '"inviteToken":"hi-…"}',
+                      '"inviteToken":"hi-…","pairingCode":"123456"}',
                   border: OutlineInputBorder(),
                 ),
                 minLines: 1,
-                maxLines: 4,
+                maxLines: 2,
+                autocorrect: false,
+                enableSuggestions: false,
+              ),
+              TextField(
+                key: HostEntryScreen.pairingCodeFieldKey,
+                controller: _pairingCode,
+                decoration: const InputDecoration(
+                  labelText: 'Pairing code (6 digits, next to the Host QR)',
+                  hintText: '123456',
+                  border: OutlineInputBorder(),
+                ),
+                keyboardType: TextInputType.number,
                 autocorrect: false,
                 enableSuggestions: false,
               ),

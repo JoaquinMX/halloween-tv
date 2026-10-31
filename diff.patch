@@ -1,0 +1,2817 @@
+diff --git a/apps/companion_app/integration_test/camera_join_scan_device_test.dart b/apps/companion_app/integration_test/camera_join_scan_device_test.dart
+index 581488417bd2cf81b8efe7190eaeeac9994b84d1..8567ad8e5d0a1426d2d6fc9325cb3169fc1ff9ac 100644
+--- a/apps/companion_app/integration_test/camera_join_scan_device_test.dart
++++ b/apps/companion_app/integration_test/camera_join_scan_device_test.dart
+@@ -1,10 +1,11 @@
+ // On-device camera join regression (physical Pixel, manual run).
+ //
+ // Run (from apps/companion_app, release + live defines, permission
+-// pre-granted so no OS dialog blocks the run):
++// pre-granted so no OS dialog blocks the run, on a camera-capable device):
+ //
+ //   adb -s <serial> shell pm grant <package> android.permission.CAMERA
+ //   flutter test integration_test/camera_join_scan_device_test.dart \
++//     --dart-define=DEVICE_CAMERA=true \
+ //     --dart-define=COMPANION_FIREBASE_API_KEY=... \
+ //     --dart-define=COMPANION_FIREBASE_APP_ID=... \
+ //     --dart-define=COMPANION_FIREBASE_PROJECT_ID=halloween-tv \
+@@ -18,10 +19,11 @@
+ // procedure in docs/COMPANION-CAMERA-PROOF.md (human aims the camera;
+ // automation cannot point the lens).
+ //
+-// Live paste-join runs only when DEVICE_PARTY_ID/DEVICE_CHANNEL_ID are
+-// supplied; otherwise it reports the skip. It registers one guest device
+-// against the seeded rehearsal party (same cost class as the typed manual
+-// join in rehearsal NOTES — no generation, no spend).
++// Both tests need physical hardware, so they stay skipped with a reason
++// everywhere else (never a vacuous pass). The paste-join additionally
++// requires DEVICE_PARTY_ID/DEVICE_CHANNEL_ID; it registers one guest
++// device against the seeded rehearsal party (same cost class as the typed
++// manual join in rehearsal NOTES — no generation, no spend).
+ library;
+ 
+ import 'package:companion_app/src/companion_app.dart';
+@@ -34,6 +36,7 @@ import 'package:shared_preferences/shared_preferences.dart';
+ 
+ const String _devicePartyId = String.fromEnvironment('DEVICE_PARTY_ID');
+ const String _deviceChannelId = String.fromEnvironment('DEVICE_CHANNEL_ID');
++const bool _deviceCamera = bool.fromEnvironment('DEVICE_CAMERA');
+ 
+ Future<void> _settle(WidgetTester tester) async {
+   for (int i = 0; i < 12; i++) {
+@@ -41,10 +44,23 @@ Future<void> _settle(WidgetTester tester) async {
+   }
+ }
+ 
++/// Hardware gate: without an explicit on-device opt-in the test is
++/// skipped with a reason, so a missing device never reads as a pass.
++void _requireDevice(String what) {
++  if (!_deviceCamera) {
++    markTestSkipped(
++      'Requires physical $what; rerun with '
++      '--dart-define=DEVICE_CAMERA=true on a camera-capable device '
++      '(see docs/COMPANION-CAMERA-PROOF.md).',
++    );
++  }
++}
++
+ void main() {
+   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+ 
+   testWidgets('device: granted camera opens the live scanner', (tester) async {
++    _requireDevice('camera hardware');
+     SharedPreferences.setMockInitialValues(<String, Object>{});
+     await tester.pumpWidget(const CompanionApp());
+     await _settle(tester);
+@@ -73,13 +89,12 @@ void main() {
+   testWidgets('device: pasted join data joins the seeded party', (
+     tester,
+   ) async {
++    _requireDevice('device backend access');
+     if (_devicePartyId.isEmpty || _deviceChannelId.isEmpty) {
+-      // ignore: avoid_print
+-      print(
+-        'SKIP live join: pass --dart-define=DEVICE_PARTY_ID=... '
+-        'DEVICE_CHANNEL_ID=... (see docs/COMPANION-CAMERA-PROOF.md).',
++      markTestSkipped(
++        'Pass --dart-define=DEVICE_PARTY_ID=... DEVICE_CHANNEL_ID=... '
++        '(see docs/COMPANION-CAMERA-PROOF.md).',
+       );
+-      return;
+     }
+     SharedPreferences.setMockInitialValues(<String, Object>{});
+     await tester.pumpWidget(const CompanionApp());
+diff --git a/apps/companion_app/integration_test/host_admin_emulator_test.dart b/apps/companion_app/integration_test/host_admin_emulator_test.dart
+index 2b6119551e94687b4997d0c3690b8e89fb0a3370..df3d1a086ce4c52ab7ff53de755535ff17503263 100644
+--- a/apps/companion_app/integration_test/host_admin_emulator_test.dart
++++ b/apps/companion_app/integration_test/host_admin_emulator_test.dart
+@@ -32,11 +32,10 @@ void main() {
+     tester,
+   ) async {
+     if (_hostInvitePayload.isEmpty) {
+-      // ignore: avoid_print
+-      print(
+-        'SKIP host admin: supply HOST_INVITE_PAYLOAD (fresh Host QR JSON).',
++      markTestSkipped(
++        'Provide HOST_INVITE_PAYLOAD (a fresh Host QR JSON from '
++        'createHostInvite) to run the emulator host-admin smoke test.',
+       );
+-      return;
+     }
+     SharedPreferences.setMockInitialValues(<String, Object>{
+       DeviceIdentityStore.hostStorageKey: 'p-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+diff --git a/apps/companion_app/lib/src/data/host_join_client.dart b/apps/companion_app/lib/src/data/host_join_client.dart
+index 72ec58e1e639f4dbaec294096c2d5427041cc2ea..8255697e566fc929ea5c5c1867e4769cca419063 100644
+--- a/apps/companion_app/lib/src/data/host_join_client.dart
++++ b/apps/companion_app/lib/src/data/host_join_client.dart
+@@ -20,6 +20,11 @@ abstract interface class HostJoinCallableInvoker {
+ }
+ 
+ /// Redeems a host invite and validates the server's scoped host response.
++///
++/// The invite token and the 6-digit [pairingCode] shown next to the TV's
++/// HOST QR are both required by `joinHost`: a wrong code denies exactly
++/// like an unknown invite (generic `FORBIDDEN`), so the entry screen can
++/// only surface the sanitized denial.
+ final class HostJoinClient {
+   HostJoinClient({
+     required HostJoinCallableInvoker invoker,
+@@ -34,12 +39,20 @@ final class HostJoinClient {
+     required String deviceId,
+     required String channelId,
+     required String inviteToken,
++    String? pairingCode,
+   }) async {
++    if (pairingCode != null && !RegExp(r'^[0-9]{6}$').hasMatch(pairingCode)) {
++      throw const FormatException('pairingCode must be six digits');
++    }
+     final Map<String, Object?> payload = <String, Object?>{
+       'partyId': partyId,
+       'deviceId': deviceId,
+       'channelId': channelId,
+       'inviteToken': inviteToken,
++      // The backend requires the pairing code; it stays optional here only
++      // so older callers keep compiling — the dedicated host entry always
++      // collects it, and the server rejects a missing code generically.
++      if (pairingCode != null) 'pairingCode': pairingCode,
+     };
+     try {
+       final Object? raw = await _invoker
+diff --git a/apps/companion_app/lib/src/data/host_media_client.dart b/apps/companion_app/lib/src/data/host_media_client.dart
+index bb6bba5d093f35c377bf6f64bf41ce080bc1249d..216936b827186aecb5c206915fb05ec843ecfda4 100644
+--- a/apps/companion_app/lib/src/data/host_media_client.dart
++++ b/apps/companion_app/lib/src/data/host_media_client.dart
+@@ -15,6 +15,7 @@ library;
+ import 'dart:async';
+ 
+ import 'package:cloud_functions/cloud_functions.dart';
++import 'package:core_playlist/core_playlist.dart' show kCctvCameraIds;
+ import 'package:infra_firestore/infra_firestore.dart'
+     show ManifestTransportException;
+ 
+@@ -186,6 +187,21 @@ final class HostMediaClient {
+     if (entry['previewAvailable'] is! bool || cameras is! List) {
+       throw const FormatException('Host seed entry fields are malformed');
+     }
++    // Strict camera validation: every entry must be a non-empty string in
++    // the canonical CCTV set (CAM-01..CAM-04). Anything else — nulls,
++    // numbers, blanks, unknown cameras — is a malformed seed entry, never
++    // silently coerced.
++    final List<String> cameraIds = <String>[];
++    for (final Object? camera in cameras) {
++      if (camera is! String ||
++          camera.isEmpty ||
++          !kCctvCameraIds.contains(camera)) {
++        throw FormatException(
++          'Host seed entry cameraId "$camera" is malformed',
++        );
++      }
++      cameraIds.add(camera);
++    }
+     return HostSeedVideo(
+       seedId: requiredString('seedId'),
+       partyId: seedParty,
+@@ -195,7 +211,7 @@ final class HostMediaClient {
+       createdAt: requiredString('createdAt'),
+       expiresAt: requiredString('expiresAt'),
+       previewAvailable: entry['previewAvailable'] as bool,
+-      cameraIds: <String>[for (final Object? c in cameras) c.toString()],
++      cameraIds: cameraIds,
+     );
+   }
+ 
+diff --git a/apps/companion_app/lib/src/ui/host_entry_screen.dart b/apps/companion_app/lib/src/ui/host_entry_screen.dart
+index 293438797429100cc6be5b360927c77ebca01c10..bca3ce3dea77c184a18bd73d02c87a696e93990e 100644
+--- a/apps/companion_app/lib/src/ui/host_entry_screen.dart
++++ b/apps/companion_app/lib/src/ui/host_entry_screen.dart
+@@ -13,9 +13,13 @@
+ /// are redeemed here — anything else fails visibly without network traffic.
+ library;
+ 
++import 'dart:convert';
++
+ import 'package:companion_app/src/join/device_identity_store.dart';
+ import 'package:companion_app/src/join/guest_join_data.dart';
+ import 'package:companion_app/src/join/join_payload_scanner.dart';
++import 'package:companion_app/src/session/host_session.dart'
++    show HostJoinException;
+ import 'package:core_foundation/core_foundation.dart';
+ import 'package:flutter/material.dart';
+ 
+@@ -24,6 +28,7 @@ final class HostEntryScreen extends StatefulWidget {
+     super.key,
+     required this.onHostJoin,
+     required this.onJoinAsGuest,
++    this.onHostJoinWithCode,
+     this.configurationIssue,
+     this.identityStore,
+     this.scanner = const UnavailableJoinPayloadScanner(),
+@@ -31,8 +36,17 @@ final class HostEntryScreen extends StatefulWidget {
+ 
+   /// Redeems a validated host payload. Throws a sanitized message on
+   /// denial so the failure stays visible on this screen.
++  ///
++  /// Legacy path: used when [onHostJoinWithCode] is null. The server
++  /// requires the pairing code, so this path only survives for callers
++  /// that have not migrated yet and fails with the generic denial.
+   final Future<void> Function(GuestJoinData data) onHostJoin;
+ 
++  /// Redeems a validated host payload together with its 6-digit pairing
++  /// code. Preferred over [onHostJoin] whenever the app wires it.
++  final Future<void> Function(GuestJoinData data, String pairingCode)?
++  onHostJoinWithCode;
++
+   /// Explicit guest route: shows the anonymous guest join form.
+   final VoidCallback onJoinAsGuest;
+ 
+@@ -41,6 +55,7 @@ final class HostEntryScreen extends StatefulWidget {
+   final JoinPayloadScanner scanner;
+ 
+   static const Key payloadFieldKey = Key('host-entry-payload');
++  static const Key pairingCodeFieldKey = Key('host-entry-pairing-code');
+   static const Key submitKey = Key('host-entry-submit');
+   static const Key errorKey = Key('host-entry-error');
+   static const Key scanKey = Key('host-entry-scan');
+@@ -52,6 +67,7 @@ final class HostEntryScreen extends StatefulWidget {
+ 
+ final class _HostEntryScreenState extends State<HostEntryScreen> {
+   final _payload = TextEditingController();
++  final _pairingCode = TextEditingController();
+   late final DeviceIdentityStore _identityStore =
+       widget.identityStore ?? DeviceIdentityStore();
+   String? _hostDeviceId;
+@@ -82,9 +98,42 @@ final class _HostEntryScreenState extends State<HostEntryScreen> {
+   @override
+   void dispose() {
+     _payload.dispose();
++    _pairingCode.dispose();
+     super.dispose();
+   }
+ 
++  /// Extracts a 6-digit pairing code from a scanned/pasted Host QR payload,
++  /// when the mint included one. Never throws: unparseable text simply
++  /// yields no prefill and the manual field stays authoritative.
++  static String? extractPairingCode(String raw) {
++    try {
++      final Object? decoded = jsonDecode(raw.trim());
++      if (decoded is! Map) {
++        return null;
++      }
++      final Map<String, Object?> json = Map<String, Object?>.from(
++        decoded.map((Object? k, Object? v) => MapEntry(k.toString(), v)),
++      );
++      final Object? code = json['pairingCode'] ?? json['pairing_code'];
++      if (code is String && RegExp(r'^[0-9]{6}$').hasMatch(code)) {
++        return code;
++      }
++    } on FormatException {
++      // Not JSON (or not an object): manual entry stays authoritative.
++    }
++    return null;
++  }
++
++  void _prefillPairingCode(String raw) {
++    if (_pairingCode.text.trim().isNotEmpty) {
++      return;
++    }
++    final String? code = extractPairingCode(raw);
++    if (code != null) {
++      _pairingCode.text = code;
++    }
++  }
++
+   Future<void> _submit() async {
+     if (_submitting || _hostDeviceId == null) return;
+     final pasted = _payload.text.trim();
+@@ -92,6 +141,17 @@ final class _HostEntryScreenState extends State<HostEntryScreen> {
+       setState(() => _error = 'Paste a host invitation or scan a Host QR.');
+       return;
+     }
++    // A manual entry stays authoritative; a minted code inside the payload
++    // only prefills an empty field (scan/paste parity).
++    _prefillPairingCode(pasted);
++    final String code = _pairingCode.text.trim();
++    if (!RegExp(r'^[0-9]{6}$').hasMatch(code)) {
++      setState(
++        () => _error =
++            'Enter the 6-digit pairing code shown next to the Host QR.',
++      );
++      return;
++    }
+     final Result<GuestJoinData> result = parseGuestJoinPayload(
+       pasted,
+       localDeviceId: _hostDeviceId!,
+@@ -111,9 +171,25 @@ final class _HostEntryScreenState extends State<HostEntryScreen> {
+           _submitting = true;
+         });
+         try {
+-          await widget.onHostJoin(value);
+-        } on Object catch (error) {
+-          if (mounted) setState(() => _error = '$error');
++          final onWithCode = widget.onHostJoinWithCode;
++          if (onWithCode != null) {
++            await onWithCode(value, code);
++          } else {
++            await widget.onHostJoin(value);
++          }
++        } on HostJoinException catch (error) {
++          // Already sanitized by the session (generic denial, no backend
++          // detail); surface it verbatim.
++          if (mounted) setState(() => _error = error.message);
++        } on Object catch (_) {
++          // Never leak raw transport detail on this screen.
++          if (mounted) {
++            setState(
++              () => _error =
++                  'Host entry failed. Check the invitation and pairing code '
++                  'and try again.',
++            );
++          }
+         } finally {
+           if (mounted) setState(() => _submitting = false);
+         }
+@@ -133,6 +209,7 @@ final class _HostEntryScreenState extends State<HostEntryScreen> {
+       if (!mounted) return;
+       if (result case JoinPayloadText(:final text)) {
+         setState(() => _payload.text = text);
++        _prefillPairingCode(text);
+         await _submit();
+       } else if (result case JoinPayloadPermissionDenied(:final permanently)) {
+         setState(
+@@ -162,7 +239,8 @@ final class _HostEntryScreenState extends State<HostEntryScreen> {
+             children: <Widget>[
+               const Text(
+                 'Scan the Host QR shown on the organizer TV, or paste the '
+-                'host invitation. Host access is a separate short-lived '
++                'host invitation, then type the 6-digit pairing code shown '
++                'next to it. Host access is a separate short-lived '
+                 'invite — a guest PIN can never open it.',
+                 style: TextStyle(fontSize: 18),
+               ),
+@@ -176,11 +254,23 @@ final class _HostEntryScreenState extends State<HostEntryScreen> {
+                   labelText: 'Host invitation (paste or scan)',
+                   hintText:
+                       '{"partyId":"…","channelId":"…","role":"host",'
+-                      '"inviteToken":"hi-…"}',
++                      '"inviteToken":"hi-…","pairingCode":"123456"}',
+                   border: OutlineInputBorder(),
+                 ),
+                 minLines: 1,
+-                maxLines: 4,
++                maxLines: 2,
++                autocorrect: false,
++                enableSuggestions: false,
++              ),
++              TextField(
++                key: HostEntryScreen.pairingCodeFieldKey,
++                controller: _pairingCode,
++                decoration: const InputDecoration(
++                  labelText: 'Pairing code (6 digits, next to the Host QR)',
++                  hintText: '123456',
++                  border: OutlineInputBorder(),
++                ),
++                keyboardType: TextInputType.number,
+                 autocorrect: false,
+                 enableSuggestions: false,
+               ),
+diff --git a/apps/companion_app/lib/src/ui/host_panel_screen.dart b/apps/companion_app/lib/src/ui/host_panel_screen.dart
+index b52b7da8b3c42182597d3550321fa5c1b5e3ac19..66edf56cfc56c6828b5ccc8e61ee54ee848e5597 100644
+--- a/apps/companion_app/lib/src/ui/host_panel_screen.dart
++++ b/apps/companion_app/lib/src/ui/host_panel_screen.dart
+@@ -61,6 +61,9 @@ final class HostPanelScreen extends StatefulWidget {
+   static const Key retryKey = Key('host-panel-retry');
+   static const Key leaveKey = Key('host-panel-leave');
+   static const Key messageKey = Key('host-panel-message');
++  static const Key deleteDialogKey = Key('host-panel-delete-dialog');
++  static const Key deleteConfirmKey = Key('host-panel-delete-confirm');
++  static const Key deleteCancelKey = Key('host-panel-delete-cancel');
+   static Key deleteKey(String seedId) => Key('host-delete-$seedId');
+   static Key viewKey(String seedId) => Key('host-view-$seedId');
+ 
+@@ -112,6 +115,35 @@ final class _HostPanelScreenState extends State<HostPanelScreen> {
+ 
+   Future<void> _delete(String seedId) async {
+     if (_busySeeds.contains(seedId)) return;
++    // Deletion is confirmed first: the dialog names the seed and states
++    // that its previews + the live manifest entry are removed. The row
++    // stays (and the busy marker stays) until the server confirms, so a
++    // failure keeps the selection retryable in place.
++    final bool? confirmed = await showDialog<bool>(
++      context: context,
++      builder: (BuildContext context) => AlertDialog(
++        key: HostPanelScreen.deleteDialogKey,
++        title: const Text('Delete seed video?'),
++        content: Text(
++          'Delete seed "$seedId"? Its previews and live manifest entry are '
++          'removed immediately. Accounting records are preserved. This '
++          'cannot be undone.',
++        ),
++        actions: <Widget>[
++          TextButton(
++            key: HostPanelScreen.deleteCancelKey,
++            onPressed: () => Navigator.of(context).pop(false),
++            child: const Text('CANCEL'),
++          ),
++          TextButton(
++            key: HostPanelScreen.deleteConfirmKey,
++            onPressed: () => Navigator.of(context).pop(true),
++            child: const Text('DELETE'),
++          ),
++        ],
++      ),
++    );
++    if (confirmed != true || !mounted) return;
+     setState(() {
+       _busySeeds.add(seedId);
+       _actionError = null;
+diff --git a/apps/companion_app/test/host_flow_test.dart b/apps/companion_app/test/host_flow_test.dart
+index 17eda0bca945ad280a9f1f4fa89caf98e3e591a5..388e36726f5e2c3b561e9aa504c74bf7eb339495 100644
+--- a/apps/companion_app/test/host_flow_test.dart
++++ b/apps/companion_app/test/host_flow_test.dart
+@@ -37,14 +37,17 @@ const String kGuestDeviceId = 'p-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+ const String kHostDeviceId = 'p-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+ const String kHostToken =
+     'hi-0123456789abcdef0123456789abcdef0123456789abcdef01';
++const String kHostPairingCode = '123456';
+ 
+ String hostPayload({
+   String party = 'party-1',
+   String channel = 'cctv',
+   String token = kHostToken,
++  String? pairingCode = kHostPairingCode,
+ }) =>
+     '{"partyId":"$party","channelId":"$channel","role":"host",'
+-    '"inviteToken":"$token"}';
++    '"inviteToken":"$token"'
++    '${pairingCode == null ? '' : ',"pairingCode":"$pairingCode"'}}';
+ 
+ GuestJoinData hostData({
+   String party = 'party-1',
+@@ -434,10 +437,70 @@ void main() {
+     });
+   });
+ 
++  group('host join client (pairing code contract)', () {
++    test('redeem sends the pairing code with the invite scope', () async {
++      final FakeHostJoinInvoker invoker = FakeHostJoinInvoker();
++      await HostJoinClient(invoker: invoker).redeem(
++        partyId: 'party-1',
++        deviceId: kHostDeviceId,
++        channelId: 'cctv',
++        inviteToken: kHostToken,
++        pairingCode: kHostPairingCode,
++      );
++      expect(invoker.calls, 1);
++      expect(invoker.lastPayload, <String, Object?>{
++        'partyId': 'party-1',
++        'deviceId': kHostDeviceId,
++        'channelId': 'cctv',
++        'inviteToken': kHostToken,
++        'pairingCode': kHostPairingCode,
++      });
++    });
++
++    test('malformed pairing codes fail before any network call', () async {
++      final FakeHostJoinInvoker invoker = FakeHostJoinInvoker();
++      final HostJoinClient client = HostJoinClient(invoker: invoker);
++      for (final String bad in <String>['12345', 'abcdef', '1234567', '']) {
++        await expectLater(
++          client.redeem(
++            partyId: 'party-1',
++            deviceId: kHostDeviceId,
++            channelId: 'cctv',
++            inviteToken: kHostToken,
++            pairingCode: bad,
++          ),
++          throwsFormatException,
++        );
++      }
++      expect(invoker.calls, 0);
++    });
++
++    test('denial surfaces without the pairing code leaking', () async {
++      final FakeHostJoinInvoker invoker = FakeHostJoinInvoker()
++        ..failure = cloud_functions.FirebaseFunctionsException(
++          code: 'permission-denied',
++          message: 'FORBIDDEN: wrong pairing code detail must never surface',
++          details: const <String, Object?>{'errorCode': 'FORBIDDEN'},
++        );
++      await expectLater(
++        HostJoinClient(invoker: invoker).redeem(
++          partyId: 'party-1',
++          deviceId: kHostDeviceId,
++          channelId: 'cctv',
++          inviteToken: kHostToken,
++          pairingCode: '000000',
++        ),
++        throwsA(isA<ManifestTransportException>()),
++      );
++      expect(invoker.calls, 1);
++    });
++  });
++
+   group('host entry screen (real parser, fake scanner boundary)', () {
+     Future<void> pumpEntry(
+       WidgetTester tester, {
+-      required void Function(GuestJoinData data) onHostJoin,
++      void Function(GuestJoinData data)? onHostJoin,
++      void Function(GuestJoinData data, String pairingCode)? onHostJoinWithCode,
+       JoinPayloadScanner scanner = const UnavailableJoinPayloadScanner(),
+     }) async {
+       SharedPreferences.setMockInitialValues(<String, Object>{
+@@ -447,7 +510,17 @@ void main() {
+       await tester.pumpWidget(
+         MaterialApp(
+           home: HostEntryScreen(
+-            onHostJoin: (data) async => onHostJoin(data),
++            onHostJoin: (GuestJoinData data) async {
++              final void Function(GuestJoinData data)? legacy = onHostJoin;
++              if (legacy == null) {
++                fail('unexpected legacy host join');
++              }
++              legacy(data);
++            },
++            onHostJoinWithCode: onHostJoinWithCode == null
++                ? null
++                : (GuestJoinData data, String pairingCode) async =>
++                      onHostJoinWithCode(data, pairingCode),
+             onJoinAsGuest: () {},
+             scanner: scanner,
+           ),
+@@ -456,13 +529,14 @@ void main() {
+       await tester.pumpAndSettle();
+     }
+ 
+-    testWidgets('boot offers scan, paste, retry, and a guest route', (
++    testWidgets('boot offers scan, paste, code, and a guest route', (
+       tester,
+     ) async {
+       GuestJoinData? received;
+       await pumpEntry(tester, onHostJoin: (data) => received = data);
+       expect(find.byKey(HostEntryScreen.scanKey), findsOneWidget);
+       expect(find.byKey(HostEntryScreen.payloadFieldKey), findsOneWidget);
++      expect(find.byKey(HostEntryScreen.pairingCodeFieldKey), findsOneWidget);
+       expect(find.byKey(HostEntryScreen.submitKey), findsOneWidget);
+       expect(find.byKey(HostEntryScreen.joinAsGuestKey), findsOneWidget);
+       expect(received, isNull);
+@@ -472,17 +546,28 @@ void main() {
+     testWidgets('scan and paste reach the same host payload (parity)', (
+       tester,
+     ) async {
+-      GuestJoinData? scanned;
++      GuestJoinData? scannedData;
++      String? scannedCode;
+       await pumpEntry(
+         tester,
+-        onHostJoin: (data) => scanned = data,
++        onHostJoinWithCode: (data, code) {
++          scannedData = data;
++          scannedCode = code;
++        },
+         scanner: FakeScanner(JoinPayloadText(hostPayload())),
+       );
+       await tester.tap(find.byKey(HostEntryScreen.scanKey));
+       await tester.pumpAndSettle();
+ 
+-      GuestJoinData? pasted;
+-      await pumpEntry(tester, onHostJoin: (data) => pasted = data);
++      GuestJoinData? pastedData;
++      String? pastedCode;
++      await pumpEntry(
++        tester,
++        onHostJoinWithCode: (data, code) {
++          pastedData = data;
++          pastedCode = code;
++        },
++      );
+       await tester.enterText(
+         find.byKey(HostEntryScreen.payloadFieldKey),
+         hostPayload(),
+@@ -490,14 +575,74 @@ void main() {
+       await tester.tap(find.byKey(HostEntryScreen.submitKey));
+       await tester.pumpAndSettle();
+ 
+-      expect(scanned, isNotNull);
+-      expect(pasted, isNotNull);
+-      expect(scanned, pasted);
+-      expect(scanned?.role, JoinRole.host);
+-      expect(scanned?.inviteToken, kHostToken);
++      expect(scannedData, isNotNull);
++      expect(pastedData, isNotNull);
++      expect(scannedData, pastedData);
++      expect(scannedData?.role, JoinRole.host);
++      expect(scannedData?.inviteToken, kHostToken);
++      // The pairing code parses out of the payload on both routes.
++      expect(scannedCode, kHostPairingCode);
++      expect(pastedCode, kHostPairingCode);
+       // The host phone identity is separate from the guest identity.
+-      expect(scanned?.deviceId.value, kHostDeviceId);
+-      expect(scanned?.deviceId.value, isNot(kGuestDeviceId));
++      expect(scannedData?.deviceId.value, kHostDeviceId);
++      expect(scannedData?.deviceId.value, isNot(kGuestDeviceId));
++      expect(tester.takeException(), isNull);
++    });
++
++    testWidgets('a manually typed code wins over a stale payload code', (
++      tester,
++    ) async {
++      String? receivedCode;
++      await pumpEntry(
++        tester,
++        onHostJoinWithCode: (_, code) => receivedCode = code,
++      );
++      await tester.enterText(
++        find.byKey(HostEntryScreen.payloadFieldKey),
++        hostPayload(pairingCode: '999999'),
++      );
++      await tester.enterText(
++        find.byKey(HostEntryScreen.pairingCodeFieldKey),
++        '000007',
++      );
++      await tester.tap(find.byKey(HostEntryScreen.submitKey));
++      await tester.pumpAndSettle();
++      expect(receivedCode, '000007');
++      expect(find.byKey(HostEntryScreen.errorKey), findsNothing);
++    });
++
++    testWidgets('missing or malformed codes fail before any network', (
++      tester,
++    ) async {
++      var joined = 0;
++      await pumpEntry(tester, onHostJoin: (_) => joined++);
++      // A payload without a minted code and no manual entry: the 6-digit
++      // requirement fails visibly before any network call.
++      await tester.enterText(
++        find.byKey(HostEntryScreen.payloadFieldKey),
++        hostPayload(pairingCode: null),
++      );
++      await tester.tap(find.byKey(HostEntryScreen.submitKey));
++      await tester.pumpAndSettle();
++      expect(joined, 0);
++      expect(find.byKey(HostEntryScreen.errorKey), findsOneWidget);
++      expect(
++        tester.widget<Text>(find.byKey(HostEntryScreen.errorKey)).data,
++        contains('pairing code'),
++      );
++
++      // Malformed codes fail the same way without touching the join.
++      await tester.enterText(
++        find.byKey(HostEntryScreen.pairingCodeFieldKey),
++        '12345',
++      );
++      await tester.tap(find.byKey(HostEntryScreen.submitKey));
++      await tester.pumpAndSettle();
++      expect(joined, 0);
++      expect(
++        tester.widget<Text>(find.byKey(HostEntryScreen.errorKey)).data,
++        contains('pairing code'),
++      );
+       expect(tester.takeException(), isNull);
+     });
+ 
+@@ -510,6 +655,10 @@ void main() {
+           const JoinPayloadText('{"partyId":"p","channelId":"c"}'),
+         ),
+       );
++      await tester.enterText(
++        find.byKey(HostEntryScreen.pairingCodeFieldKey),
++        kHostPairingCode,
++      );
+       await tester.tap(find.byKey(HostEntryScreen.scanKey));
+       await tester.pumpAndSettle();
+       expect(joined, isFalse);
+@@ -524,6 +673,10 @@ void main() {
+         find.byKey(HostEntryScreen.payloadFieldKey),
+         '{"partyId":"p","channelId":"c","role":"admin"}',
+       );
++      await tester.enterText(
++        find.byKey(HostEntryScreen.pairingCodeFieldKey),
++        kHostPairingCode,
++      );
+       await tester.tap(find.byKey(HostEntryScreen.submitKey));
+       await tester.pumpAndSettle();
+       expect(joined, isFalse);
+@@ -534,6 +687,29 @@ void main() {
+       );
+     });
+ 
++    testWidgets('host denial surfaces the generic error on the entry', (
++      tester,
++    ) async {
++      await pumpEntry(
++        tester,
++        onHostJoinWithCode: (_, _) {
++          throw const HostJoinException('Access was denied.');
++        },
++      );
++      await tester.enterText(
++        find.byKey(HostEntryScreen.payloadFieldKey),
++        hostPayload(),
++      );
++      await tester.enterText(
++        find.byKey(HostEntryScreen.pairingCodeFieldKey),
++        '000000',
++      );
++      await tester.tap(find.byKey(HostEntryScreen.submitKey));
++      await tester.pumpAndSettle();
++      expect(find.text('Access was denied.'), findsOneWidget);
++      expect(find.textContaining('wrong'), findsNothing);
++    });
++
+     testWidgets('legacy guest payloads route to the guest form, not host', (
+       tester,
+     ) async {
+@@ -639,7 +815,7 @@ void main() {
+       await flush(tester);
+     });
+ 
+-    testWidgets('delete success reconciles; failure stays retryable', (
++    testWidgets('delete asks to confirm, then reconciles on success', (
+       tester,
+     ) async {
+       mediaInvoker.seeds.addAll(<Map<String, Object?>>[
+@@ -648,10 +824,37 @@ void main() {
+       ]);
+       final HostSession session = await joinedSession();
+       await pumpPanel(tester, session);
++      // The delete dialog names the seed and states the blast radius.
+       await tapVisible(tester, find.byKey(HostPanelScreen.deleteKey('a')));
+       await flush(tester);
++      expect(find.byKey(HostPanelScreen.deleteDialogKey), findsOneWidget);
++      expect(find.textContaining('"a"'), findsOneWidget);
++      expect(find.textContaining('previews'), findsOneWidget);
++      expect(find.textContaining('manifest'), findsOneWidget);
++      // CANCEL keeps the selection: no callable, row stays.
++      await tapVisible(tester, find.byKey(HostPanelScreen.deleteCancelKey));
++      await flush(tester);
++      expect(find.byKey(HostPanelScreen.deleteDialogKey), findsNothing);
++      expect(mediaInvoker.names.where((n) => n == kDeleteHostVideo), isEmpty);
++      expect(find.textContaining('a · Ready'), findsOneWidget);
++      // Confirm deletes and reconciles only after authoritative success.
++      await tapVisible(tester, find.byKey(HostPanelScreen.deleteKey('a')));
++      await flush(tester);
++      await tapVisible(tester, find.byKey(HostPanelScreen.deleteConfirmKey));
++      await flush(tester);
+       expect(find.textContaining('a · Ready'), findsNothing);
+       expect(find.textContaining('b · Ready'), findsOneWidget);
++      await session.dispose();
++      await flush(tester);
++      expect(tester.takeException(), isNull);
++    });
++
++    testWidgets('delete failure keeps the selection retryable', (tester) async {
++      mediaInvoker.seeds.addAll(<Map<String, Object?>>[
++        FakeHostMediaInvoker.seedJson('b', 'ready'),
++      ]);
++      final HostSession session = await joinedSession();
++      await pumpPanel(tester, session);
+       mediaInvoker.failure = cloud_functions.FirebaseFunctionsException(
+         code: 'permission-denied',
+         message: 'denied',
+@@ -659,6 +862,8 @@ void main() {
+       );
+       await tapVisible(tester, find.byKey(HostPanelScreen.deleteKey('b')));
+       await flush(tester);
++      await tapVisible(tester, find.byKey(HostPanelScreen.deleteConfirmKey));
++      await flush(tester);
+       expect(find.byKey(HostPanelScreen.messageKey), findsOneWidget);
+       expect(find.textContaining('b · Ready'), findsOneWidget);
+       await session.dispose();
+@@ -832,6 +1037,13 @@ void main() {
+         find.byKey(HostEntryScreen.payloadFieldKey),
+         hostPayload(),
+       );
++      // The minted pairing code travels with the payload (prefilled), but
++      // the typed field is authoritative: enter it explicitly.
++      await enterVisible(
++        tester,
++        find.byKey(HostEntryScreen.pairingCodeFieldKey),
++        kHostPairingCode,
++      );
+       await tapVisible(tester, find.byKey(HostEntryScreen.submitKey));
+       await flush(tester);
+       // Scope validated -> panel with the server-backed catalog.
+@@ -855,6 +1067,11 @@ void main() {
+         find.byKey(HostEntryScreen.payloadFieldKey),
+         hostPayload(),
+       );
++      await enterVisible(
++        tester,
++        find.byKey(HostEntryScreen.pairingCodeFieldKey),
++        '000000',
++      );
+       await tapVisible(tester, find.byKey(HostEntryScreen.submitKey));
+       await flush(tester);
+       expect(find.byType(HostPanelScreen), findsNothing);
+@@ -872,6 +1089,11 @@ void main() {
+         find.byKey(HostEntryScreen.payloadFieldKey),
+         '{"partyId":"party-1","channelId":"cctv"}',
+       );
++      await enterVisible(
++        tester,
++        find.byKey(HostEntryScreen.pairingCodeFieldKey),
++        kHostPairingCode,
++      );
+       await tapVisible(tester, find.byKey(HostEntryScreen.submitKey));
+       await flush(tester);
+       expect(joinInvoker.calls, 0);
+@@ -886,6 +1108,11 @@ void main() {
+         find.byKey(HostEntryScreen.payloadFieldKey),
+         hostPayload(),
+       );
++      await enterVisible(
++        tester,
++        find.byKey(HostEntryScreen.pairingCodeFieldKey),
++        kHostPairingCode,
++      );
+       await tapVisible(tester, find.byKey(HostEntryScreen.submitKey));
+       await flush(tester);
+       expect(find.byType(HostPanelScreen), findsOneWidget);
+@@ -910,6 +1137,11 @@ void main() {
+         find.byKey(HostEntryScreen.payloadFieldKey),
+         hostPayload(),
+       );
++      await enterVisible(
++        tester,
++        find.byKey(HostEntryScreen.pairingCodeFieldKey),
++        kHostPairingCode,
++      );
+       await tapVisible(tester, find.byKey(HostEntryScreen.submitKey));
+       await flush(tester);
+       expect(find.byKey(HostEntryScreen.errorKey), findsOneWidget);
+diff --git a/apps/companion_app/test/host_media_client_test.dart b/apps/companion_app/test/host_media_client_test.dart
+index a67978c48ad81639b926171093232d91291e4a6f..8df22747e009701e4cef869c3581420564b2c0fc 100644
+--- a/apps/companion_app/test/host_media_client_test.dart
++++ b/apps/companion_app/test/host_media_client_test.dart
+@@ -233,6 +233,73 @@ void main() {
+     );
+   });
+ 
++  test('rejects cameraIds entries outside the canonical set', () async {
++    final invoker = FakeHostMediaInvoker();
++    final client = HostMediaClient(invoker: invoker);
++    Future<void> expectBadCameras(List<Object?> cameras) async {
++      invoker.nextResponse = <String, Object?>{
++        'videos': <Object?>[
++          <String, Object?>{
++            'seedId': 'x',
++            'partyId': 'party-1',
++            'channelId': 'cctv',
++            'status': 'ready',
++            'jobId': 'hv-x',
++            'createdAt': '2026-10-29T14:00:00.000Z',
++            'expiresAt': '2030-01-01T00:00:00.000Z',
++            'previewAvailable': true,
++            'cameraIds': cameras,
++          },
++        ],
++      };
++      await expectLater(
++        client.listVideos(
++          partyId: 'party-1',
++          deviceId: 'p-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
++          channelId: 'cctv',
++        ),
++        throwsFormatException,
++      );
++    }
++
++    // Non-string entries are never coerced.
++    await expectBadCameras(<Object?>['CAM-01', 42, 'CAM-03', 'CAM-04']);
++    await expectBadCameras(<Object?>['CAM-01', null, 'CAM-03', 'CAM-04']);
++    // Blanks are rejected.
++    await expectBadCameras(<Object?>['CAM-01', '', 'CAM-03', 'CAM-04']);
++    await expectBadCameras(<Object?>['CAM-01', '   ', 'CAM-03', 'CAM-04']);
++    // Unknown cameras are rejected even when well-formed strings.
++    await expectBadCameras(<Object?>['CAM-01', 'CAM-09', 'CAM-03', 'CAM-04']);
++    await expectBadCameras(<Object?>['CAM-01', 'cam-01', 'CAM-03', 'CAM-04']);
++    // The full canonical set still parses.
++    invoker.nextResponse = <String, Object?>{
++      'videos': <Object?>[
++        <String, Object?>{
++          'seedId': 'ok',
++          'partyId': 'party-1',
++          'channelId': 'cctv',
++          'status': 'ready',
++          'jobId': 'hv-ok',
++          'createdAt': '2026-10-29T14:00:00.000Z',
++          'expiresAt': '2030-01-01T00:00:00.000Z',
++          'previewAvailable': true,
++          'cameraIds': const <String>['CAM-01', 'CAM-02', 'CAM-03', 'CAM-04'],
++        },
++      ],
++    };
++    final List<HostSeedVideo> videos = await client.listVideos(
++      partyId: 'party-1',
++      deviceId: 'p-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
++      channelId: 'cctv',
++    );
++    expect(videos.single.cameraIds, <String>[
++      'CAM-01',
++      'CAM-02',
++      'CAM-03',
++      'CAM-04',
++    ]);
++  });
++
+   test('bounds a callable that never completes', () async {
+     final client = HostMediaClient(
+       invoker: _PendingInvoker(),
+diff --git a/apps/tv_app/README.md b/apps/tv_app/README.md
+index 34a978c930647b02f148cfb09b4a4049034cc774..beaa358bbcbc35feca1194a8fba0d5d1c19ac9b4 100644
+--- a/apps/tv_app/README.md
++++ b/apps/tv_app/README.md
+@@ -63,3 +63,21 @@ re-verifies the app-private committed files before changing the wall;
+ restored on the next boot. Live manifests are staged and acknowledged before
+ activation, and each changed tile is replaced in sequence so the wall never
+ allocates more than four decoders.
++
++## Host QR + guest codes
++
++The recovery panel links two separately labelled destinations:
++
++- `HOST QR`: the TV mints a short-lived host invite (`createHostInvite`)
++  and shows exactly one QR plus the 6-digit pairing code beside it. Both
++  are required on the companion host entry; a wrong code denies exactly
++  like an unknown invite. Below the invite, active hosts are listed by
++  label only (device ids never render) with a confirmed revoke action
++  (`revokeHostDevice`, TV-only).
++- `GUEST CODES`: party/channel scope plus one session QR for guests. The
++  TV device id authorizes the listing request but is never displayed.
++
++An unsupported manifest clip count (anything but 1, 2, or 4) fails
++closed to a SIGNAL-LOST/cache state instead of throwing during
++construction; a held D-pad direction keeps traversing through key
++repeats while held select never retriggers the hero.
+diff --git a/apps/tv_app/lib/src/wall/guest_code_panel.dart b/apps/tv_app/lib/src/wall/guest_code_panel.dart
+index 2a3066dbb6c32f5f6ca41b0e50989573566aa3c0..9d4386cbe4578827323a56894c1eb76b1c05fe8f 100644
+--- a/apps/tv_app/lib/src/wall/guest_code_panel.dart
++++ b/apps/tv_app/lib/src/wall/guest_code_panel.dart
+@@ -1,11 +1,13 @@
+ /// Host-visible party code panel (D-pad settings overlay page).
+ ///
+-/// Shows the TV's own party/device code as large text, exactly one QR
++/// Shows the party/channel session scope as text plus exactly one QR
+ /// encoding the authoritative anonymous session payload (opaque identifiers
+ /// only — never URLs, device ids, or secrets), and the joined guest device
+-/// list. The session (scope + optional PIN) always comes from the host-only
+-/// `listPartyDevices` response via [GuestCodeClient]; nothing is fabricated
+-/// from build-time config.
++/// list. The TV's own device id is NEVER rendered here: it authorizes the
++/// host-only `listPartyDevices` request but stays off the screen, so guests
++/// reading over a shoulder learn nothing. The session (scope + optional
++/// PIN) always comes from the host-only `listPartyDevices` response via
++/// [GuestCodeClient]; nothing is fabricated from build-time config.
+ ///
+ /// Refresh: one fetch immediately on open plus a bounded periodic refresh
+ /// while visible. Overlapping requests are skipped, timers are cancelled on
+@@ -56,7 +58,8 @@ const Duration kGuestCodeRefreshInterval = Duration(seconds: 10);
+ /// `_fetching` true forever and wedge the panel (no retries, stale rows).
+ const Duration kGuestCodeFetchTimeout = Duration(seconds: 10);
+ 
+-/// Host panel: TV code (large text + session QR) and the guest list.
++/// Host panel: party/channel session scope (large text + session QR) and
++/// the guest list.
+ ///
+ /// Owns its listing refresh: fetches immediately on open and re-fetches on
+ /// [refreshInterval] while mounted. Pass a fake [GuestCodeClient.invoker] in
+@@ -74,9 +77,16 @@ class GuestCodePanel extends StatefulWidget {
+   });
+ 
+   /// Host-only listing reader (authorization carries the TV's device id).
++  ///
++  /// The id authorizes the request only and is never rendered: no screen
++  /// may display the raw TV device id to guests.
+   final GuestCodeClient client;
+ 
+-  /// TV's own device code, shown as large text.
++  /// TV's own device code (request authorization only; never displayed).
++  ///
++  /// Retained so the wall keeps passing its authorized identity through one
++  /// seam; the panel renders party/channel scope from the authoritative
++  /// listing instead.
+   final String tvDeviceId;
+ 
+   /// Closes the whole overlay.
+@@ -213,31 +223,7 @@ class _GuestCodePanelState extends State<GuestCodePanel> {
+                     Row(
+                       crossAxisAlignment: CrossAxisAlignment.start,
+                       children: <Widget>[
+-                        Expanded(
+-                          child: Column(
+-                            crossAxisAlignment: CrossAxisAlignment.start,
+-                            children: <Widget>[
+-                              const Text(
+-                                'TV CODE',
+-                                style: TextStyle(
+-                                  color: Color(0xFFFFC107),
+-                                  fontSize: 20,
+-                                ),
+-                              ),
+-                              const SizedBox(height: 4),
+-                              Text(
+-                                widget.tvDeviceId,
+-                                style: const TextStyle(
+-                                  color: Colors.white,
+-                                  fontSize: 44,
+-                                  fontWeight: FontWeight.bold,
+-                                ),
+-                              ),
+-                              const SizedBox(height: 8),
+-                              _sessionLine(),
+-                            ],
+-                          ),
+-                        ),
++                        Expanded(child: _sessionLine()),
+                         _qrBox(),
+                       ],
+                     ),
+diff --git a/apps/tv_app/lib/src/wall/host_code_panel.dart b/apps/tv_app/lib/src/wall/host_code_panel.dart
+index 372a36683a7421011d3f3f0bf905639303fc89f6..01b8fcf99eb67e451f179d2105d493e247fd03b2 100644
+--- a/apps/tv_app/lib/src/wall/host_code_panel.dart
++++ b/apps/tv_app/lib/src/wall/host_code_panel.dart
+@@ -1,22 +1,30 @@
+-/// Host invite panel (TV settings overlay page, separately labelled HOST QR).
++/// Host invite panel (TV settings panel, separately labelled HOST QR).
+ ///
+ /// Shows exactly one QR encoding the scoped host invite capability
+ /// ([buildHostJoinPayload]: `partyId` + `channelId` + `inviteToken` +
+-/// `role: 'host'` — never the TV device identity), the session scope, and
+-/// the server-stated expiry. The invite always comes from the host-only
+-/// `createHostInvite` response via [HostInviteClient]; nothing is fabricated
+-/// from build-time config.
++/// `role: 'host'` + `pairingCode` — never the TV device identity), the
++/// 6-digit pairing code next to the QR (refreshed with every mint), the
++/// session scope, and the server-stated expiry. The invite always comes
++/// from the host-only `createHostInvite` response via [HostInviteClient];
++/// nothing is fabricated from build-time config.
+ ///
+-/// States: loading (no fabricated QR), ready (QR + REFRESH re-mint),
+-/// expired (stale capability hidden, refresh offered), denial/error (reason
+-/// shown, last valid session retained when one exists), and unavailable
+-/// (no [HostInviteClient] — the wall never opens this destination, like the
+-/// offline guest-codes path).
++/// Below the invite, the panel lists active host devices as LABELS ONLY
++/// (via [HostDeviceClient]) plus a revoke action per row. Device ids are
++/// never rendered; they travel only inside the `revokeHostDevice` request.
++/// Revocation is confirmed through a dialog naming the host label and
++/// stating that previews + the live manifest entry are removed; the row
++/// stays until the server confirms.
+ ///
+-/// Refresh is manual (REFRESH re-mints) plus a 1s expiry ticker that hides
+-/// the QR the moment the invite lapses. Overlapping mints are skipped,
+-/// timers are cancelled on disposal, and late responses after disposal are
+-/// ignored.
++/// States: loading (no fabricated QR), ready (QR + pairing code + REFRESH
++/// re-mint), expired (stale capability hidden, refresh offered),
++/// denial/error (reason shown, last valid session retained when one
++/// exists), and unavailable (no [HostInviteClient] — the wall never opens
++/// this destination, like the offline guest-codes path).
++///
++/// Refresh is manual (REFRESH re-mints and re-lists) plus a 1s expiry
++/// ticker that hides the QR the moment the invite lapses. Overlapping
++/// mints are skipped, timers are cancelled on disposal, and late responses
++/// after disposal are ignored.
+ library;
+ 
+ import 'dart:async';
+@@ -44,6 +52,9 @@ const Key kHostCodeQrKey = ValueKey<String>('host-code-qr');
+ /// Key of the session scope/expiry line.
+ const Key kHostCodeSessionKey = ValueKey<String>('host-code-session');
+ 
++/// Key of the pairing-code line shown next to the HOST QR.
++const Key kHostPairingCodeKey = ValueKey<String>('host-pairing-code');
++
+ /// Key of the manual refresh button.
+ const Key kHostCodeRefreshKey = ValueKey<String>('host-code-refresh');
+ 
+@@ -56,21 +67,42 @@ const Key kHostCodeErrorKey = ValueKey<String>('host-code-error');
+ /// Key of the expired-invite text.
+ const Key kHostCodeExpiryKey = ValueKey<String>('host-code-expiry');
+ 
++/// Key of the active-host list body.
++const Key kHostDeviceListKey = ValueKey<String>('host-device-list');
++
++/// Key of the empty-host-list text.
++const Key kHostDeviceEmptyKey = ValueKey<String>('host-device-empty');
++
++/// Key of the host-list error text.
++const Key kHostDeviceErrorKey = ValueKey<String>('host-device-error');
++
++/// Key of the revoke confirmation dialog.
++const Key kHostRevokeDialogKey = ValueKey<String>('host-revoke-dialog');
++
++/// Key of the revoke confirmation button.
++const Key kHostRevokeConfirmKey = ValueKey<String>('host-revoke-confirm');
++
++/// Key of the revoke cancellation button.
++const Key kHostRevokeCancelKey = ValueKey<String>('host-revoke-cancel');
++
+ /// Bounds a single invite mint: without this, a hung callable would hold
+ /// `_fetching` true forever and wedge the panel (no retries, stale QR).
+ const Duration kHostInviteFetchTimeout = Duration(seconds: 10);
+ 
+-/// Host panel: scoped invite QR + expiry + manual refresh.
++/// Host panel: scoped invite QR + pairing code + host list + revoke.
+ ///
+ /// Owns its mint: fetches immediately on open and re-evaluates expiry on a
+ /// 1s ticker while mounted. Pass a fake [HostInviteClient.invoker] in widget
+-/// tests; production passes the real Cloud Functions client.
++/// tests; production passes the real Cloud Functions client. Pass a fake
++/// [HostDeviceClient.invoker] (or null) for the host-management section;
++/// null hides the list (offline builds stay on invite-only).
+ class HostCodePanel extends StatefulWidget {
+   /// Creates the host code panel.
+   const HostCodePanel({
+     super.key,
+     required this.client,
+     required this.onClose,
++    this.devicesClient,
+     this.onBack,
+     this.primaryFocusNode,
+     this.clock = const SystemClock(),
+@@ -82,6 +114,9 @@ class HostCodePanel extends StatefulWidget {
+   /// Closes the whole overlay.
+   final VoidCallback onClose;
+ 
++  /// Host-management reader/revoker; null hides the host list section.
++  final HostDeviceClient? devicesClient;
++
+   /// Returns to the recovery actions; null hides the back button.
+   final VoidCallback? onBack;
+ 
+@@ -91,6 +126,11 @@ class HostCodePanel extends StatefulWidget {
+   /// Clock for expiry evaluation (injectable for deterministic tests).
+   final Clock clock;
+ 
++  /// Revoke-button key for the row labelled [label] (labels only; the
++  /// device id never appears in the widget tree).
++  static Key revokeKeyFor(String label) =>
++      ValueKey<String>('host-device-revoke-$label');
++
+   @override
+   State<HostCodePanel> createState() => _HostCodePanelState();
+ }
+@@ -103,6 +143,11 @@ class _HostCodePanelState extends State<HostCodePanel> {
+   int _generation = 0;
+   Timer? _expiryTimer;
+ 
++  List<HostManagedDevice> _devices = const <HostManagedDevice>[];
++  String? _devicesError;
++  bool _devicesLoading = false;
++  final Set<String> _revoking = <String>{};
++
+   @override
+   void initState() {
+     super.initState();
+@@ -175,6 +220,112 @@ class _HostCodePanelState extends State<HostCodePanel> {
+     } finally {
+       _fetching = false;
+     }
++    await _refreshDevices(generation: generation);
++  }
++
++  Future<void> _refreshDevices({required int generation}) async {
++    final HostDeviceClient? devices = widget.devicesClient;
++    if (devices == null || !mounted || generation != _generation) {
++      return;
++    }
++    if (_devicesLoading) {
++      return;
++    }
++    setState(() {
++      _devicesLoading = true;
++    });
++    try {
++      final List<HostManagedDevice> hosts = await devices.listHosts().timeout(
++        kHostInviteFetchTimeout,
++      );
++      if (!mounted || generation != _generation) {
++        return;
++      }
++      setState(() {
++        _devices = hosts;
++        _devicesError = null;
++        _devicesLoading = false;
++      });
++    } on TimeoutException {
++      if (!mounted || generation != _generation) {
++        return;
++      }
++      setState(() {
++        _devicesError = 'host list refresh timed out';
++        _devicesLoading = false;
++      });
++    } on Object catch (error) {
++      if (!mounted || generation != _generation) {
++        return;
++      }
++      setState(() {
++        _devicesError = error is HostDeviceException
++            ? error.message
++            : 'unexpected host list failure';
++        _devicesLoading = false;
++      });
++    }
++  }
++
++  Future<void> _confirmAndRevoke(HostManagedDevice target) async {
++    final bool? confirmed = await showDialog<bool>(
++      context: context,
++      builder: (BuildContext context) => AlertDialog(
++        key: kHostRevokeDialogKey,
++        title: const Text('Revoke host access?'),
++        content: Text(
++          'Remove host "${target.displayLabel}"? Their previews and live '
++          'manifest entry are removed immediately. This cannot be undone — '
++          'they must scan a fresh Host QR with a new pairing code to rejoin.',
++        ),
++        actions: <Widget>[
++          TextButton(
++            key: kHostRevokeCancelKey,
++            onPressed: () => Navigator.of(context).pop(false),
++            child: const Text('CANCEL'),
++          ),
++          TextButton(
++            key: kHostRevokeConfirmKey,
++            onPressed: () => Navigator.of(context).pop(true),
++            child: const Text('REVOKE'),
++          ),
++        ],
++      ),
++    );
++    if (confirmed != true || !mounted) {
++      return;
++    }
++    final HostDeviceClient? devices = widget.devicesClient;
++    if (devices == null || _revoking.contains(target.deviceId)) {
++      return;
++    }
++    // The row stays until the server confirms: selection is never cleared
++    // optimistically, so a failure stays retryable in place.
++    setState(() {
++      _revoking.add(target.deviceId);
++      _devicesError = null;
++    });
++    final int generation = _generation;
++    try {
++      await devices.revokeHost(target.deviceId);
++      if (!mounted || generation != _generation) {
++        return;
++      }
++      setState(() {
++        _revoking.remove(target.deviceId);
++      });
++      await _refreshDevices(generation: generation);
++    } on Object catch (error) {
++      if (!mounted || generation != _generation) {
++        return;
++      }
++      setState(() {
++        _revoking.remove(target.deviceId);
++        _devicesError = error is HostDeviceException
++            ? error.message
++            : 'unexpected host revoke failure';
++      });
++    }
+   }
+ 
+   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
+@@ -219,7 +370,8 @@ class _HostCodePanelState extends State<HostCodePanel> {
+                     const SizedBox(height: 8),
+                     const Text(
+                       'On the companion app, open the host entry and scan '
+-                      'this code. Guests use GUEST CODES instead — the guest '
++                      'this code, then type the pairing code shown beside it. '
++                      'Guests use GUEST CODES instead — the guest '
+                       'PIN can never grant host access.',
+                       style: TextStyle(color: Colors.white70, fontSize: 18),
+                     ),
+@@ -240,6 +392,8 @@ class _HostCodePanelState extends State<HostCodePanel> {
+                               ),
+                               const SizedBox(height: 4),
+                               _sessionLine(),
++                              const SizedBox(height: 12),
++                              _pairingLine(),
+                             ],
+                           ),
+                         ),
+@@ -248,6 +402,18 @@ class _HostCodePanelState extends State<HostCodePanel> {
+                     ),
+                     const SizedBox(height: 8),
+                     _stateLine(),
++                    if (widget.devicesClient != null) ...<Widget>[
++                      const SizedBox(height: 20),
++                      const Text(
++                        'ACTIVE HOSTS',
++                        style: TextStyle(
++                          color: Color(0xFFFFC107),
++                          fontSize: 20,
++                        ),
++                      ),
++                      const SizedBox(height: 8),
++                      _hostListBody(),
++                    ],
+                     const SizedBox(height: 20),
+                     FocusTraversalGroup(
+                       child: Column(
+@@ -306,6 +472,35 @@ class _HostCodePanelState extends State<HostCodePanel> {
+     );
+   }
+ 
++  /// The 6-digit pairing code beside the HOST QR, refreshed with every
++  /// mint. Hidden while no live, unexpired invite exists.
++  Widget _pairingLine() {
++    final HostInvite? invite = _invite;
++    if (invite == null || _expired) {
++      return const SizedBox.shrink();
++    }
++    return Column(
++      crossAxisAlignment: CrossAxisAlignment.start,
++      mainAxisSize: MainAxisSize.min,
++      children: <Widget>[
++        const Text(
++          'PAIRING CODE',
++          style: TextStyle(color: Color(0xFFFFC107), fontSize: 20),
++        ),
++        const SizedBox(height: 4),
++        Text(
++          invite.pairingCode,
++          key: kHostPairingCodeKey,
++          style: const TextStyle(
++            color: Colors.white,
++            fontSize: 44,
++            fontWeight: FontWeight.bold,
++          ),
++        ),
++      ],
++    );
++  }
++
+   /// Exactly one QR while a live, unexpired invite exists; no fabricated
+   /// QR before the first successful mint, and the stale capability is
+   /// hidden the moment it lapses.
+@@ -330,6 +525,7 @@ class _HostCodePanelState extends State<HostCodePanel> {
+       partyId: invite.partyId,
+       channelId: invite.channelId,
+       inviteToken: invite.inviteToken,
++      pairingCode: invite.pairingCode,
+     );
+     return Container(
+       padding: const EdgeInsets.all(12),
+@@ -391,6 +587,88 @@ class _HostCodePanelState extends State<HostCodePanel> {
+     }
+     return const SizedBox.shrink();
+   }
++
++  /// Active hosts as labels only (device ids never rendered), each with a
++  /// revoke action behind a confirmation dialog.
++  Widget _hostListBody() {
++    if (_devicesLoading && _devices.isEmpty && _devicesError == null) {
++      return const Text(
++        'Loading hosts…',
++        style: TextStyle(color: Colors.white70, fontSize: 22),
++      );
++    }
++    if (_devices.isEmpty && _devicesError != null) {
++      return Text(
++        'Host list unavailable: $_devicesError',
++        key: kHostDeviceErrorKey,
++        style: const TextStyle(color: Color(0xFFFFC107), fontSize: 22),
++      );
++    }
++    if (_devices.isEmpty) {
++      return Column(
++        crossAxisAlignment: CrossAxisAlignment.start,
++        mainAxisSize: MainAxisSize.min,
++        children: <Widget>[
++          const Text(
++            'No other hosts yet — new hosts appear here automatically.',
++            key: kHostDeviceEmptyKey,
++            style: TextStyle(color: Colors.white70, fontSize: 22),
++          ),
++          if (_devicesError != null)
++            Padding(
++              padding: const EdgeInsets.only(top: 8),
++              child: Text(
++                'Refresh failed: $_devicesError — showing last list.',
++                key: kHostDeviceErrorKey,
++                style: const TextStyle(color: Color(0xFFFFC107), fontSize: 18),
++              ),
++            ),
++        ],
++      );
++    }
++    return Column(
++      key: kHostDeviceListKey,
++      crossAxisAlignment: CrossAxisAlignment.start,
++      mainAxisSize: MainAxisSize.min,
++      children: <Widget>[
++        for (final HostManagedDevice entry in _devices)
++          Padding(
++            padding: const EdgeInsets.symmetric(vertical: 4),
++            child: Row(
++              children: <Widget>[
++                Expanded(
++                  child: Text(
++                    entry.displayLabel,
++                    style: const TextStyle(color: Colors.white, fontSize: 26),
++                  ),
++                ),
++                if (_revoking.contains(entry.deviceId))
++                  const SizedBox(
++                    width: 24,
++                    height: 24,
++                    child: CircularProgressIndicator(strokeWidth: 2),
++                  )
++                else
++                  TextButton(
++                    key: HostCodePanel.revokeKeyFor(entry.displayLabel),
++                    onPressed: () => unawaited(_confirmAndRevoke(entry)),
++                    child: const Text('REVOKE'),
++                  ),
++              ],
++            ),
++          ),
++        if (_devicesError != null)
++          Padding(
++            padding: const EdgeInsets.only(top: 8),
++            child: Text(
++              'Refresh failed: $_devicesError — showing last list.',
++              key: kHostDeviceErrorKey,
++              style: const TextStyle(color: Color(0xFFFFC107), fontSize: 18),
++            ),
++          ),
++      ],
++    );
++  }
+ }
+ 
+ /// Large, TV-focusable panel action.
+diff --git a/apps/tv_app/lib/src/wall/host_codes.dart b/apps/tv_app/lib/src/wall/host_codes.dart
+index ddb2fe63c3062cff411b7d0f4d27b12589638bff..f652e4475df24a5e9a565df74b5530e6b4c469ba 100644
+--- a/apps/tv_app/lib/src/wall/host_codes.dart
++++ b/apps/tv_app/lib/src/wall/host_codes.dart
+@@ -2,13 +2,17 @@
+ ///
+ /// The TV mints a short-lived host invite through the host-only
+ /// `createHostInvite` callable and presents it as exactly one QR encoding
+-/// the scoped invite capability. The companion redeems it on its dedicated
+-/// host entry screen (Scan Host QR + an explicit Join-as-guest route), so
+-/// host administration is never reachable through the guest PIN or a
++/// the scoped invite capability plus a 6-digit pairing code shown next to
++/// the QR. The companion redeems them on its dedicated host entry screen
++/// (Scan Host QR + an explicit Join-as-guest route) through `joinHost`,
++/// which requires both the invite token and the pairing code; a wrong code
++/// fails with the same generic denial as an unknown invite. Host
++/// administration is never reachable through the guest PIN or a
+ /// client-supplied role string.
+ ///
+ /// Host QR JSON (TV display, companion parse) contains exactly `partyId` +
+-/// `channelId` + `inviteToken` + `role` (`'host'`). It never carries a
++/// `channelId` + `inviteToken` + `role` (`'host'`), plus the `pairingCode`
++/// when minted (newer invites always carry it). It never carries a
+ /// deviceId (in particular never the TV device identity), URL, or secret.
+ /// Role examples live in `test/fixtures/join_roles_v1.json`.
+ library;
+@@ -17,7 +21,8 @@ import 'dart:convert';
+ 
+ import 'package:cloud_functions/cloud_functions.dart';
+ 
+-import 'package:tv_app/src/wall/guest_codes.dart' show CallableInvoker;
++import 'package:tv_app/src/wall/guest_codes.dart'
++    show CallableInvoker, GuestCodeEntry, GuestCodeException, GuestCodeListing;
+ 
+ /// True when [value] looks like a server-minted host invite token.
+ ///
+@@ -26,16 +31,24 @@ import 'package:tv_app/src/wall/guest_codes.dart' show CallableInvoker;
+ bool isValidHostInviteToken(String value) =>
+     value.isNotEmpty && !RegExp(r'^[0-9]{6}$').hasMatch(value);
+ 
++/// True when [value] is a 6-digit host pairing code (leading zeros
++/// significant). The code is a short-lived second factor minted alongside
++/// the invite token and shown next to the HOST QR; `joinHost` requires it
++/// and wrong codes deny exactly like unknown invites.
++bool isValidPairingCode(String value) => RegExp(r'^[0-9]{6}$').hasMatch(value);
++
+ /// Builds the host invite QR payload as a JSON object.
+ ///
+ /// Contains exactly `partyId` + `channelId` + `inviteToken` + `role`
+-/// (`'host'`). Never includes a deviceId. Throws [ArgumentError] when
+-/// [inviteToken] is not a plausible server-minted token (see
+-/// [isValidHostInviteToken]).
++/// (`'host'`), plus `pairingCode` when [pairingCode] is non-null. Never
++/// includes a deviceId. Throws [ArgumentError] when [inviteToken] is not a
++/// plausible server-minted token (see [isValidHostInviteToken]) or when a
++/// non-null [pairingCode] is not six ASCII digits.
+ String buildHostJoinPayload({
+   required String partyId,
+   required String channelId,
+   required String inviteToken,
++  String? pairingCode,
+ }) {
+   if (!isValidHostInviteToken(inviteToken)) {
+     throw ArgumentError.value(
+@@ -44,12 +57,23 @@ String buildHostJoinPayload({
+       'must be a server-minted host invite token',
+     );
+   }
+-  return jsonEncode(<String, String>{
++  if (pairingCode != null && !isValidPairingCode(pairingCode)) {
++    throw ArgumentError.value(
++      pairingCode,
++      'pairingCode',
++      'must be six ASCII digits',
++    );
++  }
++  final Map<String, String> payload = <String, String>{
+     'partyId': partyId,
+     'channelId': channelId,
+     'inviteToken': inviteToken,
+     'role': 'host',
+-  });
++  };
++  if (pairingCode != null) {
++    payload['pairingCode'] = pairingCode;
++  }
++  return jsonEncode(payload);
+ }
+ 
+ /// Failure minting or validating a host invite.
+@@ -71,6 +95,7 @@ final class HostInvite {
+     required this.partyId,
+     required this.channelId,
+     required this.inviteToken,
++    required this.pairingCode,
+     required this.expiresAt,
+   });
+ 
+@@ -83,6 +108,10 @@ final class HostInvite {
+   /// Opaque invite capability (presented once as the QR payload).
+   final String inviteToken;
+ 
++  /// Six-digit pairing code shown next to the HOST QR and required by
++  /// `joinHost` alongside [inviteToken].
++  final String pairingCode;
++
+   /// Server-stated expiry; the panel stops presenting the QR past it.
+   final DateTime expiresAt;
+ 
+@@ -90,7 +119,8 @@ final class HostInvite {
+   bool isExpired(DateTime now) => !now.isBefore(expiresAt);
+ 
+   /// Validates a raw `createHostInvite` response against the requesting
+-  /// client's scope. Throws [HostInviteException] on any malformed field.
++  /// client's scope. Throws [HostInviteException] on any malformed field,
++  /// including a missing or malformed pairing code.
+   factory HostInvite.fromResponse(
+     Map<String, Object?> data, {
+     required String expectedPartyId,
+@@ -99,6 +129,9 @@ final class HostInvite {
+     final Object? partyId = data['partyId'];
+     final Object? channelId = data['channelId'];
+     final Object? inviteToken = data['inviteToken'];
++    // Accept the snake_case spelling during the contract rollout; the
++    // canonical wire key is `pairingCode`.
++    final Object? pairingCode = data['pairingCode'] ?? data['pairing_code'];
+     final Object? expiresAt = data['expiresAt'];
+     if (partyId is! String || partyId.isEmpty) {
+       throw const HostInviteException('Host invite response has no party.');
+@@ -109,6 +142,9 @@ final class HostInvite {
+     if (inviteToken is! String || !isValidHostInviteToken(inviteToken)) {
+       throw const HostInviteException('Host invite token is malformed.');
+     }
++    if (pairingCode is! String || !isValidPairingCode(pairingCode)) {
++      throw const HostInviteException('Host invite pairing code is malformed.');
++    }
+     if (partyId != expectedPartyId) {
+       throw const HostInviteException('Host invite party mismatch.');
+     }
+@@ -126,6 +162,7 @@ final class HostInvite {
+       partyId: partyId,
+       channelId: channelId,
+       inviteToken: inviteToken,
++      pairingCode: pairingCode,
+       expiresAt: expiry,
+     );
+   }
+@@ -200,3 +237,146 @@ final class HostInviteClient {
+     );
+   }
+ }
++
++/// One active host device for the TV host-management list.
++///
++/// The panel renders [displayLabel] ONLY — the opaque [deviceId] never
++/// reaches the screen (no credential leakage to anyone reading over a
++/// shoulder). It is retained here solely so the revoke action can name its
++/// target to the `revokeHostDevice` callable.
++final class HostManagedDevice {
++  /// Creates a host row.
++  const HostManagedDevice({required this.deviceId, required this.displayLabel});
++
++  /// Opaque device identity (revoke target; never rendered).
++  final String deviceId;
++
++  /// Neutral display label (never the device id).
++  final String displayLabel;
++
++  @override
++  bool operator ==(Object other) =>
++      identical(this, other) ||
++      (other is HostManagedDevice &&
++          other.deviceId == deviceId &&
++          other.displayLabel == displayLabel);
++
++  @override
++  int get hashCode => Object.hash(deviceId, displayLabel);
++
++  @override
++  String toString() => 'HostManagedDevice($displayLabel)';
++}
++
++/// Failure listing or revoking host devices.
++final class HostDeviceException implements Exception {
++  /// Creates a host-device failure.
++  const HostDeviceException(this.message);
++
++  /// Human-readable reason shown on the TV panel.
++  final String message;
++
++  @override
++  String toString() => 'HostDeviceException: $message';
++}
++
++/// Reads the host-only `listPartyDevices` listing and revokes through the
++/// TV-only `revokeHostDevice` callable.
++///
++/// The list surface is the same authorized `listPartyDevices` response the
++/// guest panel reads (see [GuestCodeListing]); rows whose `role` is `host`
++/// and whose `status` is `active` become label-only [HostManagedDevice]
++/// rows. Revocation names only the opaque device id to the server.
++final class HostDeviceClient {
++  /// Creates a client over an invoker seam.
++  const HostDeviceClient({
++    required this.invoker,
++    required this.partyId,
++    required this.deviceId,
++    required this.channelId,
++  });
++
++  /// Invoker seam (Cloud Functions in production, fake in tests).
++  final CallableInvoker invoker;
++
++  /// Party the TV belongs to.
++  final String partyId;
++
++  /// TV's own device code (the authorized caller).
++  final String deviceId;
++
++  /// Active channel.
++  final String channelId;
++
++  /// Lists active host devices as label-only rows (device ids retained
++  /// internally as revoke targets, never rendered).
++  ///
++  /// Throws [HostDeviceException] when the response is malformed.
++  /// Authorization failures surface as the caller's error.
++  Future<List<HostManagedDevice>> listHosts() async {
++    final Map<String, Object?> data = await invoker(
++      'listPartyDevices',
++      <String, Object?>{
++        'partyId': partyId,
++        'deviceId': deviceId,
++        'channelId': channelId,
++      },
++    );
++    late final GuestCodeListing listing;
++    try {
++      listing = GuestCodeListing.fromResponse(
++        data,
++        expectedPartyId: partyId,
++        expectedChannelId: channelId,
++        expectedTvDeviceId: deviceId,
++      );
++    } on GuestCodeException catch (error) {
++      throw HostDeviceException(error.message);
++    }
++    final List<HostManagedDevice> hosts = <HostManagedDevice>[];
++    for (final GuestCodeEntry entry in listing.devices) {
++      if (entry.role != 'host' || entry.status != 'active') {
++        continue;
++      }
++      hosts.add(
++        HostManagedDevice(
++          deviceId: entry.deviceId,
++          displayLabel: entry.displayLabel,
++        ),
++      );
++    }
++    return hosts;
++  }
++
++  /// Revokes the host device [targetDeviceId] through the TV-only
++  /// `revokeHostDevice` callable.
++  ///
++  /// Success is a non-error callable result whose echo (when the server
++  /// includes one: `revokedDeviceId` or `deviceId`) names [targetDeviceId];
++  /// a mismatched echo throws [HostDeviceException]. Authorization failures
++  /// surface as the caller's error.
++  Future<void> revokeHost(String targetDeviceId) async {
++    if (targetDeviceId.isEmpty) {
++      throw const HostDeviceException('Host revoke target is missing.');
++    }
++    final Map<String, Object?> data = await invoker(
++      'revokeHostDevice',
++      <String, Object?>{
++        'partyId': partyId,
++        'deviceId': deviceId,
++        'channelId': channelId,
++        'targetDeviceId': targetDeviceId,
++      },
++    );
++    for (final String key in <String>['revokedDeviceId', 'deviceId']) {
++      if (!data.containsKey(key)) {
++        continue;
++      }
++      final Object? echo = data[key];
++      if (echo is! String || echo != targetDeviceId) {
++        throw const HostDeviceException('Host revoke echo mismatch.');
++      }
++      return;
++    }
++  }
++}
+diff --git a/apps/tv_app/lib/src/wall/wall_screen.dart b/apps/tv_app/lib/src/wall/wall_screen.dart
+index d238ac6e123ec3e4b09c3971cbb2356f9d706c56..0347cd0ec82221adb1b26360b6a9e40fa4605a36 100644
+--- a/apps/tv_app/lib/src/wall/wall_screen.dart
++++ b/apps/tv_app/lib/src/wall/wall_screen.dart
+@@ -76,6 +76,7 @@ class WallScreen extends StatefulWidget {
+     this.initialEffectsDisabled = false,
+     this.initialCameraCount = kDefaultCctvClipCount,
+     this.hostInviteClient,
++    this.hostDeviceClient,
+     this.overscanPadding = const EdgeInsets.symmetric(
+       horizontal: 28,
+       vertical: 18,
+@@ -111,7 +112,9 @@ class WallScreen extends StatefulWidget {
+   /// Party this wall belongs to.
+   final String partyId;
+ 
+-  /// TV's own device code, shown on the host guest-code page.
++  /// TV's own device code, authorizing the host-only listing/invite calls.
++  ///
++  /// Never rendered: no screen displays the raw TV device id to guests.
+   final String tvDeviceId;
+ 
+   /// Active channel for the guest-code join payload.
+@@ -125,6 +128,12 @@ class WallScreen extends StatefulWidget {
+   /// button (offline builds stay on the recovery actions only).
+   final HostInviteClient? hostInviteClient;
+ 
++  /// Host-management reader/revoker for the HOST QR destination; null hides
++  /// the active-host list inside the host panel (offline builds stay on
++  /// invite-only). Authorization carries the TV's device id; device ids are
++  /// never rendered.
++  final HostDeviceClient? hostDeviceClient;
++
+   /// Seed for the wall's deterministic glitch bursts.
+   final int glitchSeed;
+ 
+@@ -176,6 +185,11 @@ class _WallScreenState extends State<WallScreen> {
+   late PlaybackManifest _manifest;
+   late Map<String, CachedMedia> _mediaByClipId;
+   late Map<String, TileMediaSource> _tileSources;
++
++  /// False when the boot manifest has an unsupported clip count: the wall
++  /// renders the SIGNAL-LOST/cache state instead of throwing during
++  /// construction (see initState).
++  late bool _manifestSupported;
+   final Map<String, Completer<bool>> _sourceSettles =
+       <String, Completer<bool>>{};
+   final Set<String> _initialSettledCameras = <String>{};
+@@ -205,11 +219,26 @@ class _WallScreenState extends State<WallScreen> {
+     _manifest = widget.manifest;
+     _mediaByClipId = Map<String, CachedMedia>.of(widget.mediaByClipId);
+     _cameraCount = _sanitizeCameraCount(widget.initialCameraCount);
++    // Fail closed on an unsupported manifest length: an unexpected clip
++    // count (anything but 1, 2, or 4) degrades to the SIGNAL-LOST/cache
++    // state instead of throwing a StateError out of construction, which
++    // would take down the whole wall element. Live updates carrying a bad
++    // length are rejected the same way in _applyVerifiedVersion (previous
++    // usable wall retained).
++    _manifestSupported = isSupportedCctvClipCount(_manifest.clips.length);
++    if (_manifestSupported) {
++      _tileSources = _activeSources(_sourcesFor(_manifest, _mediaByClipId));
++    } else {
++      _tileSources = <String, TileMediaSource>{};
++      _status = 'SIGNAL-LOST · UNSUPPORTED MANIFEST · KEEPING CACHED FEED';
++      _recoveryStatus =
++          'Unsupported manifest clip count '
++          '(${_manifest.clips.length}); expected 1, 2, or 4.';
++    }
+     _focus.setActiveLayout(
+       tiles: _effectiveCount,
+       columns: _columnsFor(_effectiveCount),
+     );
+-    _tileSources = _activeSources(_sourcesFor(_manifest, _mediaByClipId));
+     _effectsDisabled = widget.initialEffectsDisabled;
+     _handle = WallPlaybackHandle(
+       prepareAction: _prepareCurrentVersion,
+@@ -438,6 +467,14 @@ class _WallScreenState extends State<WallScreen> {
+     PlaybackManifest manifest,
+     Map<String, CachedMedia> mediaByClipId,
+   ) async {
++    // A live update with an unsupported clip count can never feed the
++    // active tiles: fail BEFORE touching wall state so the previous usable
++    // wall is retained untouched (same fail-closed rule as initState).
++    if (!isSupportedCctvClipCount(manifest.clips.length)) {
++      throw StateError(
++        'unsupported manifest clip count ${manifest.clips.length}',
++      );
++    }
+     // Staging cannot feed the active tiles: fail BEFORE touching wall state
+     // so the previous usable wall is retained untouched.
+     final Map<String, TileMediaSource> targetSources = _activeSources(
+@@ -878,11 +915,25 @@ class _WallScreenState extends State<WallScreen> {
+     // Short release of select/enter/gameButtonA opens the hero; BACK keys
+     // (backspace/escape/gameButtonB) restore the grid and originating focus.
+     // A held select opens recovery once (deferred panel focus keeps its
+-    // release from triggering the hero or a recovery action); hold repeats
+-    // are swallowed. Grid traversal is suppressed in hero, and hero stays
++    // release from triggering the hero or a recovery action). Held-select
++    // repeats are swallowed so they can never retrigger the hero; arrow
++    // repeats keep flowing to traversal so a held D-pad direction moves
++    // across tiles. Grid traversal is suppressed in hero, and hero stays
+     // available when recovery is disabled.
+     if (event is KeyRepeatEvent) {
+-      return KeyEventResult.handled;
++      if (_isSelectKey(event.logicalKey)) {
++        return KeyEventResult.handled;
++      }
++      if (_heroCameraId != null ||
++          _recoveryVisible ||
++          _guestCodesVisible ||
++          _hostCodesVisible) {
++        return KeyEventResult.handled;
++      }
++      if (_focus.handleArrow(event.logicalKey)) {
++        return KeyEventResult.handled;
++      }
++      return KeyEventResult.ignored;
+     }
+     if (event is KeyDownEvent) {
+       if (event.logicalKey == LogicalKeyboardKey.contextMenu ||
+@@ -1019,7 +1070,22 @@ class _WallScreenState extends State<WallScreen> {
+                 // transiently double the decoder count).
+                 child: KeyedSubtree(
+                   key: ValueKey<String>('wall-${widget.partyId}'),
+-                  child: channel.build(channelContext),
++                  // An unsupported boot manifest never reaches the tile
++                  // builders (their sources cannot exist): the SIGNAL-LOST
++                  // frame stays until a supported wall activates. The frame
++                  // is wrapped in an autofocus node so wall keys (MENU,
++                  // BACK) keep bubbling to the gate above even with no
++                  // tiles mounted.
++                  child: _manifestSupported
++                      ? channel.build(channelContext)
++                      : Focus(
++                          autofocus: true,
++                          onKeyEvent: (FocusNode node, KeyEvent event) =>
++                              KeyEventResult.ignored,
++                          child: const SignalLost(
++                            key: ValueKey<String>('wall-unsupported-manifest'),
++                          ),
++                        ),
+                 ),
+               ),
+             ),
+@@ -1056,6 +1122,7 @@ class _WallScreenState extends State<WallScreen> {
+                     : _hostCodesVisible
+                     ? HostCodePanel(
+                         client: widget.hostInviteClient!,
++                        devicesClient: widget.hostDeviceClient,
+                         primaryFocusNode: _recoveryFocus,
+                         onBack: _closeHostCodes,
+                         onClose: _closeRecovery,
+diff --git a/apps/tv_app/test/guest_code_panel_test.dart b/apps/tv_app/test/guest_code_panel_test.dart
+index 59c3adaa7f778cdcebb02ae24e539a0e42d12632..e329ac834b7afd6f455eda0b04903b389c9ac10e 100644
+--- a/apps/tv_app/test/guest_code_panel_test.dart
++++ b/apps/tv_app/test/guest_code_panel_test.dart
+@@ -290,7 +290,7 @@ void main() {
+   });
+ 
+   group('GuestCodePanel widget', () {
+-    testWidgets('shows TV code large with exactly one QR from session', (
++    testWidgets('shows party scope with exactly one QR, never the TV id', (
+       WidgetTester tester,
+     ) async {
+       final GuestCodeClient client = listingClient(
+@@ -305,7 +305,10 @@ void main() {
+       await tester.pump();
+       await tester.pump();
+       expect(find.text('GUEST CODES'), findsOneWidget);
+-      expect(find.text('tv-abc'), findsOneWidget);
++      // The TV device id authorizes the request but is never rendered:
++      // neither as an exact label nor as a substring anywhere.
++      expect(find.text('tv-abc'), findsNothing);
++      expect(find.textContaining('tv-abc'), findsNothing);
+       expect(find.byType(QrImageView), findsOneWidget);
+       final Map<String, Object?> decoded = Map<String, Object?>.from(
+         jsonDecode(qrDataOf(tester)) as Map,
+@@ -379,7 +382,9 @@ void main() {
+       await tester.pump();
+       expect(find.byKey(kGuestCodeLoadingKey), findsOneWidget);
+       expect(find.byType(QrImageView), findsNothing);
+-      expect(find.text('tv-abc'), findsOneWidget);
++      // Even while loading, the TV device id is never on screen.
++      expect(find.text('tv-abc'), findsNothing);
++      expect(find.textContaining('tv-abc'), findsNothing);
+       gate.completeError(const GuestCodeException('denied'));
+       await tester.pump();
+       await tester.pump();
+@@ -692,7 +697,9 @@ void main() {
+       await tester.pump();
+       await tester.pump();
+       expect(find.byType(QrImageView), findsOneWidget);
+-      expect(find.text('tv-abc'), findsOneWidget);
++      // The TV device id stays off screen at every size.
++      expect(find.text('tv-abc'), findsNothing);
++      expect(find.textContaining('tv-abc'), findsNothing);
+       expect(tester.takeException(), isNull);
+       await disposePanel(tester);
+     });
+@@ -769,7 +776,10 @@ void main() {
+       await tester.pump();
+ 
+       expect(find.byKey(kGuestCodePanelKey), findsOneWidget);
+-      expect(find.text('tv-abc'), findsOneWidget);
++      // The TV device id authorizes the listing but is never displayed —
++      // even on the wall's own guest-code page.
++      expect(find.text('tv-abc'), findsNothing);
++      expect(find.textContaining('tv-abc'), findsNothing);
+       expect(find.byType(QrImageView), findsOneWidget);
+       final QrImageView qr = tester.widget<QrImageView>(
+         find.byKey(kGuestCodeQrKey),
+@@ -797,7 +807,7 @@ void main() {
+       await teardownWall(tester);
+     });
+ 
+-    testWidgets('guest list failure shows error with no QR, TV code stays', (
++    testWidgets('guest list failure shows error with no QR, TV id absent', (
+       WidgetTester tester,
+     ) async {
+       final FakeClock clock = FakeClock(DateTime.utc(2026, 10, 31, 20));
+@@ -822,7 +832,8 @@ void main() {
+       await tester.pump();
+       await tester.pump();
+ 
+-      expect(find.text('tv-abc'), findsOneWidget);
++      expect(find.text('tv-abc'), findsNothing);
++      expect(find.textContaining('tv-abc'), findsNothing);
+       expect(find.textContaining('denied'), findsOneWidget);
+       expect(find.byType(QrImageView), findsNothing);
+ 
+diff --git a/apps/tv_app/test/wall_test.dart b/apps/tv_app/test/wall_test.dart
+index c084ab5f4f5dee6e9989a8068d37fd83bec36a57..bcb6c59b27fb5118284f05c004ba31c9e6877036 100644
+--- a/apps/tv_app/test/wall_test.dart
++++ b/apps/tv_app/test/wall_test.dart
+@@ -19,6 +19,7 @@ import 'package:testing_toolkit/testing_toolkit.dart';
+ import 'package:tv_app/src/playback/camera_tile.dart';
+ import 'package:tv_app/src/playback/tile_video_controller.dart';
+ import 'package:tv_app/src/wall/guest_codes.dart';
++import 'package:tv_app/src/wall/host_codes.dart';
+ import 'package:tv_app/src/wall/wall_screen.dart';
+ 
+ import 'support/fakes.dart';
+@@ -34,6 +35,8 @@ Widget wallHarness({
+   bool initialEffectsDisabled = false,
+   bool recoveryEnabled = true,
+   GuestCodeClient? guestCodeClient,
++  HostInviteClient? hostInviteClient,
++  HostDeviceClient? hostDeviceClient,
+   String partyId = 'local-party',
+   String tvDeviceId = '',
+ }) {
+@@ -52,6 +55,8 @@ Widget wallHarness({
+       fileExists: fileExists,
+       recoveryEnabled: recoveryEnabled,
+       guestCodeClient: guestCodeClient,
++      hostInviteClient: hostInviteClient,
++      hostDeviceClient: hostDeviceClient,
+       partyId: partyId,
+       tvDeviceId: tvDeviceId,
+     ),
+@@ -811,6 +816,118 @@ void main() {
+     await tester.pump();
+     expect(liveDecoders, 0);
+   });
++
++  testWidgets(
++    'held-arrow repeats keep moving focus; held-select never retriggers hero',
++    (WidgetTester tester) async {
++      await tester.pumpWidget(
++        wallHarness(
++          manifest: wallManifest(),
++          clock: clock,
++          factory: fakeControllerFactory(),
++        ),
++      );
++      await pumpWall(tester);
++      expect(
++        find.byKey(const ValueKey<String>('tile-focus-ring-0')),
++        findsOneWidget,
++      );
++
++      // A held D-pad direction keeps traversing through repeat events.
++      await tester.sendKeyRepeatEvent(LogicalKeyboardKey.arrowRight);
++      await tester.pump();
++      expect(
++        find.byKey(const ValueKey<String>('tile-focus-ring-1')),
++        findsOneWidget,
++      );
++      await tester.sendKeyRepeatEvent(LogicalKeyboardKey.arrowDown);
++      await tester.pump();
++      expect(
++        find.byKey(const ValueKey<String>('tile-focus-ring-3')),
++        findsOneWidget,
++      );
++
++      // A short select opens the hero on the focused tile (CAM-04 expands
++      // to the full wall rectangle).
++      final Size wall = tester.getSize(find.byKey(kCctvWallKey));
++      await tester.sendKeyDownEvent(LogicalKeyboardKey.select);
++      await tester.sendKeyUpEvent(LogicalKeyboardKey.select);
++      await tester.pumpAndSettle();
++      Rect heroRect() => tester.getRect(
++        find.byKey(const ValueKey<String>('wall-slot-CAM-04')),
++      );
++      expect(heroRect().width, wall.width);
++      expect(heroRect().height, wall.height);
++
++      // Held-select repeats while the hero is open never retrigger it: the
++      // hero geometry is untouched and no overlay/rebuild fires.
++      await tester.sendKeyDownEvent(LogicalKeyboardKey.select);
++      await tester.sendKeyRepeatEvent(LogicalKeyboardKey.select);
++      await tester.sendKeyRepeatEvent(LogicalKeyboardKey.select);
++      await tester.pump();
++      expect(heroRect().width, wall.width);
++      expect(heroRect().height, wall.height);
++      expect(find.byKey(kRecoveryOverlayKey), findsNothing);
++      // The release is the ordinary short-press toggle (closes the hero);
++      // the repeats in between neither wedged nor doubled it.
++      await tester.sendKeyUpEvent(LogicalKeyboardKey.select);
++      await tester.pumpAndSettle();
++      expect(
++        find.byKey(const ValueKey<String>('tile-focus-ring-3')),
++        findsOneWidget,
++      );
++      expect(tester.takeException(), isNull);
++
++      await teardownWall(tester);
++    },
++  );
++
++  testWidgets('unsupported manifest length degrades instead of throwing', (
++    WidgetTester tester,
++  ) async {
++    // A hypothetical bad-length manifest (3 clips is not a supported
++    // 1/2/4 layout) must fail closed: no StateError out of construction,
++    // SIGNAL-LOST frame + cache status instead, recovery still available.
++    final PlaybackManifest full = wallManifest();
++    final PlaybackManifest bad = PlaybackManifest(
++      partyId: full.partyId,
++      channelId: full.channelId,
++      version: full.version,
++      clips: full.clips.take(3).toList(),
++      publishedAt: full.publishedAt,
++    );
++    await tester.pumpWidget(
++      wallHarness(
++        manifest: bad,
++        clock: clock,
++        factory: fakeControllerFactory(),
++      ),
++    );
++    await pumpWall(tester);
++    expect(tester.takeException(), isNull);
++    expect(
++      find.byKey(const ValueKey<String>('wall-unsupported-manifest')),
++      findsOneWidget,
++    );
++    expect(find.byKey(kWallStatusBannerKey), findsOneWidget);
++    expect(find.textContaining('UNSUPPORTED MANIFEST'), findsOneWidget);
++
++    // The wall is still operable: MENU opens recovery over the degraded
++    // frame, and closing returns to it without exceptions.
++    await tester.sendKeyEvent(LogicalKeyboardKey.contextMenu);
++    await tester.pump();
++    expect(find.byKey(kRecoveryOverlayKey), findsOneWidget);
++    await tester.sendKeyEvent(LogicalKeyboardKey.contextMenu);
++    await tester.pump();
++    expect(find.byKey(kRecoveryOverlayKey), findsNothing);
++    expect(
++      find.byKey(const ValueKey<String>('wall-unsupported-manifest')),
++      findsOneWidget,
++    );
++    expect(tester.takeException(), isNull);
++
++    await teardownWall(tester);
++  });
+ }
+ 
+ /// [TileVideoController] decorator tracking decoder-budget events.
+diff --git a/apps/tv_app/test/host_code_panel_test.dart b/apps/tv_app/test/host_code_panel_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..feb6597acababd7fa467a97bc99c27e0d4a7008f
+--- /dev/null
++++ b/apps/tv_app/test/host_code_panel_test.dart
+@@ -0,0 +1,604 @@
++/// Host invite panel tests: mint, pairing code, expiry, list + revoke.
++///
++/// Exercises the REAL panel + invite/device clients over fake callable
++/// invokers (network boundary only): validation, QR payload shape, the
++/// expiry ticker, BACK routing, and the label-only host list with its
++/// confirm-then-revoke flow.
++library;
++
++import 'dart:async';
++import 'dart:convert';
++
++import 'package:core_foundation/core_foundation.dart';
++import 'package:core_ui/core_ui.dart';
++import 'package:flutter/material.dart';
++import 'package:flutter/services.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:qr_flutter/qr_flutter.dart';
++import 'package:tv_app/src/wall/host_code_panel.dart';
++import 'package:tv_app/src/wall/host_codes.dart';
++
++const String _party = 'party-1';
++const String _channel = 'cctv';
++const String _tv = 'tv-abc';
++const String _token = 'hi-0123456789abcdef0123456789abcdef01';
++
++Map<String, Object?> inviteResponse({
++  String partyId = _party,
++  String channelId = _channel,
++  String inviteToken = _token,
++  Object? pairingCode = '123456',
++  String? expiresAt,
++}) {
++  final Map<String, Object?> map = <String, Object?>{
++    'partyId': partyId,
++    'channelId': channelId,
++    'inviteToken': inviteToken,
++    'expiresAt': expiresAt ?? DateTime.utc(2030, 1, 1).toIso8601String(),
++  };
++  if (pairingCode is! _Absent) {
++    map['pairingCode'] = pairingCode;
++  }
++  return map;
++}
++
++class _Absent {
++  const _Absent();
++}
++
++HostInviteClient inviteClient(
++  Map<String, Object?> response, {
++  List<Map<String, Object?>>? seenPayloads,
++  Future<Map<String, Object?>> Function()? next,
++  int callsBeforeNext = 0,
++}) {
++  int calls = 0;
++  return HostInviteClient(
++    invoker: (String name, Map<String, Object?> payload) async {
++      expect(name, 'createHostInvite');
++      seenPayloads?.add(Map<String, Object?>.of(payload));
++      calls++;
++      if (next != null && calls > callsBeforeNext) {
++        return next();
++      }
++      return response;
++    },
++    partyId: _party,
++    deviceId: _tv,
++    channelId: _channel,
++  );
++}
++
++Map<String, Object?> hostListingResponse({
++  List<Object?> devices = const <Object?>[],
++}) => <String, Object?>{
++  'partyId': _party,
++  'channelId': _channel,
++  'tvDeviceId': _tv,
++  'devices': devices,
++};
++
++Map<String, Object?> hostRow(String id, String label) => <String, Object?>{
++  'deviceId': id,
++  'label': label,
++  'role': 'host',
++  'status': 'active',
++};
++
++/// Fake host-management invoker: serves [devices] for `listPartyDevices`
++/// and records `revokeHostDevice` calls, removing the target on success.
++final class FakeHostDeviceInvoker {
++  FakeHostDeviceInvoker(this.devices);
++
++  List<Map<String, Object?>> devices;
++  final List<Map<String, Object?>> seenPayloads = <Map<String, Object?>>[];
++  final List<String> revoked = <String>[];
++  Object? revokeFailure;
++
++  Future<Map<String, Object?>> call(
++    String name,
++    Map<String, Object?> payload,
++  ) async {
++    seenPayloads.add(<String, Object?>{'call': name, ...payload});
++    if (name == 'listPartyDevices') {
++      return hostListingResponse(
++        devices: <Object?>[
++          for (final Map<String, Object?> d in devices)
++            Map<String, Object?>.of(d),
++        ],
++      );
++    }
++    if (name == 'revokeHostDevice') {
++      final Object? failure = revokeFailure;
++      if (failure != null) {
++        throw failure;
++      }
++      final String target = payload['targetDeviceId'] as String;
++      revoked.add(target);
++      devices = <Map<String, Object?>>[
++        for (final Map<String, Object?> d in devices)
++          if (d['deviceId'] != target) d,
++      ];
++      return <String, Object?>{'revokedDeviceId': target};
++    }
++    throw StateError('unexpected callable $name');
++  }
++}
++
++HostDeviceClient deviceClient(FakeHostDeviceInvoker fake) => HostDeviceClient(
++  invoker: fake.call,
++  partyId: _party,
++  deviceId: _tv,
++  channelId: _channel,
++);
++
++Future<void> pumpPanel(
++  WidgetTester tester,
++  HostInviteClient client, {
++  HostDeviceClient? devicesClient,
++  VoidCallback? onBack,
++  VoidCallback? onClose,
++  FocusNode? primaryFocusNode,
++  Clock clock = const SystemClock(),
++}) async {
++  await tester.pumpWidget(
++    MaterialApp(
++      theme: CctvTheme.dark(),
++      home: Scaffold(
++        body: HostCodePanel(
++          client: client,
++          devicesClient: devicesClient,
++          onBack: onBack,
++          onClose: onClose ?? () {},
++          primaryFocusNode: primaryFocusNode,
++          clock: clock,
++        ),
++      ),
++    ),
++  );
++}
++
++Future<void> disposePanel(WidgetTester tester) async {
++  await tester.pumpWidget(const SizedBox.shrink());
++  await tester.pump();
++}
++
++/// Taps a panel action, scrolling it into view first: the panel content
++/// can exceed the 800x600 test viewport, and an offscreen tap would miss.
++Future<void> tapPanelKey(WidgetTester tester, Key key) async {
++  await tester.ensureVisible(find.byKey(key));
++  await tester.pump();
++  await tester.tap(find.byKey(key));
++}
++
++String qrDataOf(WidgetTester tester) {
++  final QrImageView qr = tester.widget<QrImageView>(find.byKey(kHostCodeQrKey));
++  return qr.semanticsLabel;
++}
++
++final class _FakeClock implements Clock {
++  _FakeClock(this.current);
++  DateTime current;
++  @override
++  DateTime now() => current;
++}
++
++void main() {
++  group('buildHostJoinPayload', () {
++    test('carries the pairing code alongside the invite capability', () {
++      final String payload = buildHostJoinPayload(
++        partyId: _party,
++        channelId: _channel,
++        inviteToken: _token,
++        pairingCode: '123456',
++      );
++      final Map<String, Object?> decoded = Map<String, Object?>.from(
++        jsonDecode(payload) as Map,
++      );
++      expect(decoded, <String, Object?>{
++        'partyId': _party,
++        'channelId': _channel,
++        'inviteToken': _token,
++        'role': 'host',
++        'pairingCode': '123456',
++      });
++      expect(payload.contains(_tv), isFalse);
++      expect(payload.contains('deviceId'), isFalse);
++    });
++
++    test('rejects malformed invite tokens and pairing codes', () {
++      expect(
++        () => buildHostJoinPayload(
++          partyId: 'p',
++          channelId: 'c',
++          inviteToken: '123456',
++        ),
++        throwsArgumentError,
++      );
++      expect(
++        () => buildHostJoinPayload(
++          partyId: 'p',
++          channelId: 'c',
++          inviteToken: _token,
++          pairingCode: '12345',
++        ),
++        throwsArgumentError,
++      );
++      expect(
++        () => buildHostJoinPayload(
++          partyId: 'p',
++          channelId: 'c',
++          inviteToken: _token,
++          pairingCode: 'abcdef',
++        ),
++        throwsArgumentError,
++      );
++    });
++  });
++
++  group('HostInvite.fromResponse', () {
++    test('parses the pairing code with the invite scope', () {
++      final HostInvite invite = HostInvite.fromResponse(
++        inviteResponse(),
++        expectedPartyId: _party,
++        expectedChannelId: _channel,
++      );
++      expect(invite.partyId, _party);
++      expect(invite.inviteToken, _token);
++      expect(invite.pairingCode, '123456');
++    });
++
++    test('rejects missing or malformed pairing codes', () async {
++      Future<void> expectBad(Map<String, Object?> response) async {
++        expect(
++          () => HostInvite.fromResponse(
++            response,
++            expectedPartyId: _party,
++            expectedChannelId: _channel,
++          ),
++          throwsA(isA<HostInviteException>()),
++        );
++      }
++
++      await expectBad(inviteResponse(pairingCode: const _Absent()));
++      await expectBad(inviteResponse(pairingCode: null));
++      await expectBad(inviteResponse(pairingCode: '12345'));
++      await expectBad(inviteResponse(pairingCode: 'abcdef'));
++      await expectBad(inviteResponse(pairingCode: 123456));
++      await expectBad(inviteResponse(inviteToken: '123456'));
++      await expectBad(inviteResponse(partyId: 'other-party'));
++    });
++  });
++
++  group('HostCodePanel widget', () {
++    testWidgets('mint success shows one QR + pairing code, refreshed', (
++      WidgetTester tester,
++    ) async {
++      int mints = 0;
++      final HostInviteClient client = HostInviteClient(
++        invoker: (_, __) async {
++          mints++;
++          return inviteResponse(pairingCode: '11111$mints');
++        },
++        partyId: _party,
++        deviceId: _tv,
++        channelId: _channel,
++      );
++      final FakeHostDeviceInvoker fakeDevices = FakeHostDeviceInvoker(
++        <Map<String, Object?>>[],
++      );
++      await pumpPanel(
++        tester,
++        client,
++        devicesClient: deviceClient(fakeDevices),
++        onBack: () {},
++      );
++      await tester.pump();
++      await tester.pump();
++
++      expect(find.text('HOST QR'), findsOneWidget);
++      expect(find.byKey(kHostCodeQrKey), findsOneWidget);
++      // The pairing code is shown next to the QR and travels in it.
++      expect(find.byKey(kHostPairingCodeKey), findsOneWidget);
++      expect(find.text('111111'), findsOneWidget);
++      final Map<String, Object?> decoded = Map<String, Object?>.from(
++        jsonDecode(qrDataOf(tester)) as Map,
++      );
++      expect(decoded['role'], 'host');
++      expect(decoded['pairingCode'], '111111');
++      expect(decoded.containsKey('deviceId'), isFalse);
++      expect(find.byKey(kHostCodeRefreshKey), findsOneWidget);
++
++      // REFRESH re-mints: the pairing code refreshes with the invite.
++      await tapPanelKey(tester, kHostCodeRefreshKey);
++      await tester.pump();
++      await tester.pump();
++      expect(mints, 2);
++      expect(find.text('111112'), findsOneWidget);
++      expect(find.text('111111'), findsNothing);
++      final Map<String, Object?> refreshed = Map<String, Object?>.from(
++        jsonDecode(qrDataOf(tester)) as Map,
++      );
++      expect(refreshed['pairingCode'], '111112');
++      await disposePanel(tester);
++    });
++
++    testWidgets('malformed mint shows error with no QR and no code', (
++      WidgetTester tester,
++    ) async {
++      final HostInviteClient client = inviteClient(
++        inviteResponse(pairingCode: const _Absent()),
++      );
++      await pumpPanel(tester, client);
++      await tester.pump();
++      await tester.pump();
++      expect(find.byKey(kHostCodeErrorKey), findsOneWidget);
++      expect(find.textContaining('pairing code is malformed'), findsOneWidget);
++      expect(find.byType(QrImageView), findsNothing);
++      expect(find.byKey(kHostPairingCodeKey), findsNothing);
++      await disposePanel(tester);
++    });
++
++    testWidgets('loading shows no fabricated QR or code', (
++      WidgetTester tester,
++    ) async {
++      final Completer<Map<String, Object?>> gate =
++          Completer<Map<String, Object?>>();
++      final HostInviteClient slow = HostInviteClient(
++        invoker: (_, __) => gate.future,
++        partyId: _party,
++        deviceId: _tv,
++        channelId: _channel,
++      );
++      await pumpPanel(tester, slow);
++      await tester.pump();
++      expect(find.byKey(kHostCodeLoadingKey), findsOneWidget);
++      expect(find.byType(QrImageView), findsNothing);
++      expect(find.byKey(kHostPairingCodeKey), findsNothing);
++      gate.complete(inviteResponse());
++      await tester.pump();
++      await tester.pump();
++      expect(find.byKey(kHostCodeQrKey), findsOneWidget);
++      expect(find.byKey(kHostPairingCodeKey), findsOneWidget);
++      await disposePanel(tester);
++    });
++
++    testWidgets('expiry ticker hides QR + code until refresh', (
++      WidgetTester tester,
++    ) async {
++      final _FakeClock clock = _FakeClock(DateTime.utc(2026, 10, 31, 20));
++      int mints = 0;
++      final HostInviteClient client = HostInviteClient(
++        invoker: (_, __) async {
++          mints++;
++          return inviteResponse(
++            pairingCode: '22222$mints',
++            expiresAt: clock
++                .now()
++                .add(const Duration(seconds: 2))
++                .toIso8601String(),
++          );
++        },
++        partyId: _party,
++        deviceId: _tv,
++        channelId: _channel,
++      );
++      await pumpPanel(tester, client, clock: clock);
++      await tester.pump();
++      await tester.pump();
++      expect(find.byKey(kHostCodeQrKey), findsOneWidget);
++      expect(find.text('222221'), findsOneWidget);
++
++      // The invite lapses: the ticker hides the stale capability + code.
++      clock.current = clock.current.add(const Duration(seconds: 5));
++      await tester.pump(const Duration(seconds: 2));
++      await tester.pump();
++      expect(find.byType(QrImageView), findsNothing);
++      expect(find.byKey(kHostPairingCodeKey), findsNothing);
++      expect(find.byKey(kHostCodeExpiryKey), findsOneWidget);
++
++      // REFRESH mints a fresh invite with a fresh pairing code.
++      await tapPanelKey(tester, kHostCodeRefreshKey);
++      await tester.pump();
++      await tester.pump();
++      expect(mints, 2);
++      expect(find.byKey(kHostCodeQrKey), findsOneWidget);
++      expect(find.text('222222'), findsOneWidget);
++      await disposePanel(tester);
++    });
++
++    testWidgets('D-pad back/close keys invoke callbacks', (
++      WidgetTester tester,
++    ) async {
++      bool backed = false;
++      bool closed = false;
++      final FocusNode primary = FocusNode(debugLabel: 'panel-primary');
++      addTearDown(primary.dispose);
++      await pumpPanel(
++        tester,
++        inviteClient(inviteResponse()),
++        onBack: () => backed = true,
++        onClose: () => closed = true,
++        primaryFocusNode: primary,
++      );
++      await tester.pump();
++      await tester.pump();
++      primary.requestFocus();
++      await tester.pump();
++      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
++      await tester.pump();
++      expect(backed, isTrue);
++      expect(closed, isFalse);
++      await tester.sendKeyEvent(LogicalKeyboardKey.contextMenu);
++      await tester.pump();
++      expect(closed, isTrue);
++      primary.unfocus();
++      await disposePanel(tester);
++    });
++
++    testWidgets('escape falls back to onClose when no onBack', (
++      WidgetTester tester,
++    ) async {
++      bool closed = false;
++      final FocusNode primary = FocusNode(debugLabel: 'panel-primary');
++      addTearDown(primary.dispose);
++      await pumpPanel(
++        tester,
++        inviteClient(inviteResponse()),
++        onClose: () => closed = true,
++        primaryFocusNode: primary,
++      );
++      await tester.pump();
++      await tester.pump();
++      expect(find.byKey(kHostCodeBackKey), findsNothing);
++      primary.requestFocus();
++      await tester.pump();
++      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
++      await tester.pump();
++      expect(closed, isTrue);
++      primary.unfocus();
++      await disposePanel(tester);
++    });
++
++    testWidgets('host list shows labels only, never device ids', (
++      WidgetTester tester,
++    ) async {
++      final FakeHostDeviceInvoker fakeDevices = FakeHostDeviceInvoker(
++        <Map<String, Object?>>[
++          hostRow('p-host-aaaaaaaa', 'Phone A'),
++          hostRow('p-host-bbbbbbbb', 'Phone B'),
++          <String, Object?>{
++            'deviceId': 'g-1',
++            'label': 'Guest 1',
++            'role': 'guest',
++            'status': 'active',
++          },
++        ],
++      );
++      await pumpPanel(
++        tester,
++        inviteClient(inviteResponse()),
++        devicesClient: deviceClient(fakeDevices),
++      );
++      await tester.pump();
++      await tester.pump();
++      await tester.pump();
++
++      expect(find.byKey(kHostDeviceListKey), findsOneWidget);
++      expect(find.text('Phone A'), findsOneWidget);
++      expect(find.text('Phone B'), findsOneWidget);
++      // Guest rows never leak into the host list, and device ids are never
++      // rendered anywhere in the panel.
++      expect(find.text('Guest 1'), findsNothing);
++      for (final String id in <String>[
++        'p-host-aaaaaaaa',
++        'p-host-bbbbbbbb',
++        'g-1',
++        _tv,
++      ]) {
++        expect(find.text(id), findsNothing, reason: 'id $id rendered');
++        expect(
++          find.textContaining(id),
++          findsNothing,
++          reason: 'id $id rendered as substring',
++        );
++      }
++      await disposePanel(tester);
++    });
++
++    testWidgets('revoke confirms, then removes only after success', (
++      WidgetTester tester,
++    ) async {
++      final FakeHostDeviceInvoker fakeDevices = FakeHostDeviceInvoker(
++        <Map<String, Object?>>[
++          hostRow('p-host-aaaaaaaa', 'Phone A'),
++          hostRow('p-host-bbbbbbbb', 'Phone B'),
++        ],
++      );
++      await pumpPanel(
++        tester,
++        inviteClient(inviteResponse()),
++        devicesClient: deviceClient(fakeDevices),
++      );
++      await tester.pump();
++      await tester.pump();
++      await tester.pump();
++
++      // CANCEL keeps the row and issues no revoke.
++      await tapPanelKey(tester, HostCodePanel.revokeKeyFor('Phone A'));
++      await tester.pumpAndSettle();
++      expect(find.byKey(kHostRevokeDialogKey), findsOneWidget);
++      expect(
++        find.textContaining('Phone A'),
++        findsWidgets,
++        reason: 'dialog names the host label',
++      );
++      expect(find.textContaining('previews'), findsOneWidget);
++      expect(find.textContaining('manifest'), findsOneWidget);
++      await tapPanelKey(tester, kHostRevokeCancelKey);
++      await tester.pumpAndSettle();
++      expect(find.byKey(kHostRevokeDialogKey), findsNothing);
++      expect(fakeDevices.revoked, isEmpty);
++      expect(find.text('Phone A'), findsOneWidget);
++
++      // Confirm revokes the opaque id and reconciles from the server list.
++      await tapPanelKey(tester, HostCodePanel.revokeKeyFor('Phone A'));
++      await tester.pumpAndSettle();
++      await tapPanelKey(tester, kHostRevokeConfirmKey);
++      await tester.pump();
++      await tester.pump();
++      await tester.pump();
++      expect(fakeDevices.revoked, <String>['p-host-aaaaaaaa']);
++      final Map<String, Object?> revokeCall = fakeDevices.seenPayloads
++          .lastWhere(
++            (Map<String, Object?> p) => p['call'] == 'revokeHostDevice',
++          );
++      expect(revokeCall['targetDeviceId'], 'p-host-aaaaaaaa');
++      expect(revokeCall['partyId'], _party);
++      expect(find.text('Phone A'), findsNothing);
++      expect(find.text('Phone B'), findsOneWidget);
++      expect(find.byKey(kHostDeviceErrorKey), findsNothing);
++      await disposePanel(tester);
++    });
++
++    testWidgets('revoke failure keeps the row with an inline error', (
++      WidgetTester tester,
++    ) async {
++      final FakeHostDeviceInvoker fakeDevices = FakeHostDeviceInvoker(
++        <Map<String, Object?>>[hostRow('p-host-aaaaaaaa', 'Phone A')],
++      );
++      fakeDevices.revokeFailure = const HostDeviceException('denied');
++      await pumpPanel(
++        tester,
++        inviteClient(inviteResponse()),
++        devicesClient: deviceClient(fakeDevices),
++      );
++      await tester.pump();
++      await tester.pump();
++      await tester.pump();
++
++      await tapPanelKey(tester, HostCodePanel.revokeKeyFor('Phone A'));
++      await tester.pumpAndSettle();
++      await tapPanelKey(tester, kHostRevokeConfirmKey);
++      await tester.pump();
++      await tester.pump();
++      // Selection kept until authoritative success: the row stays retryable.
++      expect(find.text('Phone A'), findsOneWidget);
++      expect(find.byKey(kHostDeviceErrorKey), findsOneWidget);
++      expect(find.textContaining('denied'), findsOneWidget);
++      await disposePanel(tester);
++    });
++
++    testWidgets('no devices client hides the host list section', (
++      WidgetTester tester,
++    ) async {
++      await pumpPanel(tester, inviteClient(inviteResponse()));
++      await tester.pump();
++      await tester.pump();
++      expect(find.byKey(kHostCodeQrKey), findsOneWidget);
++      expect(find.text('ACTIVE HOSTS'), findsNothing);
++      expect(find.byKey(kHostDeviceListKey), findsNothing);
++      await disposePanel(tester);
++    });
++  });
++}
+diff --git a/docs/ADRs/0003-host-entry-and-camera-layout.md b/docs/ADRs/0003-host-entry-and-camera-layout.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..416a42a3ac0c7465e9887e9e4320d474efc27cdf
+--- /dev/null
++++ b/docs/ADRs/0003-host-entry-and-camera-layout.md
+@@ -0,0 +1,78 @@
++# ADR 0003 — Dedicated host entry, camera display cap, and invite/PIN separation
++
++- Status: accepted
++- Date: 2026-10-31
++- Partition: fix-2 apps security + polish (Halloween TV cycle-12)
++
++## 1. Dedicated host entry screen (separate from guest PIN admission)
++
++Decision: the companion boots to a dedicated `HostEntryScreen` (Scan Host
++QR + paste fallback + explicit "Join as guest" route) instead of a single
++join form with a role toggle.
++
++Rationale: guest PIN admission is intentionally broad — anyone who can see
++the TV screen can self-register as a guest. Host administration must never
++be reachable through the guest PIN or a client-supplied role string, so
++the two routes stay visibly distinct and the privilege boundary stays
++auditable: host payloads redeem only through `joinHost` (separate phone
++identity, server-assigned `host` role) while guest payloads register only
++through `joinParty`.
++
++Consequences:
++- The host QR carries a server-minted, short-lived invite capability
++  (`inviteToken`) plus a 6-digit `pairingCode` shown next to the QR; both
++  are required by `joinHost`, and a wrong code denies exactly like an
++  unknown invite (generic `FORBIDDEN`, no oracle).
++- The entry screen collects the pairing code in its own field (manual
++  entry authoritative; a code inside a scanned/pasted payload only
++  prefills an empty field — scan/paste parity), validates it locally
++  (6 digits, no network on failure), and surfaces denial as the generic
++  sanitized message only.
++
++## 2. Camera display cap (`cameraCount` key, encoding, default)
++
++Decision: `cameraCount` is a display cap only, persisted through the
++existing party-scoped `SettingsPort` string key
++(`CctvWallSettingsKeys.cameraCount`) with values `'1'` / `'2'` / `'4'`
++(surrounding whitespace tolerated, raw ints accepted defensively) and a
++default of `4` (`kDefaultCctvClipCount`) for anything absent, invalid, or
++unreadable.
++
++Rationale: the setting can only ever HIDE cameras, never invent them —
++`cctvEffectiveCount = min(configured, manifest clips)` — while prepare /
++verify / ACK always cover the complete received manifest. Generation
++presets keep producing 4 clips and reduced layouts still ACK the full
++manifest, so `1`/`2`-camera manifests flow through the real mapping,
++durable-cache, delivery, and ACK paths. `isSupportedCctvClipCount`
++(1, 2, 4) is the shared gate on both sides; the wall fails closed
++(SIGNAL-LOST/cache state, no `StateError` out of construction) on any
++other manifest length.
++
++## 3. Host-invite vs guest-PIN separation
++
++Decision: the guest QR is `partyId + channelId + role: 'guest'` plus an
++optional six-digit `joinPin`; the HOST QR is `partyId + channelId +
++role: 'host'` plus `inviteToken + pairingCode`. A PIN-shaped token never
++redeems host access (rejected client-side and by `parseJoinHostInput`),
++a host payload never carries a `joinPin`, and client-supplied role
++strings are ignored — the backend assigns `host` server-side,
++transactionally, bound to party/channel/expiry.
++
++Consequences: legacy guest payloads without `role` stay parseable
++(role-absent means guest); unknown roles fail visibly; guest payloads
++submitted on the host entry (or vice versa) fail before any callable.
++
++## 4. Preview/delivery separation + host revocation
++
++Decision: previews are fresh scoped capabilities per view
++(`getHostVideoPreview` → short-lived signed URLs, never persisted),
++while delivery manifests are the only durable playback artifact. Deletion
++is per selected seed id (previews + delivery objects removed, affected
++current manifest revoked, accounting records preserved) behind a
++confirmation dialog naming the seed(s), reconciled only after
++authoritative success so failures stay retryable in place.
++
++Host management on the TV (`revokeHostDevice`, TV-only) lists active
++hosts as LABELS ONLY — device ids never render — and revokes by opaque
++id behind a second confirmation naming the label; the row stays until
++the server confirms.

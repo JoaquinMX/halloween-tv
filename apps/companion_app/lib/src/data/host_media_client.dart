@@ -15,6 +15,7 @@ library;
 import 'dart:async';
 
 import 'package:cloud_functions/cloud_functions.dart';
+import 'package:core_playlist/core_playlist.dart' show kCctvCameraIds;
 import 'package:infra_firestore/infra_firestore.dart'
     show ManifestTransportException;
 
@@ -186,6 +187,21 @@ final class HostMediaClient {
     if (entry['previewAvailable'] is! bool || cameras is! List) {
       throw const FormatException('Host seed entry fields are malformed');
     }
+    // Strict camera validation: every entry must be a non-empty string in
+    // the canonical CCTV set (CAM-01..CAM-04). Anything else — nulls,
+    // numbers, blanks, unknown cameras — is a malformed seed entry, never
+    // silently coerced.
+    final List<String> cameraIds = <String>[];
+    for (final Object? camera in cameras) {
+      if (camera is! String ||
+          camera.isEmpty ||
+          !kCctvCameraIds.contains(camera)) {
+        throw FormatException(
+          'Host seed entry cameraId "$camera" is malformed',
+        );
+      }
+      cameraIds.add(camera);
+    }
     return HostSeedVideo(
       seedId: requiredString('seedId'),
       partyId: seedParty,
@@ -195,7 +211,7 @@ final class HostMediaClient {
       createdAt: requiredString('createdAt'),
       expiresAt: requiredString('expiresAt'),
       previewAvailable: entry['previewAvailable'] as bool,
-      cameraIds: <String>[for (final Object? c in cameras) c.toString()],
+      cameraIds: cameraIds,
     );
   }
 

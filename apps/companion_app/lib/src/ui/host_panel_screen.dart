@@ -61,6 +61,9 @@ final class HostPanelScreen extends StatefulWidget {
   static const Key retryKey = Key('host-panel-retry');
   static const Key leaveKey = Key('host-panel-leave');
   static const Key messageKey = Key('host-panel-message');
+  static const Key deleteDialogKey = Key('host-panel-delete-dialog');
+  static const Key deleteConfirmKey = Key('host-panel-delete-confirm');
+  static const Key deleteCancelKey = Key('host-panel-delete-cancel');
   static Key deleteKey(String seedId) => Key('host-delete-$seedId');
   static Key viewKey(String seedId) => Key('host-view-$seedId');
 
@@ -112,6 +115,35 @@ final class _HostPanelScreenState extends State<HostPanelScreen> {
 
   Future<void> _delete(String seedId) async {
     if (_busySeeds.contains(seedId)) return;
+    // Deletion is confirmed first: the dialog names the seed and states
+    // that its previews + the live manifest entry are removed. The row
+    // stays (and the busy marker stays) until the server confirms, so a
+    // failure keeps the selection retryable in place.
+    final bool? confirmed = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext context) => AlertDialog(
+        key: HostPanelScreen.deleteDialogKey,
+        title: const Text('Delete seed video?'),
+        content: Text(
+          'Delete seed "$seedId"? Its previews and live manifest entry are '
+          'removed immediately. Accounting records are preserved. This '
+          'cannot be undone.',
+        ),
+        actions: <Widget>[
+          TextButton(
+            key: HostPanelScreen.deleteCancelKey,
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('CANCEL'),
+          ),
+          TextButton(
+            key: HostPanelScreen.deleteConfirmKey,
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('DELETE'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
     setState(() {
       _busySeeds.add(seedId);
       _actionError = null;

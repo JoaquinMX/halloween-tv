@@ -1,10 +1,11 @@
 // On-device camera join regression (physical Pixel, manual run).
 //
 // Run (from apps/companion_app, release + live defines, permission
-// pre-granted so no OS dialog blocks the run):
+// pre-granted so no OS dialog blocks the run, on a camera-capable device):
 //
 //   adb -s <serial> shell pm grant <package> android.permission.CAMERA
 //   flutter test integration_test/camera_join_scan_device_test.dart \
+//     --dart-define=DEVICE_CAMERA=true \
 //     --dart-define=COMPANION_FIREBASE_API_KEY=... \
 //     --dart-define=COMPANION_FIREBASE_APP_ID=... \
 //     --dart-define=COMPANION_FIREBASE_PROJECT_ID=halloween-tv \
@@ -18,10 +19,11 @@
 // procedure in docs/COMPANION-CAMERA-PROOF.md (human aims the camera;
 // automation cannot point the lens).
 //
-// Live paste-join runs only when DEVICE_PARTY_ID/DEVICE_CHANNEL_ID are
-// supplied; otherwise it reports the skip. It registers one guest device
-// against the seeded rehearsal party (same cost class as the typed manual
-// join in rehearsal NOTES — no generation, no spend).
+// Both tests need physical hardware, so they stay skipped with a reason
+// everywhere else (never a vacuous pass). The paste-join additionally
+// requires DEVICE_PARTY_ID/DEVICE_CHANNEL_ID; it registers one guest
+// device against the seeded rehearsal party (same cost class as the typed
+// manual join in rehearsal NOTES — no generation, no spend).
 library;
 
 import 'package:companion_app/src/companion_app.dart';
@@ -34,6 +36,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 const String _devicePartyId = String.fromEnvironment('DEVICE_PARTY_ID');
 const String _deviceChannelId = String.fromEnvironment('DEVICE_CHANNEL_ID');
+const bool _deviceCamera = bool.fromEnvironment('DEVICE_CAMERA');
 
 Future<void> _settle(WidgetTester tester) async {
   for (int i = 0; i < 12; i++) {
@@ -41,10 +44,23 @@ Future<void> _settle(WidgetTester tester) async {
   }
 }
 
+/// Hardware gate: without an explicit on-device opt-in the test is
+/// skipped with a reason, so a missing device never reads as a pass.
+void _requireDevice(String what) {
+  if (!_deviceCamera) {
+    markTestSkipped(
+      'Requires physical $what; rerun with '
+      '--dart-define=DEVICE_CAMERA=true on a camera-capable device '
+      '(see docs/COMPANION-CAMERA-PROOF.md).',
+    );
+  }
+}
+
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
   testWidgets('device: granted camera opens the live scanner', (tester) async {
+    _requireDevice('camera hardware');
     SharedPreferences.setMockInitialValues(<String, Object>{});
     await tester.pumpWidget(const CompanionApp());
     await _settle(tester);
@@ -73,13 +89,12 @@ void main() {
   testWidgets('device: pasted join data joins the seeded party', (
     tester,
   ) async {
+    _requireDevice('device backend access');
     if (_devicePartyId.isEmpty || _deviceChannelId.isEmpty) {
-      // ignore: avoid_print
-      print(
-        'SKIP live join: pass --dart-define=DEVICE_PARTY_ID=... '
-        'DEVICE_CHANNEL_ID=... (see docs/COMPANION-CAMERA-PROOF.md).',
+      markTestSkipped(
+        'Pass --dart-define=DEVICE_PARTY_ID=... DEVICE_CHANNEL_ID=... '
+        '(see docs/COMPANION-CAMERA-PROOF.md).',
       );
-      return;
     }
     SharedPreferences.setMockInitialValues(<String, Object>{});
     await tester.pumpWidget(const CompanionApp());
