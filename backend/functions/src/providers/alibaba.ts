@@ -102,7 +102,7 @@ export function buildAlibabaSubmitBody(request: VideoGenerationRequest): {
     // before transport, so an unfetchable reference can never be submitted.
     // No objectPath/storage_ref is ever sent.
     validateFetchableReferenceImage(request.referenceImage);
-    input.media = [request.referenceImage.url];
+    input.media = [{ type: "reference_image", url: request.referenceImage.url }];
   }
   return {
     model: request.modelId,

@@ -315,7 +315,7 @@ test("submit body uses the media-field form for references (no network)", () => 
     url: "https://signed.invalid/media-photo.jpg",
   };
   const body = buildAlibabaSubmitBody(buildCheapDemoRequest("job-media", "idem-media", "CAM-01", { ...reference }));
-  assert.deepEqual((body.input as Record<string, unknown>).media, ["https://signed.invalid/media-photo.jpg"]);
+  assert.deepEqual((body.input as Record<string, unknown>).media, [{ type: "reference_image", url: "https://signed.invalid/media-photo.jpg" }]);
   assert.ok(!("reference_image" in (body.input as Record<string, unknown>)));
   assert.ok(!JSON.stringify(body).includes("c".repeat(64)));
 });

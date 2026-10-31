@@ -128,7 +128,7 @@ test("guest image reference serializes offline with cheap_demo limits unchanged"
   assert.equal((body.input as Record<string, unknown>).prompt, request.prompt);
   // Corrected r2v envelope: the signed URL rides as input.media; the sha256
   // stays on the request/ledger path and never enters the submitted JSON.
-  assert.deepEqual((body.input as Record<string, unknown>).media, ["https://signed.invalid/guest-photo.jpg"]);
+  assert.deepEqual((body.input as Record<string, unknown>).media, [{ type: "reference_image", url: "https://signed.invalid/guest-photo.jpg" }]);
   assert.ok(!("reference_image" in (body.input as Record<string, unknown>)));
   assert.ok(!JSON.stringify(body).includes(photoSha));
   // The private bucket path never leaves the backend: no storage_ref or
@@ -169,7 +169,7 @@ test("cameo_demo serializes offline to the r2v model at 5s with a reference (no 
   assert.equal((body.input as Record<string, unknown>).prompt, request.prompt);
   // Corrected r2v envelope: input.media carries the signed URL; sha256 stays
   // off the wire on the request/ledger path.
-  assert.deepEqual((body.input as Record<string, unknown>).media, ["https://signed.invalid/guest-photo.jpg"]);
+  assert.deepEqual((body.input as Record<string, unknown>).media, [{ type: "reference_image", url: "https://signed.invalid/guest-photo.jpg" }]);
   assert.ok(!("reference_image" in (body.input as Record<string, unknown>)));
   assert.ok(!JSON.stringify(body).includes(photoSha));
   assert.deepEqual(body.parameters, { resolution: "480P", ratio: "16:9", duration: 5, audio: false, watermark: false });
@@ -222,8 +222,8 @@ test("resolved reference serializes to the fetchable https URL form (no network)
   });
   const body = buildAlibabaSubmitBody(request);
   const wire = body.input as Record<string, unknown>;
-  assert.deepEqual(wire.media, [url]);
-  assert.ok(((wire.media as unknown[])[0] as string).startsWith("https://"));
+  assert.deepEqual(wire.media, [{ type: "reference_image", url }]);
+  assert.ok(((wire.media as Array<Record<string, unknown>>)[0].url as string).startsWith("https://"));
   assert.ok(!("reference_image" in wire));
   assert.ok(!JSON.stringify(body).includes(photoSha));
   assert.ok(!("storage_ref" in wire));
