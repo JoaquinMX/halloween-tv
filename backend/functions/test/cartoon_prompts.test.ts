@@ -14,7 +14,10 @@ import {
 
 const FUNCTIONS_ROOT = resolveFunctionsRoot(resolve(__dirname, "../src"));
 
-test("cartoon composer is identity-first, static-pose still, motion-faithful video, scene/style-last", () => {
+const TIMED_BEATS = ["0-1s:", "1-2s:", "2s:"];
+const MOTION_TOKENS_CRAMPED = ["sprints", "face-plants", "windmill", "scramble and burst"];
+
+test("cartoon composer is identity-first, role-mapped, static-tableau still, motion-faithful video, scene/style-last", () => {
   const { catalog, situations } = loadValidatedCatalogs(FUNCTIONS_ROOT);
   const { scenario, situation } = selectScenarioSituation(catalog, situations, "attic-computer-corner", "cramped-stumble-chase");
   const prompts = composeCartoonPromptsFromPair(scenario, situation);
@@ -22,23 +25,43 @@ test("cartoon composer is identity-first, static-pose still, motion-faithful vid
   assert.ok(prompts.still.includes(scenario.stylePrompt.slice(0, 24)));
   assert.ok(prompts.motion.includes(situation.action.slice(0, 32)));
   assert.ok(prompts.negative.length > 10);
-  // Ordering: identity reference first, static pose second, scene/style last.
-  // The still carries NO motion language (the timed choreography belongs to
-  // the video stage only).
+  // Ordering: identity reference first, role mapping second, static tableau
+  // third, scene/style last. Subject-first / dominant / scene-last kept.
   const identityAt = prompts.still.indexOf("subject_identity");
-  const poseAt = prompts.still.indexOf("Static starting pose");
+  const roleAt = prompts.still.indexOf("reference image 1");
+  const tableauAt = prompts.still.indexOf("Static opening tableau");
   const styleAt = prompts.still.indexOf(scenario.stylePrompt.slice(0, 24));
-  assert.ok(identityAt >= 0 && poseAt > identityAt && styleAt > poseAt);
-  assert.ok(!prompts.still.includes("0-1s:"));
-  assert.match(prompts.still, /Static starting pose/);
-  for (const token of ["sprints", "face-plants", "windmill", "scramble and burst"]) {
+  assert.ok(identityAt >= 0 && roleAt > identityAt && tableauAt > roleAt && styleAt > tableauAt);
+  // Fix-5b role mapping: wire positions explicit (TS labels are invisible).
+  // Wire order is [style_scene image 1, subject_identity image 2].
+  for (const token of [
+    "reference image 1 is the SCENE/STYLE reference only",
+    "setting and palette only",
+    "must NOT appear",
+    "reference image 2 is the ACTUAL PERSON",
+    "visually dominant in the foreground",
+    "redraw that person fully illustrated",
+  ]) {
+    assert.ok(prompts.still.includes(token), `still must map reference roles (${token})`);
+  }
+  // The still carries NO timed beats and NO motion language from the action.
+  for (const beat of TIMED_BEATS) assert.ok(!prompts.still.includes(beat), `still must carry no timed beats (${beat})`);
+  assert.match(prompts.still, /Static opening tableau/);
+  for (const token of MOTION_TOKENS_CRAMPED) {
     assert.ok(!prompts.still.toLowerCase().includes(token), `still must carry no motion language (${token})`);
   }
   assert.ok(!prompts.still.includes(situation.action), "the timed action choreography belongs to the video stage only");
+  // No generic feet-planted pose, no camera/motion negations leaking in.
+  assert.ok(!/feet planted/i.test(prompts.still), "generic feet-planted pose is forbidden");
+  assert.ok(!/side-tracking/i.test(prompts.still));
+  assert.ok(!/motion blur/i.test(prompts.still));
   // The still never says "no people": the cast line names the figures.
   assert.ok(!/no people/i.test(prompts.still));
   assert.match(prompts.still, /empty of pre-existing characters/);
-  assert.match(prompts.still, /the only figures are the uploaded subject and the required situation characters/);
+  assert.ok(!prompts.still.includes("required situation characters"), "still must name the cast, not a vague placeholder");
+  assert.match(prompts.still, /the only figures are/);
+  assert.match(prompts.still, /goofy cartoon monster/);
+  assert.match(prompts.still, /rug\/cable\/plush/);
   // Generic preservation is required: the subject's actual attributes ride a
   // generic instruction, never a hard-coded person.
   assert.match(prompts.still, /preserve the subject's actual distinctive attributes/);
@@ -47,6 +70,7 @@ test("cartoon composer is identity-first, static-pose still, motion-faithful vid
   assert.ok(!/locked camera/i.test(prompts.motion));
   assert.ok(!/no camera movement/i.test(prompts.motion));
   assert.match(prompts.motion, /side-tracking shot/);
+  assert.ok(prompts.motion.includes(situation.action), "video must carry the situation motion verbatim");
   // Negative prompt carries the photographic/identity-substitution guard and
   // never bans the required monster/chase or camera movement.
   assert.match(prompts.negative, /photographic skin/);
@@ -59,6 +83,68 @@ test("cartoon composer is identity-first, static-pose still, motion-faithful vid
     assert.ok(!prompts.still.toLowerCase().includes(token));
     assert.ok(!prompts.motion.toLowerCase().includes(token));
   }
+});
+
+test("cartoon still tableaus name the exact cast for the sample situations", () => {
+  const { catalog, situations } = loadValidatedCatalogs(FUNCTIONS_ROOT);
+  const cases: Array<{ scenarioId: string; situationId: string; castTokens: string[] }> = [
+    {
+      scenarioId: "storybook-kitchen",
+      situationId: "kitchen-slapstick-chase",
+      castTokens: ["goofy kitchen monster", "cauldron/stew tub", "tipped pot", "pot lids"],
+    },
+    {
+      scenarioId: "halloween-graveyard",
+      situationId: "horde-swarm-chase",
+      castTokens: ["pumpkin mob", "candy", "uploaded subject"],
+    },
+    {
+      scenarioId: "farmhouse-sitting-room",
+      situationId: "couch-gag-chase",
+      castTokens: ["couch", "off TV", "floor lamp", "couch end"],
+    },
+  ];
+  for (const { scenarioId, situationId, castTokens } of cases) {
+    const { scenario, situation } = selectScenarioSituation(catalog, situations, scenarioId, situationId);
+    const prompts = composeCartoonPromptsFromPair(scenario, situation);
+    for (const token of castTokens) {
+      assert.ok(prompts.still.includes(token), `${situationId} still must name cast/prop (${token})`);
+    }
+    assert.ok(!prompts.still.includes("required situation characters"), `${situationId} must name the cast`);
+    assert.ok(!/feet planted/i.test(prompts.still), `${situationId} forbids the generic pose`);
+    for (const beat of TIMED_BEATS) assert.ok(!prompts.still.includes(beat), `${situationId} still has no timed beats`);
+    assert.ok(prompts.still.includes("reference image 1 is the SCENE/STYLE reference only"));
+    assert.ok(prompts.still.includes("reference image 2 is the ACTUAL PERSON"));
+    assert.ok(prompts.motion.includes(situation.action), `${situationId} video matches situation motion`);
+  }
+});
+
+test("every catalog situation yields a named static cast (no vague placeholder, no motion)", () => {
+  const { catalog, situations } = loadValidatedCatalogs(FUNCTIONS_ROOT);
+  assert.ok(situations.events.length >= 11, "situations catalog covers all events");
+  for (const event of situations.events) {
+    const scenarioId = event.compatibleScenarios[0];
+    const { scenario, situation } = selectScenarioSituation(catalog, situations, scenarioId, event.id);
+    const prompts = composeCartoonPromptsFromPair(scenario, situation);
+    assert.ok(!prompts.still.includes("required situation characters"), `${event.id} must name its cast`);
+    assert.match(prompts.still, /the only figures are/);
+    assert.ok(prompts.still.includes("reference image 2 is the ACTUAL PERSON"), `${event.id} maps roles`);
+    assert.ok(!/feet planted/i.test(prompts.still), `${event.id} forbids the generic pose`);
+    for (const beat of TIMED_BEATS) assert.ok(!prompts.still.includes(beat), `${event.id} still has no timed beats`);
+    assert.ok(!prompts.still.includes(situation.action), `${event.id} timed action belongs to video only`);
+    assert.ok(prompts.motion.includes(situation.action), `${event.id} video matches situation motion`);
+    assert.ok(!/no people/i.test(prompts.still), `${event.id} never says no people`);
+    void scenario;
+  }
+  // Sheet-ghost vs pumpkin-horde are distinct casts, never conflated.
+  const ghostPair = selectScenarioSituation(catalog, situations, "clock-manor-hall", "clock-chime-scare");
+  const ghost = composeCartoonPromptsFromPair(ghostPair.scenario, ghostPair.situation);
+  assert.match(ghost.still, /sheet ghost/);
+  assert.ok(!ghost.still.toLowerCase().includes("pumpkin mob"));
+  const hordePair = selectScenarioSituation(catalog, situations, "halloween-graveyard", "horde-swarm-chase");
+  const horde = composeCartoonPromptsFromPair(hordePair.scenario, hordePair.situation);
+  assert.match(horde.still, /pumpkin mob/);
+  assert.ok(!horde.still.toLowerCase().includes("sheet ghost"));
 });
 
 test("cartoon composer rejects incompatible pairs and hard-coded appearance", () => {
@@ -79,6 +165,9 @@ test("cartoon composer rejects incompatible pairs and hard-coded appearance", ()
   // The generic preservation instruction is correct and never rejected.
   const generic = composeCartoonPrompts({ subject: "the person in the subject_identity reference (the uploaded subject)", action: "runs left to right", sceneStyle: "spooky attic" });
   assert.match(generic.still, /preserve the subject's actual distinctive attributes/);
+  assert.match(generic.still, /reference image 1 is the SCENE\/STYLE reference only/);
+  assert.match(generic.still, /reference image 2 is the ACTUAL PERSON/);
+  assert.ok(!/feet planted/i.test(generic.still));
 });
 
 test("cartoon still fixture serializes offline with the composed prompt (no network)", () => {

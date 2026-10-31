@@ -38,9 +38,10 @@ The following 3 cases are the exact output of `npm run cartoon:prepare -- --part
 - Still prompt:
 ```
 Subject and identity: use the subject_identity reference as the character identity. Redraw the person in the subject_identity reference (the uploaded subject) as a coherent, fully illustrated cartoon character; preserve the subject's actual distinctive attributes (glasses, facial hair, hairstyle, outfit) exactly as seen in the subject_identity reference, without photographic skin or pasted photographic details.
-Static starting pose: a single unambiguous static pose at the opening of the scene, feet planted, facing the situation entrance; held still, no motion blur.
+Reference roles: reference image 1 is the SCENE/STYLE reference only (its pre-existing characters, if any, must NOT appear — setting and palette only); reference image 2 is the ACTUAL PERSON (uploaded subject identity), who must be visually dominant in the foreground; redraw that person fully illustrated preserving their actual distinctive attributes.
+Static opening tableau: the uploaded subject stands center-foreground beside a tipped pot and the cauldron/stew tub, pot lids arranged as set dressing nearby with a flour/steam puff prop in place, the goofy kitchen monster stationed a step behind; hearth and stone-arch kitchen frames the pair; all figures and props hold completely still with sharp static clarity.
 Scene and style: Bustling storybook kitchen with hearth cauldron and stone arches, empty of pre-existing characters Chowder Marzipan-City cartoon kitchen, wobbly hand-inked lines, textured ochre/magenta washes, squishy round shapes Constraints: Kitchen chase: slip on pots, hide behind cauldron; food gags only Kitchens only; steam and pot lids as cover; food gags only
-Cast: empty of pre-existing characters; the only figures are the uploaded subject and the required situation characters.
+Cast: empty of pre-existing characters; the only figures are the uploaded subject (foreground, visually dominant) and one goofy kitchen monster by the cauldron.
 ```
 - Video prompt:
 ```
@@ -55,9 +56,10 @@ Animate the supplied illustrated first frame. 0-1s: guest slips on a tipped pot 
 - Still prompt:
 ```
 Subject and identity: use the subject_identity reference as the character identity. Redraw the person in the subject_identity reference (the uploaded subject) as a coherent, fully illustrated cartoon character; preserve the subject's actual distinctive attributes (glasses, facial hair, hairstyle, outfit) exactly as seen in the subject_identity reference, without photographic skin or pasted photographic details.
-Static starting pose: a single unambiguous static pose at the opening of the scene, feet planted, facing the situation entrance; held still, no motion blur.
+Reference roles: reference image 1 is the SCENE/STYLE reference only (its pre-existing characters, if any, must NOT appear — setting and palette only); reference image 2 is the ACTUAL PERSON (uploaded subject identity), who must be visually dominant in the foreground; redraw that person fully illustrated preserving their actual distinctive attributes.
+Static opening tableau: the uploaded subject stands center-foreground on the road/path in a calm poised stance, the goofy pumpkin mob with the monster among them stationed along both sides with scattered candy and harmless props; night/dusk outdoor set with graves and fields frames the group; all figures hold completely still with sharp static clarity.
 Scene and style: Crowded spooky graveyard at night with glowing jack-o-lantern mound and tombstones Grim-Adventures Halloween cartoon graveyard, sickly green night glow, thick black outlines, flat purple stone Constraints: Outdoor horde chase fits perfectly; monster can join pumpkin mob; keep candy/graves, no gore Outdoor night/dusk chases; monster may join the mob; keep candy/graves/van livery
-Cast: empty of pre-existing characters; the only figures are the uploaded subject and the required situation characters.
+Cast: empty of pre-existing characters; the only figures are the uploaded subject (foreground, visually dominant) and a goofy pumpkin mob with the monster among them.
 ```
 - Video prompt:
 ```
@@ -72,9 +74,10 @@ Animate the supplied illustrated first frame. 0-1s: guest flees down the road/pa
 - Still prompt:
 ```
 Subject and identity: use the subject_identity reference as the character identity. Redraw the person in the subject_identity reference (the uploaded subject) as a coherent, fully illustrated cartoon character; preserve the subject's actual distinctive attributes (glasses, facial hair, hairstyle, outfit) exactly as seen in the subject_identity reference, without photographic skin or pasted photographic details.
-Static starting pose: a single unambiguous static pose at the opening of the scene, feet planted, facing the situation entrance; held still, no motion blur.
+Reference roles: reference image 1 is the SCENE/STYLE reference only (its pre-existing characters, if any, must NOT appear — setting and palette only); reference image 2 is the ACTUAL PERSON (uploaded subject identity), who must be visually dominant in the foreground; redraw that person fully illustrated preserving their actual distinctive attributes.
+Static opening tableau: the uploaded subject stands center-foreground beside the couch with cushions in place, rug edge and floor lamp nearby and the off TV set in the background, the cartoon monster stationed at the couch end; living-room set frames the pair; all figures and props hold completely still with sharp static clarity.
 Scene and style: Quaint farmhouse sitting room with red armchair, rocker, rug and daylight windows Courage-the-Cowardly-Dog farmhouse living room, crunchy ink, dusty rose/red wood, garish green monster accents Constraints: Classic mask-scare beat fits; monster lunges, guest recoils; keep one monster only Domestic living rooms only; furniture wobbles, never breaks; no menace beyond spooky twist
-Cast: empty of pre-existing characters; the only figures are the uploaded subject and the required situation characters.
+Cast: empty of pre-existing characters; the only figures are the uploaded subject (foreground, visually dominant) and one cartoon monster at the couch end.
 ```
 - Video prompt:
 ```
