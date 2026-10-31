@@ -235,3 +235,10 @@ with party/TV-device/channel IDs returned manifest v1, 4 clips
 - Rotation works: offline -> v1 -> v2 -> v3 -> v4, each picked up and played. Zero provider calls for this demo.
 - Open: fixture tiles render black/bars on this TV build (bytes verified on device; cosmetic, pre-existing); failed-job staged outputs vanish with no operator backup — future runs should download staged generated clips locally before expiry (process gap, not code).
 - Spend: probe budget unchanged (4/5 step-2 used, 1 spare, window closed). No new billable calls.
+
+## 15. v5 byte-restore (orchestrator-executed 2026-10-31 ~09:10 CST, zero spend)
+
+- Joaquin: v4's HUD-baked recording looked worse than the clean original; keep the clip as before. Fix: versioning was suspended and the purge deleted all cloud copies, TV app cache unreadable — but the v3 ACK receipt (deliveryAcks) preserved exact sha256/size per camera, and the TV's sha256-keyed file cache (30-day maxAge) still held the verified v3 bytes.
+- Published v5 referencing the ORIGINAL v3 clip bytes (CAM-01 clean cameo 5s + 3 fixtures) with v5 delivery paths. TV cache-hit all four (no re-download possible — objects absent), wall shows clean cartoon with single HUD, "WALL UPDATED · v5". ACKed (e9bd2fd4...), purge no-op.
+- Lesson recorded: the ACK receipt is the byte manifest of last resort — purge design should consider retaining an operator retrieval path within the TTL window (open question; current behavior deletes on ACK).
+- Handoff state: branch orchestrator-cycle-11-guest-video-chain pushed. Live window CLOSED (generation disabled, provider fake, redeployed, predeploy hook restored). Spend: step-1 probe 5/5 used, step-2 probe 4/5 used (1 spare, needs fresh approval to spend). Open: (1) full 4-tile generated set needs a fresh approved text-only batch (~1.2% quota) + local backup of staged clips before expiry; (2) fixture tiles render black/bars on this TV build (bytes verified on device); (3) failed-job staged outputs are swept with no operator backup (process gap); (4) failed c11-live-01/c11-cameo-01..04 jobs remain failed/expired in Firestore (expected, no action).
