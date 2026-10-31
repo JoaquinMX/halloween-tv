@@ -91,15 +91,26 @@ test("publish rejects withdrawn tombstones and missing consent", {
       signGuestUploadUrl: async (file) => `https://upload.invalid/${encodeURIComponent(file.name)}`,
       signReadUrl: async (file) => `https://signed.invalid/${encodeURIComponent(file.name)}`,
     });
-    // Eligible guest input bound to a job, staged but unpublished.
-    const requested = await services.requestGuestUpload({
+    // Eligible guest input bound to a job, staged but unpublished. Upload
+    // phase runs with generation disabled so eligible completion stays fully
+    // operational without auto-enqueueing the backend-selected cartoon job;
+    // this test's explicit purpose is the manual cheap_demo request path
+    // (publish gate), which needs a clean single-flight budget. Auto-enqueue
+    // is covered by dedicated tests (guest_upload_e2e).
+    const upload = createRuntimeServices({
+      db, bucket, generationEnabled: false,
+      pollIntervalMs: 1, sleep: async () => undefined,
+      signGuestUploadUrl: async (file) => `https://upload.invalid/${encodeURIComponent(file.name)}`,
+      signReadUrl: async (file) => `https://signed.invalid/${encodeURIComponent(file.name)}`,
+    });
+    const requested = await upload.requestGuestUpload({
       partyId, deviceId, channelId,
       consent: { accepted: true, textVersion: GUEST_CONSENT_TEXT_VERSION, purpose: GUEST_CONSENT_PURPOSE },
       contentType: "image/jpeg",
     });
     const photo = await readFile(resolve(__dirname, "fixtures/guest_photo.jpg"));
     await bucket.file(requested.objectPath).save(photo, { contentType: "image/jpeg" });
-    const completed = await services.completeGuestUpload({ partyId, deviceId, channelId, submissionId: requested.submissionId });
+    const completed = await upload.completeGuestUpload({ partyId, deviceId, channelId, submissionId: requested.submissionId });
     const jobId = "job-pub-gate";
     const idempotencyKey = "idem-pub-gate";
     await services.requestGeneration({ partyId, deviceId, channelId, jobId, idempotencyKey, presetId: "cheap_demo", guestMediaId: requested.submissionId });
