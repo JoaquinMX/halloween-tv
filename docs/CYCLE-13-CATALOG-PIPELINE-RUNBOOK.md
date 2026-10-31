@@ -139,3 +139,64 @@ Coverage distinctions (be precise): (i) real serializer tests against the verifi
 Honest review statement: A/B/C cover the earlier base diff, not the final tree. D approved with no findings; E approved with 2 Low + 1 Minimal findings; F requested changes with 1 High + 5 Low + 1 Minimal findings. All 10 E/F findings were addressed in fix-5d. No fresh three-role review covers fix-5e; the parent independently audits that narrow diff and reruns the full merged-tree emulator suite. Do not describe earlier reviews as approval of the final diff.
 
 Boundaries: 0 provider calls, credits UNKNOWN, no cloud deploy/migration, no device proof in this turn, no main merge.
+
+## Rollout closure (live batch + safe window) — appendix
+
+Sanitized only: no private inputs/URLs/credentials/keys, no image bytes/data URIs. Device proof pointers below are sanitized (no pairing codes/QR content).
+
+### 1. Approval record (owner "Run remaining pendings", bounded ceiling)
+
+- Owner directive: "Run remaining pendings" — bounded to the 3 pending cartoon cases only.
+- Ceiling: 3 stills + 3 videos maximum (6 generated artifacts). No retries on unknown outcomes. No 4th case.
+- Fixed controls: single generated camera + 3 fixture cameras; 2s / 480P / silent / no-watermark; `prompt_extend=false`.
+- Provider scope: Alibaba Singapore only (`qwen-image-3.0-pro` stills, `wan3.0-video` STANDARD video).
+- Consent/budget guards unchanged: one persisted plan, one job, one enqueue per case; no reroll/rebill; unknown-outcome stills never auto-resubmitted.
+
+### 2. Submission table (all real, live batch)
+
+| Case | Job ID | Scenario / situation | Plan seed | Still submits | Video submits | Evidence |
+|------|--------|----------------------|-----------|---------------|---------------|----------|
+| 1 | `hv-cartoon-case-1` | pink-mansion-foyer / grand-staircase-chase | 130102 | 1 uncertain still POST counted as spent, zero confirmed submits | 0 | Failed + budget released via `failClaimedJob`; evidence preserved |
+| 2 | `hv-cartoon-case-2` | furnace-kitchen-pass / kitchen-slapstick-chase | 130108 | 1 | 1 | Still sha `657d2935…fcee40` (1157339 B); video sha `7091f48a…9203252f` (563257 B, h264/854x480/24fps/2.0s); manifest v2 |
+| 3 | `hv-cartoon-case-3` | pink-mansion-foyer / grand-staircase-chase | (backend-selected, persisted immutably) | 1 | 1 | Still 847983 B; video sha `dc2d89ac…a9d9` (672987 B, same profile); manifest v3 |
+
+Totals: still POSTs 2 confirmed + 1 uncertain-reserved = 3/3 (ceiling reached, none remaining); videos 2/3 (1 unused, not convertible to a still or a 4th case).
+
+Credits: UNKNOWN everywhere. Ledger rows record null; no realized console charges surfaced during the batch, and no console reconciliation was performed. Do not estimate realized prices.
+
+### 3. Failures / gaps closed live
+
+Each item below was observed live and is now closed in code (see behavior notes above where applicable):
+
+- `image-provider-unconfigured`: missing image config left a job running with no gate. Closed by an `IMAGE_GENERATION_PROVIDER` startup/config gate (missing config fails fast by identity as `CartoonImageProviderMissingError`, never wedges running).
+- int32 seed clamp: a failing seed value `3399556814` exceeded int32 range. Closed by clamping/normalizing seed handling on the cartoon path.
+- No-timeout POST: provider POSTs without bounded timeouts could hang a worker lease. Closed by bounded fetch timeouts (video submit/status/result 30s each; image POST 120s; reference fetch 60s) with AbortSignal; timeout classifies as certainty `unknown`, followed by release-only (never fail, never resubmit).
+- Wedged-running: a `running` job with no lease that never settles. Closed by `failClaimedJob` recovery (same task identity redispatch; claiming worker re-evaluates definitiveness; budget released; job + ledger evidence preserved).
+- Channel mismatch on TV: wrong-channel delivery surfaced. Closed by explicit `TV_CHANNEL_ID` discipline on the device path.
+- `seed_pilot` text-only marker: legacy text-path seed marker misread as cartoon coverage. Closed by documenting it as text-only; cartoon-path coverage is the explicit separate suite (missing-image-config, definite still FAILED, definite video FAILED, ambiguous timeout release-only, classifier boundary).
+- Host enqueue discipline: host path risked double-submit/self-block. Closed by scoped `generateHostVideo` entry (same pipeline, same selector), exactly-once enqueue, `created:false` reuse, `BUDGET_EXCEEDED` on a genuinely different seed while one job is in flight, no auto-enqueue on host-source upload completion.
+- Pending intent queue: busy-party completions risked silent eligible-forever. Closed by durable pending intents with bounded created-gated dispatch, withdrawal/expiry recheck at dispatch, and `unavailable` reserved for genuine admission/terminal errors.
+
+### 4. Closure verification (safe window restored)
+
+- `predeploy`/`package.json` + `.env.halloween-tv` restored to default-deny (fake provider, generation off).
+- Redeployed in the safe window.
+- Generation-disabled proven: a fresh eligible upload created no job and no pending intent.
+- `runGeneration` queue verified empty; all live jobs terminal (failed/purged); no running workers.
+- Probe submission withdrawn through its supported authorization path.
+- Host previews retained (approved clips available; no destructive deletes performed).
+
+### 5. Device proof pointers (sanitized)
+
+- TV live wall v1: fixtures hash-MATCHED against pinned references.
+- HOST QR panel: invite + pairing code panel rendered (contents not recorded here).
+- GUEST CODES / LIST: 6 seeded guests displayed.
+- Wall v3 cartoon CAM-01 rendered on hardware; cached post-purge playback observed (preview retention path).
+- Phone proof blocked twice by external prerequisites (no bypass attempted, TV Wi-Fi untouched): first attempt the phone was locked (owner unlock needed); second attempt the USB device disappeared from `adb` (reconnect prerequisite). Phone proof remains pending owner unlock + reconnect.
+
+### 6. Limitations (honest)
+
+- Case-1 unknown POST is counted as spent without proof of execution (no confirmed submit, no artifact; conservative accounting against the ceiling).
+- Credits UNKNOWN: ledger null everywhere; no console reconciliation performed, so realized spend is unstated.
+- No live still/video re-verification was performed after the final code merges; the cited pass suites are rollout-5/6 emulator runs (228/220/234 passes) on the merged tree, not post-merge live generations.
+- Phone proof pending owner unlock + reconnect (see section 5).
