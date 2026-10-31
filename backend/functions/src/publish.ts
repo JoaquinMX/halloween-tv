@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { FieldValue } from "firebase-admin/firestore";
-import { BackendError, CanonicalClip, DeliveryManifest, isSupportedConsent, validateCanonicalClips } from "./contracts";
+import { assertCartoonChainComplete, BackendError, CanonicalClip, DeliveryManifest, evaluateDeliveryProvenance, isExplicitlySupportedLegacyArtifact, isSupportedConsent, validateCanonicalClips } from "./contracts";
 import { GUEST_PROVIDER_CAMERA_ID, SCHEMA_VERSION, REQUIRED_CAMERA_IDS } from "./config";
 import { FirestoreGenerationStore } from "./generation_store";
 import { GuestMediaDoc } from "./guest_media";
@@ -27,6 +27,15 @@ export function guestMediaOf(job: FirebaseFirestore.DocumentData): {
   return { submissionId: guest.submissionId, sourceHash: guest.sourceHash, consentRevision: guest.consentRevision };
 }
 
+export function seedProvenanceOf(job: FirebaseFirestore.DocumentData): {
+  seedId: string;
+  kind: string;
+} | undefined {
+  const seed = (job as Record<string, unknown>).seedProvenance as Record<string, unknown> | undefined;
+  if (!seed || typeof seed.seedId !== "string" || typeof seed.kind !== "string") return undefined;
+  return { seedId: seed.seedId, kind: seed.kind };
+}
+
 function assertGuestBinding(
   job: FirebaseFirestore.DocumentData,
   guest: GuestMediaDoc,
@@ -36,22 +45,110 @@ function assertGuestBinding(
   // Irreversible withdrawal: a tombstone can never publish again, even if a
   // racing completion wrote eligible around the withdrawal.
   if ((guest as GuestMediaDoc & { tombstone?: unknown }).tombstone === true) {
-    throw new BackendError("FORBIDDEN", "Guest consent was withdrawn.");
+    throw new BackendError("FORBIDDEN", "[authorization] Guest consent was withdrawn.");
   }
-  if (guest.status !== "eligible") throw new BackendError("FORBIDDEN", "Guest consent is no longer eligible for publication.");
+  if (guest.status !== "eligible") throw new BackendError("FORBIDDEN", "[authorization] Guest consent is no longer eligible for publication.");
   if (!guest.consent || guest.consent.accepted !== true ||
       !isSupportedConsent(guest.consent.textVersion, guest.consent.purpose)) {
-    throw new BackendError("FORBIDDEN", "Guest consent is not recorded for publication.");
+    throw new BackendError("FORBIDDEN", "[authorization] Guest consent is not recorded for publication.");
   }
   if (guest.sourceHash !== binding.sourceHash || guest.consentRevision !== binding.consentRevision) {
-    throw new BackendError("FORBIDDEN", "Guest media changed while the job was running.");
+    throw new BackendError("FORBIDDEN", "[authorization] Guest media changed while the job was running.");
+  }
+  if (guest.partyId !== undefined && guest.partyId !== (job as Record<string, unknown>).partyId) {
+    throw new BackendError("FORBIDDEN", "[authorization] Guest media is not authorized for this party and channel.");
   }
   const expiry = guest.expiresAt instanceof Date ? guest.expiresAt.getTime() : Date.parse(String(
     guest.expiresAt && typeof guest.expiresAt === "object" && "toDate" in guest.expiresAt
       ? (guest.expiresAt as { toDate: () => Date }).toDate().toISOString()
       : guest.expiresAt,
   ));
-  if (!Number.isFinite(expiry) || expiry <= nowMs) throw new BackendError("FORBIDDEN", "Guest consent window has expired.");
+  if (!Number.isFinite(expiry) || expiry <= nowMs) throw new BackendError("FORBIDDEN", "[authorization] Guest consent window has expired.");
+}
+
+/**
+ * Scoped publication provenance gate (cycle-13).
+ *
+ * - Cartoon jobs require the completed still-to-video chain with matching
+ *   stage provenance before anything else.
+ * - Guest-bound jobs use the consent gate above (withdrawn/expired/deleted/
+ *   changed-source/unknown/unauthorized bindings fail explicitly).
+ * - Legacy/operator/host seed artifacts publish WITHOUT fabricated mobile
+ *   consent when they are explicitly supported; anything else fails closed.
+ * - Database read failures fail closed (INTERNAL), never fail-open.
+ */
+export function assertScopedPublishProvenance(
+  job: FirebaseFirestore.DocumentData,
+  guest: GuestMediaDoc | undefined,
+  guestReadError: unknown,
+  seed: Record<string, unknown> | undefined,
+  seedReadError: unknown,
+  nowMs: number,
+): void {
+  if ((job as Record<string, unknown>).cartoonChain !== undefined) {
+    assertCartoonChainComplete(job as Record<string, unknown>);
+  }
+  evaluateDeliveryProvenance({
+    job: job as Record<string, unknown>,
+    guest: guest as Record<string, unknown> | undefined,
+    guestReadError,
+    seed,
+    seedReadError,
+    nowMs,
+  });
+}
+
+async function readProvenanceDocs(
+  store: FirestoreGenerationStore,
+  partyId: string,
+  job: FirebaseFirestore.DocumentData,
+): Promise<{ guest: GuestMediaDoc | undefined; guestReadError: unknown; seed: Record<string, unknown> | undefined; seedReadError: unknown }> {
+  const guest = guestMediaOf(job);
+  const seed = seedProvenanceOf(job);
+  let guestDoc: GuestMediaDoc | undefined;
+  let guestReadError: unknown;
+  let seedDoc: Record<string, unknown> | undefined;
+  let seedReadError: unknown;
+  if (guest) {
+    try {
+      const snapshot = await store.db.doc(`parties/${partyId}/guestMedia/${guest.submissionId}`).get();
+      guestDoc = snapshot.exists ? (snapshot.data() as GuestMediaDoc) : undefined;
+    } catch (error) {
+      guestReadError = error;
+    }
+  }
+  if (seed) {
+    try {
+      const snapshot = await store.db.doc(`parties/${partyId}/seedVideos/${seed.seedId}`).get();
+      seedDoc = snapshot.exists ? (snapshot.data() as Record<string, unknown>) : undefined;
+    } catch (error) {
+      seedReadError = error;
+    }
+  } else if (typeof job.jobId === "string" && job.jobId.startsWith("hv-")) {
+    // Host-seed jobs carry their authorization in the seed catalog entry.
+    const seedId = job.jobId.slice("hv-".length);
+    try {
+      const snapshot = await store.db.doc(`parties/${partyId}/seedVideos/${seedId}`).get();
+      if (snapshot.exists) {
+        seedDoc = snapshot.data() as Record<string, unknown>;
+        (job as Record<string, unknown>).seedProvenance = { seedId, kind: "host" };
+      }
+    } catch (error) {
+      seedReadError = error;
+    }
+  }
+  // Cartoon portrait bindings resolve through the same scoped gate: when the
+  // chain cites a guest portrait, load that guest doc for evaluation.
+  const chain = (job as Record<string, unknown>).cartoonChain as Record<string, unknown> | undefined;
+  if (chain && typeof chain.portraitSubmissionId === "string" && chain.portraitSubmissionId !== "" && !guest) {
+    try {
+      const snapshot = await store.db.doc(`parties/${partyId}/guestMedia/${String(chain.portraitSubmissionId)}`).get();
+      guestDoc = snapshot.exists ? (snapshot.data() as GuestMediaDoc) : undefined;
+    } catch (error) {
+      guestReadError = error;
+    }
+  }
+  return { guest: guestDoc, guestReadError, seed: seedDoc, seedReadError };
 }
 
 /** Publishes the current manifest in one Firestore transaction after all four objects exist. */
@@ -72,18 +169,20 @@ export async function publishManifest(
   }
   if (typeof job.jobId === "string" && job.jobId.startsWith("hv-")) {
     const seedId = job.jobId.slice("hv-".length);
-    const seedSnap = await store.db.doc(`parties/${partyId}/seedVideos/${seedId}`).get().catch(() => undefined);
+    let seedSnap: FirebaseFirestore.DocumentSnapshot | undefined;
+    try {
+      seedSnap = await store.db.doc(`parties/${partyId}/seedVideos/${seedId}`).get();
+    } catch {
+      throw new BackendError("INTERNAL", "[authorization] Seed authorization evidence is unreadable; failing closed.");
+    }
     if (seedSnap?.exists && (seedSnap.data() as Record<string, unknown>).status === "deleted") {
-      throw new BackendError("FORBIDDEN", "Seed video was deleted; publication is refused.");
+      throw new BackendError("FORBIDDEN", "[authorization] Seed video was deleted; publication is refused.");
     }
   }
   if (job.publishedManifest) return job.publishedManifest as DeliveryManifest;
+  const provenance = await readProvenanceDocs(store, partyId, job);
+  assertScopedPublishProvenance(job, provenance.guest, provenance.guestReadError, provenance.seed, provenance.seedReadError, Date.now());
   const guest = guestMediaOf(job);
-  if (guest) {
-    const snapshot = await store.db.doc(`parties/${partyId}/guestMedia/${guest.submissionId}`).get();
-    if (!snapshot.exists) throw new BackendError("FORBIDDEN", "Guest consent is no longer eligible for publication.");
-    assertGuestBinding(job, snapshot.data() as GuestMediaDoc, Date.now());
-  }
   const staged = job.stagedOutputs && typeof job.stagedOutputs === "object"
     ? job.stagedOutputs as Record<string, unknown>
     : {};
@@ -153,12 +252,24 @@ export async function publishManifest(
   const ref = store.jobDocumentRef(partyId, jobId);
   const budgetRef = store.db.doc(`parties/${partyId}/generationBudget/active`);
   return store.db.runTransaction(async (transaction) => {
-    const guestRef = guest ? store.db.doc(`parties/${partyId}/guestMedia/${guest.submissionId}`) : undefined;
-    const [jobSnapshot, currentSnapshot, budgetSnapshot, guestSnapshot] = await Promise.all([
+    const guestBinding = guestMediaOf(job);
+    const seedBinding = seedProvenanceOf(job);
+    const chain = (job as Record<string, unknown>).cartoonChain as Record<string, unknown> | undefined;
+    const portraitSubmissionId = chain && typeof chain.portraitSubmissionId === "string" && chain.portraitSubmissionId !== ""
+      ? String(chain.portraitSubmissionId)
+      : undefined;
+    const guestRef = guestBinding
+      ? store.db.doc(`parties/${partyId}/guestMedia/${guestBinding.submissionId}`)
+      : portraitSubmissionId && !seedBinding
+        ? store.db.doc(`parties/${partyId}/guestMedia/${portraitSubmissionId}`)
+        : undefined;
+    const seedRef = seedBinding ? store.db.doc(`parties/${partyId}/seedVideos/${seedBinding.seedId}`) : undefined;
+    const [jobSnapshot, currentSnapshot, budgetSnapshot, guestSnapshot, seedSnapshot] = await Promise.all([
       transaction.get(ref),
       transaction.get(currentRef),
       transaction.get(budgetRef),
-      ...(guestRef ? [transaction.get(guestRef)] : []),
+      ...(guestRef ? [transaction.get(guestRef)] : [Promise.resolve(undefined)]),
+      ...(seedRef ? [transaction.get(seedRef)] : [Promise.resolve(undefined)]),
     ]);
     const currentJob = jobSnapshot.data();
     if (!currentJob || currentJob.idempotencyKey !== idempotencyKey) {
@@ -168,17 +279,26 @@ export async function publishManifest(
     // racing the worker fails the publication instead of republishing. This
     // precedes the idempotent-published fast path for the same reason.
     if ((currentJob as Record<string, unknown>).hostDeleted === true) {
-      throw new BackendError("FORBIDDEN", "Seed video was deleted; publication is refused.");
+      throw new BackendError("FORBIDDEN", "[authorization] Seed video was deleted; publication is refused.");
     }
     if (currentJob.publishedManifest) return currentJob.publishedManifest as DeliveryManifest;
-    if (currentJob.state !== "running") throw new BackendError("MANIFEST_MISMATCH", "Only a running job can publish a manifest.");
-    if (guest) {
-      // Transactional consent gate: a withdrawal racing the worker fails the
-      // publication instead of publishing a revoked cameo.
-      if (!guestSnapshot || !guestSnapshot.exists) {
-        throw new BackendError("FORBIDDEN", "Guest consent is no longer eligible for publication.");
+    if (currentJob.state !== "running") throw new BackendError("MANIFEST_MISMATCH", "[manifest] Only a running job can publish a manifest.");
+    {
+      // Transactional consent/provenance gate: a withdrawal or deletion
+      // racing the worker fails the publication instead of publishing a
+      // revoked artifact. Read failures fail closed (the transaction
+      // surfaces them as INTERNAL, never as "no binding").
+      const replayGuest = (guestSnapshot && guestSnapshot.exists ? guestSnapshot.data() : undefined) as GuestMediaDoc | undefined;
+      const replaySeed = (seedSnapshot && seedSnapshot.exists ? seedSnapshot.data() : undefined) as Record<string, unknown> | undefined;
+      const needsGuestDoc = guestBinding !== undefined || (portraitSubmissionId !== undefined && seedBinding === undefined);
+      const needsSeedDoc = seedBinding !== undefined;
+      if (needsGuestDoc && !replayGuest) {
+        throw new BackendError("FORBIDDEN", "[authorization] Guest consent is no longer eligible for publication.");
       }
-      assertGuestBinding(currentJob, guestSnapshot.data() as GuestMediaDoc, Date.now());
+      if (needsSeedDoc && !replaySeed) {
+        throw new BackendError("NOT_FOUND", "[authorization] Seed artifact is unknown; publication is refused.");
+      }
+      assertScopedPublishProvenance(currentJob, replayGuest, undefined, replaySeed, undefined, Date.now());
     }
     const currentVersion = currentSnapshot.exists ? Number(currentSnapshot.data()?.version ?? 0) : 0;
     if (currentVersion !== sourceVersion || plannedVersion <= currentVersion) {

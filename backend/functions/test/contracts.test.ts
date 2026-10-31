@@ -211,3 +211,76 @@ test("a supplied fixture directory never silently forces fake mode over alibaba"
     delete process.env.ALIBABA_WORKSPACE_ID;
   }
 });
+
+test("cartoon catalog: 16 scenarios, pinned Alibaba Singapore models, fixed video controls", async () => {
+  const { CARTOON_CATALOG_SCENARIOS, CARTOON_STILL_PRESET, CARTOON_VIDEO_PRESET, validateCartoonVideoControls } = await import("../src/contracts");
+  assert.equal(CARTOON_CATALOG_SCENARIOS.length, 16);
+  assert.deepEqual(CARTOON_CATALOG_SCENARIOS.map((s) => s.scenarioId), Array.from({ length: 16 }, (_, i) => `cartoon-${String(i + 1).padStart(2, "0")}`));
+  for (const scenario of CARTOON_CATALOG_SCENARIOS) {
+    assert.ok(scenario.stillPlanId && scenario.videoPlanId && scenario.version === 1 && Number.isSafeInteger(scenario.seed));
+  }
+  assert.equal(CARTOON_STILL_PRESET.modelId, "qwen-image-3.0-pro");
+  assert.equal(CARTOON_STILL_PRESET.region, "singapore");
+  assert.equal(CARTOON_VIDEO_PRESET.modelId, "wan3.0-video");
+  assert.equal(CARTOON_VIDEO_PRESET.region, "singapore");
+  assert.equal(CARTOON_VIDEO_PRESET.secondsOut, 2);
+  assert.equal(CARTOON_VIDEO_PRESET.resolution, "480P");
+  assert.equal(CARTOON_VIDEO_PRESET.audio, false);
+  assert.equal(CARTOON_VIDEO_PRESET.videoControl, "STANDARD");
+  validateCartoonVideoControls({ modelId: "wan3.0-video" });
+  assert.throws(() => validateCartoonVideoControls({ modelId: "veo-3" }), (e: unknown) => e instanceof BackendError && e.errorCode === "INVALID_ARGUMENT");
+  assert.throws(() => validateCartoonVideoControls({ secondsOut: 5 }), (e: unknown) => e instanceof BackendError && e.errorCode === "INVALID_ARGUMENT");
+  assert.throws(() => validateCartoonVideoControls({ watermark: true }), (e: unknown) => e instanceof BackendError && e.errorCode === "INVALID_ARGUMENT");
+});
+
+test("scoped provenance: approved legacy deliverable without mobile consent; explicit denials otherwise", async () => {
+  const { evaluateDeliveryProvenance } = await import("../src/contracts");
+  const baseJob = { partyId: "p", channelId: "main", jobId: "job-legacy", seedProvenance: { seedId: "seed-1", kind: "legacy" } };
+  const approvedSeed = { seedId: "seed-1", partyId: "p", channelId: "main", status: "ready", operatorApproved: true, expiresAt: "2030-01-01T00:00:00.000Z" };
+  assert.equal(evaluateDeliveryProvenance({ job: baseJob, seed: approvedSeed, nowMs: Date.parse("2026-10-29T15:00:00.000Z") }), "legacy");
+  // Withdrawn / deleted / expired / unknown / unauthorized bindings fail explicitly.
+  for (const [seed, code] of [
+    [{ ...approvedSeed, status: "withdrawn" }, "FORBIDDEN"],
+    [{ ...approvedSeed, status: "deleted" }, "NOT_FOUND"],
+    [{ ...approvedSeed, status: "failed" }, "NOT_FOUND"],
+    [{ ...approvedSeed, expiresAt: "2020-01-01T00:00:00.000Z" }, "CLIP_EXPIRED"],
+    [{ ...approvedSeed, partyId: "other" }, "FORBIDDEN"],
+    [{ ...approvedSeed, operatorApproved: false }, "FORBIDDEN"],
+  ] as const) {
+    assert.throws(() => evaluateDeliveryProvenance({ job: baseJob, seed, nowMs: Date.parse("2026-10-29T15:00:00.000Z") }),
+      (e: unknown) => e instanceof BackendError && e.errorCode === code, JSON.stringify(seed));
+  }
+  assert.throws(() => evaluateDeliveryProvenance({ job: baseJob, seed: undefined, nowMs: Date.now() }),
+    (e: unknown) => e instanceof BackendError && e.errorCode === "NOT_FOUND");
+  // Unreadable authorization evidence fails closed, never fail-open.
+  assert.throws(() => evaluateDeliveryProvenance({ job: baseJob, seed: approvedSeed, seedReadError: new Error("db down"), nowMs: Date.now() }),
+    (e: unknown) => e instanceof BackendError && e.errorCode === "INTERNAL");
+  const guestJob = { partyId: "p", channelId: "main", jobId: "job-guest", guestMedia: { submissionId: "gsub-1", sourceHash: "a".repeat(64), consentRevision: "v1:t" } };
+  assert.throws(() => evaluateDeliveryProvenance({ job: guestJob, guest: undefined, guestReadError: new Error("db down"), nowMs: Date.now() }),
+    (e: unknown) => e instanceof BackendError && e.errorCode === "INTERNAL");
+  // Changed-source guest binding is refused explicitly.
+  const eligibleGuest = { submissionId: "gsub-1", partyId: "p", channelId: "main", status: "eligible", consent: { accepted: true, textVersion: "v1", purpose: "guest_cameo" }, sourceHash: "b".repeat(64), consentRevision: "v1:t", expiresAt: "2030-01-01T00:00:00.000Z" };
+  assert.throws(() => evaluateDeliveryProvenance({ job: guestJob, guest: eligibleGuest, nowMs: Date.now() }),
+    (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN");
+});
+
+test("cartoon chain gate: incomplete or mismatched still-to-video stages are refused", async () => {
+  const { assertCartoonChainComplete, evaluateDeliveryProvenance } = await import("../src/contracts");
+  const still = "a".repeat(64);
+  const complete = { stillSha256: still, videoStillSha256: still, stillStatus: "completed", videoStatus: "completed" };
+  assertCartoonChainComplete({ cartoonChain: complete } as unknown as Record<string, unknown>);
+  for (const chain of [
+    undefined,
+    { stillSha256: still, videoStillSha256: "b".repeat(64), stillStatus: "completed" },
+    { stillSha256: still, videoStillSha256: still, stillStatus: "running" },
+    { stillSha256: "zzz", videoStillSha256: "zzz", stillStatus: "completed" },
+  ]) {
+    assert.throws(() => assertCartoonChainComplete({ cartoonChain: chain } as unknown as Record<string, unknown>),
+      (e: unknown) => e instanceof BackendError && e.errorCode === "MANIFEST_MISMATCH");
+  }
+  // Publication replay for a cartoon job without a completed chain refuses.
+  assert.throws(() => evaluateDeliveryProvenance({
+    job: { partyId: "p", channelId: "main", jobId: "job-cartoon", cartoonChain: { stillSha256: still, videoStillSha256: "b".repeat(64), stillStatus: "completed" } },
+    nowMs: Date.now(),
+  }), (e: unknown) => e instanceof BackendError && e.errorCode === "MANIFEST_MISMATCH");
+});

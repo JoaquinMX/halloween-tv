@@ -7,7 +7,9 @@ import {
   BackendError,
   CanonicalClip,
   CurrentManifestInput,
+  deliveryFailure,
   DeliveryManifest,
+  evaluateDeliveryProvenance,
   Identity,
   canonicalManifestHash,
   parseAck,
@@ -102,9 +104,14 @@ function manifestFrom(data: FirebaseFirestore.DocumentData | undefined): Deliver
       typeof data.partyId !== "string" || typeof data.channelId !== "string" || typeof data.jobId !== "string" ||
       !Number.isSafeInteger(data.schemaVersion) || Number(data.schemaVersion) !== SCHEMA_VERSION ||
       typeof data.expiresAt !== "string" || !Number.isFinite(Date.parse(data.expiresAt))) {
-    throw new BackendError("MANIFEST_MISMATCH", "Current manifest is missing or malformed.");
+    throw deliveryFailure("manifest", "MANIFEST_MISMATCH", "Current manifest is missing or malformed.");
   }
-  validateCanonicalClips(data.cameraClips);
+  try {
+    validateCanonicalClips(data.cameraClips);
+  } catch (error) {
+    if (error instanceof BackendError) throw deliveryFailure("manifest", error.errorCode, error.message.replace(/^\[[a-z]+\] /, ""));
+    throw error;
+  }
   return data as DeliveryManifest;
 }
 
@@ -165,35 +172,117 @@ function canonicalClipsMatch(manifest: DeliveryManifest, ack: AckInput): void {
 }
 
 /**
- * Delivery-time consent revocation: a manifest produced from a guest-bound
- * job whose consent was withdrawn (or whose binding is gone) must not yield
- * new signed URLs, even if the manifest document itself has not been
- * collected yet. Text-only jobs (no guest binding) are unaffected.
+ * Scoped delivery-time provenance gate (cycle-13).
+ *
+ * Replaces blanket guest-consent assumptions: approved legacy / operator /
+ * host seed artifacts deliver WITHOUT fabricated mobile consent, while
+ * withdrawn, expired, deleted, changed-source, unknown, or unauthorized
+ * bindings receive explicit errors. Database read failures fail CLOSED
+ * (INTERNAL) and are never treated as "no binding". Rechecked immediately
+ * before issuing URLs, preserving transactional withdrawal/deletion guards.
  */
-async function assertManifestConsentLive(db: Firestore, partyId: string, jobId: string): Promise<void> {
+async function assertManifestProvenanceLive(db: Firestore, partyId: string, jobId: string, nowMs: number): Promise<void> {
   let job: FirebaseFirestore.DocumentData | undefined;
   try {
     const snapshot = await db.doc(`parties/${partyId}/jobs/${jobId}`).get();
-    if (!snapshot.exists) return;
-    job = snapshot.data();
-  } catch {
-    return;
-  }
-  const guest = job?.guestMedia as Record<string, unknown> | undefined;
-  const submissionId = guest && typeof guest.submissionId === "string" ? guest.submissionId : undefined;
-  if (!submissionId) return;
-  let current: FirebaseFirestore.DocumentData | undefined;
-  try {
-    const snapshot = await db.doc(`parties/${partyId}/guestMedia/${submissionId}`).get();
-    if (!snapshot.exists) throw new BackendError("FORBIDDEN", "Guest consent is no longer eligible for delivery.");
-    current = snapshot.data();
+    if (!snapshot.exists) {
+      // No job doc: only deliver when the manifest's job is an explicitly
+      // supported seed artifact resolved below; otherwise the authorization
+      // evidence is missing and delivery is refused explicitly.
+      job = undefined;
+    } else {
+      job = snapshot.data();
+    }
   } catch (error) {
     if (error instanceof BackendError) throw error;
+    throw deliveryFailure("authorization", "INTERNAL", "Job authorization evidence is unreadable; failing closed.");
+  }
+  if (!job) {
+    // Missing job docs arise for legacy fixture seeds whose authorization
+    // lives in the seed catalog: resolve the seed directly.
+    let seed: Record<string, unknown> | undefined;
+    try {
+      const seeds = await db.collection(`parties/${partyId}/seedVideos`).where("jobId", "==", jobId).limit(1).get();
+      if (!seeds.empty) seed = seeds.docs[0].data() as Record<string, unknown>;
+    } catch (error) {
+      if (error instanceof BackendError) throw error;
+      throw deliveryFailure("authorization", "INTERNAL", "Seed authorization evidence is unreadable; failing closed.");
+    }
+    if (!seed) {
+      throw deliveryFailure("authorization", "NOT_FOUND", "Job authorization evidence is missing; delivery is refused.");
+    }
+    // Synthesize the minimal job binding the seed catalog entry implies so
+    // the scoped evaluator can distinguish explicitly supported artifacts
+    // from missing evidence.
+    const implied = {
+      partyId,
+      channelId: seed.channelId,
+      jobId,
+      seedProvenance: { seedId: String(seed.seedId ?? ""), kind: "legacy" },
+    } as unknown as Record<string, unknown>;
+    evaluateDeliveryProvenance({ job: implied, seed, nowMs });
     return;
   }
-  if (!current || current.status !== "eligible" || (current as Record<string, unknown>).tombstone === true) {
-    throw new BackendError("FORBIDDEN", "Guest consent was withdrawn; this manifest is revoked.");
+  const guest = job.guestMedia as Record<string, unknown> | undefined;
+  const seedBinding = (job as Record<string, unknown>).seedProvenance as Record<string, unknown> | undefined;
+  const chain = (job as Record<string, unknown>).cartoonChain as Record<string, unknown> | undefined;
+  const portraitSubmissionId = chain && typeof chain.portraitSubmissionId === "string" && chain.portraitSubmissionId !== ""
+    ? String(chain.portraitSubmissionId)
+    : undefined;
+  const submissionId = guest && typeof guest.submissionId === "string" ? guest.submissionId : portraitSubmissionId;
+  let current: FirebaseFirestore.DocumentData | undefined;
+  let guestReadError: unknown;
+  if (submissionId) {
+    try {
+      const snapshot = await db.doc(`parties/${partyId}/guestMedia/${submissionId}`).get();
+      if (!snapshot.exists) {
+        current = undefined;
+      } else {
+        current = snapshot.data();
+      }
+    } catch (error) {
+      if (error instanceof BackendError) throw error;
+      guestReadError = error;
+    }
   }
+  let seed: Record<string, unknown> | undefined;
+  let seedReadError: unknown;
+  if (seedBinding && typeof seedBinding.seedId === "string") {
+    try {
+      const snapshot = await db.doc(`parties/${partyId}/seedVideos/${String(seedBinding.seedId)}`).get();
+      if (snapshot.exists) seed = snapshot.data() as Record<string, unknown>;
+    } catch (error) {
+      if (error instanceof BackendError) throw error;
+      seedReadError = error;
+    }
+  } else if (typeof job.jobId === "string" && job.jobId.startsWith("hv-")) {
+    try {
+      const snapshot = await db.doc(`parties/${partyId}/seedVideos/${job.jobId.slice("hv-".length)}`).get();
+      if (snapshot.exists) {
+        seed = snapshot.data() as Record<string, unknown>;
+        (job as Record<string, unknown>).seedProvenance = { seedId: String((seed as Record<string, unknown>).seedId ?? job.jobId.slice("hv-".length)), kind: "host" };
+      }
+    } catch (error) {
+      if (error instanceof BackendError) throw error;
+      seedReadError = error;
+    }
+  }
+  evaluateDeliveryProvenance({
+    job: job as Record<string, unknown>,
+    guest: current as Record<string, unknown> | undefined,
+    guestReadError,
+    seed,
+    seedReadError,
+    nowMs,
+  });
+}
+
+/**
+ * Legacy alias kept for the pre-cycle-13 call sites and tests: delegates to
+ * the scoped provenance gate (fail-closed on unreadable evidence).
+ */
+async function assertManifestConsentLive(db: Firestore, partyId: string, jobId: string): Promise<void> {
+  await assertManifestProvenanceLive(db, partyId, jobId, Date.now());
 }
 
 export function createDeliveryServices(options: DeliveryServiceOptions): DeliveryServices {
@@ -404,22 +493,52 @@ export function createDeliveryServices(options: DeliveryServiceOptions): Deliver
     const identity = requireIdentity(value);
     if (!identity.channelId) throw new BackendError("INVALID_ARGUMENT", "channelId is required.");
     const registered = await assertRegisteredPartyDevice(db, identity);
-    const snapshot = await manifestRef(db, registered.partyId, registered.channelId).get();
+    let snapshot: FirebaseFirestore.DocumentSnapshot;
+    try {
+      snapshot = await manifestRef(db, registered.partyId, registered.channelId).get();
+    } catch (error) {
+      if (error instanceof BackendError) throw error;
+      throw deliveryFailure("manifest", "INTERNAL", "Current manifest is unreadable; failing closed.");
+    }
     const manifest = manifestFrom(snapshot.data());
-    await assertManifestConsentLive(db, registered.partyId, manifest.jobId);
     const nowMs = now().getTime();
+    // Expiry is evaluated before provenance so an expired manifest reports
+    // CLIP_EXPIRED even when its job doc is already gone (legacy wall
+    // behavior preserved); authorization is rechecked immediately before
+    // issuing URLs, preserving transactional withdrawal/deletion guards.
     const manifestExpiry = Date.parse(manifest.expiresAt);
-    if (!Number.isFinite(manifestExpiry) || manifestExpiry <= nowMs) throw new BackendError("CLIP_EXPIRED", "Current manifest has expired.");
+    if (!Number.isFinite(manifestExpiry) || manifestExpiry <= nowMs) throw deliveryFailure("manifest", "CLIP_EXPIRED", "Current manifest has expired.");
+    for (const clip of manifest.cameraClips) {
+      const clipExpiry = Date.parse(clip.expiresAt);
+      if (!Number.isFinite(clipExpiry) || clipExpiry <= nowMs) throw deliveryFailure("manifest", "CLIP_EXPIRED", "A canonical camera clip has expired.");
+    }
+    // Rechecked immediately before issuing URLs (withdrawal/deletion guard).
+    await assertManifestProvenanceLive(db, registered.partyId, manifest.jobId, nowMs);
     const manifestHash = canonicalManifestHash(manifest);
     const clips = await Promise.all(manifest.cameraClips.map(async (clip) => {
-      validateDeliveryPath(clip, manifest.partyId, manifest.channelId, manifest.version);
+      try {
+        validateDeliveryPath(clip, manifest.partyId, manifest.channelId, manifest.version);
+      } catch (error) {
+        if (error instanceof BackendError) throw deliveryFailure("manifest", error.errorCode, error.message.replace(/^\[[a-z]+\] /, ""));
+        throw error;
+      }
       const clipExpiry = Date.parse(clip.expiresAt);
-      if (!Number.isFinite(clipExpiry) || clipExpiry <= nowMs) throw new BackendError("CLIP_EXPIRED", "A canonical camera clip has expired.");
+      if (!Number.isFinite(clipExpiry) || clipExpiry <= nowMs) throw deliveryFailure("manifest", "CLIP_EXPIRED", "A canonical camera clip has expired.");
       const expiresAt = new Date(Math.min(nowMs + DELIVERY_URL_TTL_SECONDS * 1000, clipExpiry));
+      let url: string;
+      try {
+        url = await signReadUrl(bucket.file(clip.objectPath), expiresAt);
+      } catch (error) {
+        if (error instanceof BackendError) throw error;
+        throw deliveryFailure("signing", "INTERNAL", `Delivery URL signing failed for ${clip.cameraId}.`);
+      }
+      if (typeof url !== "string" || url.length === 0) {
+        throw deliveryFailure("signing", "INTERNAL", `Delivery URL signing returned no URL for ${clip.cameraId}.`);
+      }
       return {
         cameraId: clip.cameraId,
         sha256: clip.sha256,
-        url: await signReadUrl(bucket.file(clip.objectPath), expiresAt),
+        url,
         expiresAt: expiresAt.toISOString(),
       };
     }));
@@ -430,17 +549,23 @@ export function createDeliveryServices(options: DeliveryServiceOptions): Deliver
     const input: CurrentManifestInput = parseCurrentManifestInput(value);
     const registered = await assertRegisteredPartyDevice(db, input);
     if (registered.channel.status !== "active") throw new BackendError("FORBIDDEN", "Channel is not active for this party.");
-    const snapshot = await manifestRef(db, registered.partyId, registered.channelId).get();
-    if (!snapshot.exists) throw new BackendError("NOT_FOUND", "Current manifest does not exist.");
-    const manifest = manifestFrom(snapshot.data());
-    await assertManifestConsentLive(db, registered.partyId, manifest.jobId);
-    if (manifest.partyId !== registered.partyId || manifest.channelId !== registered.channelId) {
-      throw new BackendError("MANIFEST_MISMATCH", "Current manifest is outside the registered party and channel.");
+    let snapshot: FirebaseFirestore.DocumentSnapshot;
+    try {
+      snapshot = await manifestRef(db, registered.partyId, registered.channelId).get();
+    } catch (error) {
+      if (error instanceof BackendError) throw error;
+      throw deliveryFailure("manifest", "INTERNAL", "Current manifest is unreadable; failing closed.");
     }
+    if (!snapshot.exists) throw deliveryFailure("manifest", "NOT_FOUND", "Current manifest does not exist.");
+    const manifest = manifestFrom(snapshot.data());
     const currentTimeMs = now().getTime();
     if (Date.parse(manifest.expiresAt) <= currentTimeMs ||
         manifest.cameraClips.some((clip) => Date.parse(clip.expiresAt) <= currentTimeMs)) {
-      throw new BackendError("CLIP_EXPIRED", "Current manifest has expired.");
+      throw deliveryFailure("manifest", "CLIP_EXPIRED", "Current manifest has expired.");
+    }
+    await assertManifestProvenanceLive(db, registered.partyId, manifest.jobId, currentTimeMs);
+    if (manifest.partyId !== registered.partyId || manifest.channelId !== registered.channelId) {
+      throw deliveryFailure("manifest", "MANIFEST_MISMATCH", "Current manifest is outside the registered party and channel.");
     }
     return serializeManifest(manifest);
   }

@@ -170,3 +170,20 @@ test("publish rejects withdrawn tombstones and missing consent", {
     await disposeEmulatorContext(app);
   }
 });
+
+test("cartoon publication requires the completed still-to-video chain", async () => {
+  const { assertCartoonStageProvenance } = await import("../src/normalize");
+  const { evaluateDeliveryProvenance } = await import("../src/contracts");
+  const still = "a".repeat(64);
+  // Matching stage provenance passes the gate used by publish replay.
+  assertCartoonStageProvenance({ stillSha256: still, videoStillSha256: still, stillStatus: "completed", videoStatus: "completed" });
+  assert.equal(evaluateDeliveryProvenance({
+    job: { partyId: "p", channelId: "main", jobId: "job-cartoon", cartoonChain: { stillSha256: still, videoStillSha256: still, stillStatus: "completed", videoStatus: "completed" } },
+    nowMs: Date.now(),
+  }), "cartoon-chain");
+  // A mismatched video still refuses publication at its backend cause.
+  assert.throws(() => evaluateDeliveryProvenance({
+    job: { partyId: "p", channelId: "main", jobId: "job-cartoon", cartoonChain: { stillSha256: still, videoStillSha256: "b".repeat(64), stillStatus: "completed" } },
+    nowMs: Date.now(),
+  }), (e: unknown) => e instanceof BackendError && e.errorCode === "MANIFEST_MISMATCH");
+});

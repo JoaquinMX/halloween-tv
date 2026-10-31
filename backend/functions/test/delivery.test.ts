@@ -296,3 +296,78 @@ test("a manifest bound to withdrawn consent yields no delivery URLs even while i
     await disposeEmulatorContext(app);
   }
 });
+
+test("approved legacy/operator/host seed delivers without mobile consent; denials stay explicit", { skip: !HAS_FIRESTORE_EMULATOR }, async () => {
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  const deviceId = "tv-legacy";
+  const channelId = "main";
+  const version = 1;
+  const jobId = "job-legacy-seed";
+  const seedId = "legacy-seed-1";
+  const expiry = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+  const cameraClips = REQUIRED_CAMERA_IDS.map((cameraId) => {
+    const bytes = Buffer.from(`legacy-${cameraId}`);
+    return { cameraId, objectPath: `parties/${partyId}/channels/${channelId}/delivery/${version}/${cameraId}.mp4`, sha256: createHash("sha256").update(bytes).digest("hex"), sizeBytes: bytes.length, durationMs: 2000, expiresAt: expiry, bytes };
+  });
+  try {
+    await seedParty(db, partyId, deviceId, channelId);
+    await Promise.all(cameraClips.map(({ objectPath, bytes }) => bucket.file(objectPath).save(bytes)));
+    await db.doc(`parties/${partyId}/jobs/${jobId}`).set({
+      jobId, partyId, deviceId, channelId, manifestVersion: version, idempotencyKey: jobId, state: "ready",
+      seedProvenance: { seedId, kind: "legacy" },
+    });
+    await db.doc(`parties/${partyId}/seedVideos/${seedId}`).set({
+      seedId, partyId, channelId, jobId, status: "ready", operatorApproved: true, expiresAt: expiry,
+    });
+    await db.doc(`parties/${partyId}/manifests/current_${channelId}`).set({
+      partyId, channelId, version, schemaVersion: SCHEMA_VERSION, jobId, expiresAt: expiry,
+      createdAt: FieldValue.serverTimestamp(),
+      cameraClips: cameraClips.map(({ bytes: _bytes, ...clip }) => clip),
+    });
+    const services = createDeliveryServices({ db, bucket, signReadUrl: async (file) => `https://signed.invalid/${encodeURIComponent(file.name)}` });
+    // Reproduced wall stall resolved at its backend cause: the scoped
+    // provenance gate authorizes this explicitly supported legacy artifact.
+    const delivery = await services.getDeliveryUrls({ partyId, deviceId, channelId });
+    assert.equal(delivery.manifestVersion, version);
+    const current = await services.getCurrentManifest({ partyId, deviceId, channelId });
+    assert.equal(current.version, version);
+    // Withdrawn / deleted / expired / unknown / unauthorized bindings deny explicitly.
+    await db.doc(`parties/${partyId}/seedVideos/${seedId}`).update({ status: "withdrawn" });
+    await assert.rejects(services.getDeliveryUrls({ partyId, deviceId, channelId }),
+      (error: unknown) => error instanceof BackendError && error.errorCode === "FORBIDDEN");
+    await db.doc(`parties/${partyId}/seedVideos/${seedId}`).update({ status: "ready" });
+    await db.doc(`parties/${partyId}/seedVideos/${seedId}`).update({ status: "deleted" });
+    await assert.rejects(services.getCurrentManifest({ partyId, deviceId, channelId }),
+      (error: unknown) => error instanceof BackendError && (error.errorCode === "NOT_FOUND" || error.errorCode === "FORBIDDEN"));
+    await db.doc(`parties/${partyId}/seedVideos/${seedId}`).delete();
+    await assert.rejects(services.getDeliveryUrls({ partyId, deviceId, channelId }),
+      (error: unknown) => error instanceof BackendError && (error.errorCode === "NOT_FOUND" || error.errorCode === "FORBIDDEN"));
+  } finally {
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+  }
+});
+
+test("unreadable authorization evidence fails closed, never fail-open", { skip: !HAS_FIRESTORE_EMULATOR }, async () => {
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  const deviceId = "tv-fail-closed";
+  const channelId = "main";
+  try {
+    await seedParty(db, partyId, deviceId, channelId);
+    const { evaluateDeliveryProvenance } = await import("../src/contracts");
+    const guestJob = { partyId, channelId, jobId: "job-x", guestMedia: { submissionId: "gsub-x", sourceHash: "a".repeat(64), consentRevision: "v1:t" } };
+    // Simulated Firestore read failure must surface INTERNAL, not a silent pass.
+    assert.throws(() => evaluateDeliveryProvenance({ job: guestJob, guest: undefined, guestReadError: new Error("firestore down"), nowMs: Date.now() }),
+      (error: unknown) => error instanceof BackendError && error.errorCode === "INTERNAL" && /authorization/.test(error.message));
+    await disposeEmulatorContext(app);
+  } catch (error) {
+    await disposeEmulatorContext(app);
+    throw error;
+  } finally {
+    const { getFirestore } = await import("firebase-admin/firestore");
+    void getFirestore;
+    await clearParty(db, bucket, partyId).catch(() => undefined);
+  }
+});

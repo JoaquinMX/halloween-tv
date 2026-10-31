@@ -1,5 +1,11 @@
 /** Emulator-only fake-provider E2E. The emulator URL signer below is a test
- * substitute and can never be selected by the deployed Functions runtime. */
+ * substitute and can never be selected by the deployed Functions runtime.
+ *
+ * Cycle-13 note: cartoon wall coverage lives in
+ * test/cartoon_delivery_e2e.test.ts (scoped legacy provenance, still-chain
+ * publication gate, normalized 2s profile, four downloadable clips,
+ * independent hashes, ACK/purge, preview retention, withdrawal denial).
+ * This E2E stays on the cheap_demo path and never submits live requests. */
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { deleteApp, initializeApp } from "firebase-admin/app";

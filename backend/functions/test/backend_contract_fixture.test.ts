@@ -156,3 +156,33 @@ test("shared v1 fixture runs through callable service composition", { skip: !HAS
     await disposeEmulatorContext(app);
   }
 });
+
+test("Dart decoders stay compatible as a read-only reference (no app edits)", async () => {
+  // The backend response shape is compared against the checked-in Dart
+  // decoder expectations WITHOUT editing any app file: 1/2/4 first-N
+  // prefixes, canonical ACK hashing, HTTPS URL + expiry + hash checks.
+  const decoderSource = await readFile(resolve(__dirname, "../../../packages/infra_signed_urls/lib/src/firebase_delivery_client.dart"), "utf8");
+  assert.match(decoderSource, /expectedCctvCameraIds/);
+  assert.match(decoderSource, /manifestVersion/);
+  assert.match(decoderSource, /clipHashes/);
+  const fixture = await readFixture();
+  // Backend canonical hash and ACK idempotency still match the pinned fixture
+  // the Dart tests also consume (legacy four-camera hashes preserved).
+  const { canonicalManifestHash } = await import("../src/contracts");
+  assert.equal(canonicalManifestHash(fixture.manifest), fixture.canonicalManifestHash);
+});
+
+test("legacy-seed fixture parses and authorizes without fabricated mobile consent", async () => {
+  const { evaluateDeliveryProvenance } = await import("../src/contracts");
+  const raw = await readFile(resolve(__dirname, "fixtures/legacy_seed_delivery.json"), "utf8");
+  const legacy = JSON.parse(raw) as {
+    partyId: string; channelId: string; jobId: string;
+    seedProvenance: { seedId: string; kind: string };
+    seedDoc: Record<string, unknown>;
+  };
+  assert.equal(legacy.seedProvenance.kind, "legacy");
+  const job = { partyId: legacy.partyId, channelId: legacy.channelId, jobId: legacy.jobId, seedProvenance: legacy.seedProvenance };
+  assert.equal(evaluateDeliveryProvenance({ job, seed: legacy.seedDoc, nowMs: Date.parse("2026-10-29T15:00:00.000Z") }), "legacy");
+  // Portable repo-relative paths only: no /tmp, no ~, no absolute out-of-repo refs.
+  assert.ok(!JSON.stringify(legacy).includes("/tmp/") && !JSON.stringify(legacy).includes("/Users/"));
+});

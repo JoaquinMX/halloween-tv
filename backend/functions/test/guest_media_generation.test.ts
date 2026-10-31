@@ -265,3 +265,16 @@ test("text-only generation still uses four provider cameras", {
     await disposeEmulatorContext(app);
   }
 });
+
+test("scoped provenance replaces blanket guest assumptions for legacy seeds", async () => {
+  const { evaluateDeliveryProvenance, isExplicitlySupportedLegacyArtifact } = await import("../src/contracts");
+  const job = { partyId: "p", channelId: "main", jobId: "job-legacy", seedProvenance: { seedId: "seed-1", kind: "operator" } };
+  const seed = { seedId: "seed-1", partyId: "p", channelId: "main", status: "ready", operatorApproved: true, expiresAt: "2030-01-01T00:00:00.000Z" };
+  assert.ok(isExplicitlySupportedLegacyArtifact(job, seed));
+  assert.equal(evaluateDeliveryProvenance({ job, seed, nowMs: Date.now() }), "operator");
+  // Changed-source guest binding is an explicit FORBIDDEN, not a silent pass.
+  const guestJob = { partyId: "p", channelId: "main", jobId: "job-g", guestMedia: { submissionId: "gsub-1", sourceHash: "a".repeat(64), consentRevision: "v1:t" } };
+  const changed = { submissionId: "gsub-1", partyId: "p", channelId: "main", status: "eligible", consent: { accepted: true, textVersion: "v1", purpose: "guest_cameo" }, sourceHash: "c".repeat(64), consentRevision: "v1:t", expiresAt: "2030-01-01T00:00:00.000Z" };
+  assert.throws(() => evaluateDeliveryProvenance({ job: guestJob, guest: changed, nowMs: Date.now() }),
+    (e: unknown) => e instanceof BackendError && e.errorCode === "FORBIDDEN");
+});

@@ -243,21 +243,26 @@ function nativeFfprobePath(): string {
     const delivery = await callFunction(`${base}/getDeliveryUrls`, { partyId, deviceId, channelId });
     if (!Number.isSafeInteger(delivery.manifestVersion) || Number(delivery.manifestVersion) < 1 ||
         typeof delivery.manifestHash !== "string" || !Array.isArray(delivery.clips)) {
-      fail("getDeliveryUrls returned an incomplete manifest projection.");
+      fail("[manifest] getDeliveryUrls returned an incomplete manifest projection.");
     }
     const manifestSnapshot = await db.doc(`parties/${partyId}/manifests/current_${channelId}`).get();
     const manifest = manifestSnapshot.data() as DeliveryManifest | undefined;
-    if (!manifest) fail("Published current manifest is missing after the public callable returned URLs.");
-    const manifestHash = canonicalManifestHash(manifest);
-    if (manifest.version !== delivery.manifestVersion || manifestHash !== delivery.manifestHash) {
-      fail("Public callable manifest projection does not match the stored canonical manifest.");
+    if (!manifest) fail("[manifest] Published current manifest is missing after the public callable returned URLs.");
+    let manifestHash: string;
+    try {
+      manifestHash = canonicalManifestHash(manifest);
+    } catch {
+      fail("[manifest] Stored canonical manifest failed hashing (malformed serialization).");
+    }
+    if (manifest.version !== delivery.manifestVersion || manifestHash! !== delivery.manifestHash) {
+      fail("[manifest] Public callable manifest projection does not match the stored canonical manifest (scope/version/hash).");
     }
     const manifestExpiry = Date.parse(manifest.expiresAt);
-    if (!Number.isFinite(manifestExpiry) || manifestExpiry <= Date.now()) fail("Published manifest is already expired.");
+    if (!Number.isFinite(manifestExpiry) || manifestExpiry <= Date.now()) fail("[manifest] Published manifest is already expired.");
 
     const clips = delivery.clips as CallableClip[];
     if (clips.length !== REQUIRED_CAMERA_IDS.length || REQUIRED_CAMERA_IDS.some((id) => !clips.some((clip) => clip.cameraId === id))) {
-      fail("Public callable did not return exactly the four registered camera clips.");
+      fail("[manifest] Public callable did not return exactly the four registered camera clips.");
     }
 
     await mkdir(outputDirectory, { recursive: true });
@@ -267,26 +272,33 @@ function nativeFfprobePath(): string {
     for (const item of clips) {
       const canonical = manifest.cameraClips.find((clip) => clip.cameraId === item.cameraId);
       if (!canonical || item.sha256 !== canonical.sha256 || !item.url || !Number.isFinite(Date.parse(item.expiresAt))) {
-        fail(`Public URL metadata does not match the manifest for ${item.cameraId}.`);
+        fail(`[manifest] Public URL metadata does not match the manifest for ${item.cameraId}.`);
       }
-      if (Date.parse(item.expiresAt) <= Date.now()) fail(`Delivery URL already expired for ${item.cameraId}.`);
+      if (Date.parse(item.expiresAt) <= Date.now()) fail(`[signing] Delivery URL already expired for ${item.cameraId}.`);
       let downloadUrl = item.url;
       const headers: Record<string, string> = {};
       if (target === "emulator") {
         if (new URL(item.url).pathname.startsWith("/v0/b/")) {
           // Emulator REST URL already; the Storage emulator has no TLS or signing.
+          // Explicit test-only substitute: emulator signing/TLS is NOT
+          // production-equivalent and is never labeled as such.
           downloadUrl = `${emulatorStorageBase}/v0/b/${encodeURIComponent(bucketName)}/o/${encodeURIComponent(canonical.objectPath)}?alt=media`;
         }
         headers.Authorization = "Bearer owner";
       } else if (new URL(item.url).protocol !== "https:") {
-        fail(`Cloud delivery URL must use HTTPS for ${item.cameraId}.`);
+        fail(`[signing] Cloud delivery URL must use HTTPS for ${item.cameraId}.`);
       }
-      const response = await fetch(downloadUrl, { headers, redirect: "follow", signal: AbortSignal.timeout(60_000) });
-      if (!response.ok) fail(`Clip download failed for ${item.cameraId} (${response.status}).`);
-      const bytes = Buffer.from(await response.arrayBuffer());
+      let response: Response;
+      try {
+        response = await fetch(downloadUrl, { headers, redirect: "follow", signal: AbortSignal.timeout(60_000) });
+      } catch {
+        fail(`[download] Clip download transport failed for ${item.cameraId}.`);
+      }
+      if (!response!.ok) fail(`[download] Clip download failed for ${item.cameraId} (${response!.status}).`);
+      const bytes = Buffer.from(await response!.arrayBuffer());
       const hash = createHash("sha256").update(bytes).digest("hex");
       if (hash !== canonical.sha256 || bytes.byteLength !== canonical.sizeBytes) {
-        fail(`Downloaded bytes failed independent hash/size verification for ${item.cameraId}.`);
+        fail(`[hash] Downloaded bytes failed independent hash/size verification for ${item.cameraId}.`);
       }
       const retained = await retainClip(outputDirectory, item.cameraId, bytes);
       probeVideo(retained, ffprobePath);
@@ -341,7 +353,7 @@ function nativeFfprobePath(): string {
     const firstAck = await callFunction(`${base}/acknowledgeDelivery`, ackInput);
     const repeatedAck = await callFunction(`${base}/acknowledgeDelivery`, ackInput);
     if (firstAck.ackId !== expectedAckId || repeatedAck.ackId !== expectedAckId || firstAck.purged !== true || repeatedAck.purged !== true) {
-      fail("ACK response did not confirm the exact idempotent manifest ACK and purge.");
+      fail("[ack] ACK response did not confirm the exact idempotent manifest ACK and purge.");
     }
     const [ackSnapshot, jobSnapshot] = await Promise.all([
       db.doc(`parties/${partyId}/deliveryAcks/${expectedAckId}`).get(),

@@ -5,6 +5,12 @@ import { createAlibabaProviderFromEnvironment } from "../src/providers/alibaba";
 import { createGenerationServices } from "../src/generation";
 import { parseRequestGeneration } from "../src/contracts";
 
+// Cycle-13 note: the cartoon catalog sample batch is planned preview-only
+// via tools/prepare_cartoon_batch.ts (16 stills + 16 two-second videos, 32s
+// total, 48 fixture slots, mandatory --max-credits gate). That planner never
+// submits live requests; this trigger stays cheap_demo-only and its live
+// path keeps the explicit budget guard below. Dry-run (default) spends nothing.
+
 function argumentsMap(args: string[]): { flags: Set<string>; values: Record<string, string> } {
   const flags = new Set<string>();
   const values: Record<string, string> = {};

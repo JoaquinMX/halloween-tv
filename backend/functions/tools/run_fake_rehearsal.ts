@@ -1,6 +1,13 @@
 /**
  * Fake-only cloud/emulator generation rehearsal through the PUBLIC contract.
  *
+ * Cycle-13 note: cartoon catalog verification is emulator-only via
+ * test/cartoon_delivery_e2e.test.ts (real storage bytes, normalized
+ * H.264/yuv420p/24fps/854x480 2s media, independent hashes, ACK/purge,
+ * preview retention, withdrawal denial) plus the preview-only
+ * tools/prepare_cartoon_batch.ts planner. This rehearsal never touches the
+ * cartoon presets and never submits live requests.
+ *
  * Defaults to preview: validates the explicit selection and prints the bounded
  * single-task plan without any network call. With --apply it performs exactly
  * ONE explicitly selected job:
