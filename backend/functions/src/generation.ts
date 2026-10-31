@@ -58,7 +58,10 @@ function ledgerInput(job: FirebaseFirestore.DocumentData, cameraId: CameraId): U
 
 export function createGenerationServices(options: GenerationServiceOptions): GenerationServices {
   let provider = options.provider;
-  const getProvider = () => provider ??= createVideoGenerationProviderFromEnvironment();
+  const fixtureDirectory = options.fixtureDirectory;
+  const getProvider = () => provider ??= createVideoGenerationProviderFromEnvironment(
+    typeof fixtureDirectory === "string" && fixtureDirectory.trim() !== "" ? fixtureDirectory : undefined,
+  );
   const store = new FirestoreGenerationStore({ db: options.db, bucket: options.bucket, now: options.now });
   const sleep = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
   const now = options.now ?? (() => new Date());
