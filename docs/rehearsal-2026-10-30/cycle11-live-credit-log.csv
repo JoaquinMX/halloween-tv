@@ -1,0 +1,6 @@
+model_id,preset_id,seconds_out,seconds_in,credits_charged,provider_task_id,created_at,success
+wan3.0-video,cheap_demo,2,0,UNKNOWN,afc777d1-50c7-46d0-88f7-fc30a15a9b9c,2026-10-31T04:16:53Z,true
+wan3.0-video,cheap_demo,2,0,UNKNOWN,7517a39e-d115-4c44-b704-b59284f2dc22,2026-10-31T05:3xZ,true
+wan3.0-video,cheap_demo,2,0,UNKNOWN,43119e49-3be8-4e13-808f-d59be18d8352,2026-10-31T05:3xZ,true
+wan3.0-video,cheap_demo,2,0,UNKNOWN,983ec114-2cf7-47d2-a609-94c73dbe255f,2026-10-31T05:3xZ,true
+wan3.0-video,cheap_demo,2,0,UNKNOWN,50820456-4af3-4209-84bd-5db3b4d1e523,2026-10-31T05:4xZ,false
