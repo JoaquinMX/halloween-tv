@@ -32,6 +32,35 @@ import { sha256 } from "../cartoon_pipeline";
 const SYNC_BASE_URL = "https://token-plan.ap-southeast-1.maas.aliyuncs.com";
 const SYNC_PATH = "/api/v1/services/aigc/multimodal-generation/generation";
 
+/**
+ * Bounded still-stage fetch timeouts (live-forensics hardening, rollout-5).
+ * The synchronous image POST previously had NO timeout: a hung POST died with
+ * no logs and no outcome. Budgets: image POST 120s (large multimodal body +
+ * synchronous generation), reference-image fetch 60s (single https GET of the
+ * result URL). Every fetch carries an AbortSignal; a timeout aborts and
+ * surfaces as AlibabaSubmissionError certainty "unknown" (never non_billable),
+ * never as success. Unknown outcomes are reconciled, never resubmitted.
+ */
+export const ALIBABA_IMAGE_SUBMIT_TIMEOUT_MS = 120_000;
+export const ALIBABA_IMAGE_REFERENCE_FETCH_TIMEOUT_MS = 60_000;
+
+function imageTimeoutSignal(timeoutMs: number): AbortSignal {
+  const withTimeout = AbortSignal as unknown as { timeout?: (ms: number) => AbortSignal };
+  if (typeof withTimeout.timeout === "function") return withTimeout.timeout(timeoutMs);
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), timeoutMs).unref?.();
+  return controller.signal;
+}
+
+function isImageTimeoutError(error: unknown): boolean {
+  return error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");
+}
+
+function effectiveImageTimeoutMs(explicit: number | undefined, fallback: number | undefined, def: number): number {
+  const candidate = explicit ?? fallback ?? def;
+  return Number.isFinite(candidate) && (candidate as number) > 0 ? (candidate as number) : def;
+}
+
 const DATA_URI_RE = /^data:image\/(jpeg|png);base64,[A-Za-z0-9+/=]+$/;
 
 function toDataUri(bytes: Uint8Array, contentType: "image/jpeg" | "image/png"): string {
@@ -150,7 +179,7 @@ function decodeDataUri(ref: string): Uint8Array {
 export class AlibabaImageGenerationPort implements ImageGenerationPort {
   private readonly cache = new Map<string, CartoonStillResult & { taskId: string }>();
 
-  constructor(private readonly options: { apiKey: string; workspaceId: string; fetchImpl?: typeof fetch }) {
+  constructor(private readonly options: { apiKey: string; workspaceId: string; fetchImpl?: typeof fetch; submitTimeoutMs?: number; referenceFetchTimeoutMs?: number; timeoutMs?: number }) {
     if (!options.apiKey.trim() || !options.workspaceId.trim()) {
       throw new Error("Alibaba API key and workspace ID must be configured server-side.");
     }
@@ -179,14 +208,21 @@ export class AlibabaImageGenerationPort implements ImageGenerationPort {
     const cached = this.cache.get(taskId);
     if (cached) return { taskId: cached.taskId };
     const body = buildAlibabaImageSubmitBody(request);
+    const submitTimeoutMs = effectiveImageTimeoutMs(
+      this.options.submitTimeoutMs, this.options.timeoutMs, ALIBABA_IMAGE_SUBMIT_TIMEOUT_MS);
+    const referenceFetchTimeoutMs = effectiveImageTimeoutMs(
+      this.options.referenceFetchTimeoutMs, this.options.timeoutMs, ALIBABA_IMAGE_REFERENCE_FETCH_TIMEOUT_MS);
     let response: Response;
     try {
       response = await (this.options.fetchImpl ?? fetch)(`${this.baseUrl()}${SYNC_PATH}`, {
         method: "POST",
         headers: this.headers(request),
         body: JSON.stringify(body),
+        signal: imageTimeoutSignal(submitTimeoutMs),
       });
-    } catch {
+    } catch (error) {
+      // Hung POST or network failure: outcome is unknown (never non_billable),
+      // never success. Covers AbortSignal timeouts explicitly.
       throw new AlibabaSubmissionError("Alibaba image submission outcome is unknown.", "unknown", false);
     }
     const parsed = await response.json().catch(() => ({}) as Record<string, any>);
@@ -220,7 +256,16 @@ export class AlibabaImageGenerationPort implements ImageGenerationPort {
     if (imageRef.startsWith("data:")) {
       image = decodeDataUri(imageRef);
     } else if (/^https:\/\//.test(imageRef)) {
-      const imageResponse = await (this.options.fetchImpl ?? fetch)(imageRef);
+      let imageResponse: Response;
+      try {
+        imageResponse = await (this.options.fetchImpl ?? fetch)(imageRef, {
+          signal: imageTimeoutSignal(referenceFetchTimeoutMs),
+        });
+      } catch (error) {
+        // Reference-image fetch timeout/hang: outcome unknown, never
+        // non_billable, never success.
+        throw new AlibabaSubmissionError("Alibaba image result fetch outcome is unknown.", "unknown", false);
+      }
       if (!imageResponse.ok) throw new Error("Alibaba image result could not be fetched.");
       image = new Uint8Array(await imageResponse.arrayBuffer());
       if (!image.length) throw new Error("Alibaba image result is empty.");

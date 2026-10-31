@@ -114,6 +114,12 @@ Physical-device smoke is already authorized by the workstream brief, but was not
 - Pending-intent dispatch enqueues a queue task ONLY when the store reports the cartoon request as just-created (`created: true`). A reused/raced job (`created: false`) never enqueues here: the flush reads the actual existing job state and reflects it on the intent (queued/running -> intent queued; failed -> intent unavailable with the job's code; ready/delivering/expired/purged -> intent done; missing -> stays pending for the next pass, never deleted).
 - On cartoon-plan drift, only the just-created job is failed transactionally via `failEnqueue` (budget released, job + ledger rows preserved with verifiable provenance), then the intent is marked unavailable/`MANIFEST_MISMATCH`. A reused job is never touched on drift (intent-only marking). No path raw-deletes a job or rerolls the stored plan.
 
+## Rollout-5 live-forensics hardening (bounded fetch timeouts, fail-on-definitive)
+
+- Fetch timeouts: video submit/status/result 30s each; image POST 120s, reference-image fetch 60s. Every provider fetch carries an AbortSignal; a timeout aborts and classifies as certainty `unknown` (never `non_billable`), never success. Unknown-outcome stills are never auto-resubmitted.
+- Fail-on-definitive: only validation/consent/4xx-certain errors fail the claimed running job via `failClaimedJob` (state failed + budget idle, job + ledger evidence preserved, never touches unclaimed jobs). Unknown/timeout/ambiguous paths keep `releaseWorker` only.
+- Wedged-running recovery: a `running` job with no lease that never settles (terminal config left running by an old worker) is redispatchable via the repo queue client with the same task identity (`partyId/deviceId/channelId/jobId/idempotencyKey`); the claiming worker re-evaluates definitiveness and fails or progresses it. Do not delete the job or hand-roll budget writes.
+
 ## Final verification evidence (cycle-13 closure)
 
 Task restatement: 16-scenario image-backed catalog, two-stage cartoon pipeline (qwen-image-3.0-pro still -> wan3.0-video STANDARD first_frame), scoped consent provenance, delivery-gap repair, host callable enqueue, pending-intent queue, explicit role mapping + situation tableaus.

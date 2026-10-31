@@ -29,6 +29,46 @@ export interface AlibabaProviderOptions {
   workspaceId: string;
   baseUrl?: string;
   fetchImpl?: typeof fetch;
+  /** Test/ops override for the bounded submit timeout (ms). Defaults to ALIBABA_SUBMIT_TIMEOUT_MS. */
+  submitTimeoutMs?: number;
+  /** Test/ops override for the bounded status-poll timeout (ms). Defaults to ALIBABA_STATUS_TIMEOUT_MS. */
+  statusTimeoutMs?: number;
+  /** Test/ops override for the bounded result-fetch timeout (ms). Defaults to ALIBABA_RESULT_TIMEOUT_MS. */
+  resultTimeoutMs?: number;
+  /** Generic override applied when a stage-specific override is absent. */
+  timeoutMs?: number;
+}
+
+/**
+ * Bounded provider fetch timeouts (live-forensics hardening, rollout-5).
+ * Every Alibaba video fetch path carries an AbortSignal with one of these
+ * budgets so a hung POST/poll can never wedge a worker with no logs:
+ * submit 30s (schedule path), status poll 30s, result fetch 30s. A timeout
+ * aborts the fetch and surfaces as certainty "unknown" (never non_billable),
+ * never as success — unknown outcomes are reconciled, never resubmitted.
+ */
+export const ALIBABA_SUBMIT_TIMEOUT_MS = 30_000;
+export const ALIBABA_STATUS_TIMEOUT_MS = 30_000;
+export const ALIBABA_RESULT_TIMEOUT_MS = 30_000;
+
+/** Builds a timeout signal without leaking timers on the hot path. */
+export function alibabaTimeoutSignal(timeoutMs: number): AbortSignal {
+  if (typeof (AbortSignal as unknown as { timeout?: (ms: number) => AbortSignal }).timeout === "function") {
+    return (AbortSignal as unknown as { timeout: (ms: number) => AbortSignal }).timeout(timeoutMs);
+  }
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), timeoutMs).unref?.();
+  return controller.signal;
+}
+
+/** True for AbortSignal timeouts (AbortError/TimeoutError); never success, never non_billable. */
+export function isAlibabaTimeoutError(error: unknown): boolean {
+  return error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");
+}
+
+function effectiveTimeoutMs(explicit: number | undefined, fallback: number | undefined, def: number): number {
+  const candidate = explicit ?? fallback ?? def;
+  return Number.isFinite(candidate) && (candidate as number) > 0 ? (candidate as number) : def;
 }
 
 type JsonRecord = Record<string, unknown>;
@@ -199,6 +239,8 @@ export class AlibabaVideoGenerationPort implements VideoGenerationPort {
     const submitBody = request.firstFrame !== undefined
       ? buildAlibabaCartoonVideoBody(request)
       : buildAlibabaSubmitBody(request);
+    const submitTimeoutMs = effectiveTimeoutMs(
+      this.options.submitTimeoutMs, this.options.timeoutMs, ALIBABA_SUBMIT_TIMEOUT_MS);
     let response: Response;
     try {
       response = await this.fetchImpl(`${this.baseUrl}${SUBMIT_PATH}`, {
@@ -210,9 +252,12 @@ export class AlibabaVideoGenerationPort implements VideoGenerationPort {
           "X-DashScope-Idempotency-Key": request.idempotencyKey,
         },
         body: JSON.stringify(submitBody),
+        signal: alibabaTimeoutSignal(submitTimeoutMs),
       });
-    } catch {
-      // A network failure has an unknown outcome: the server may have accepted it.
+    } catch (error) {
+      // A network failure OR a bounded-timeout abort has an unknown outcome:
+      // the server may have accepted it. Certainty stays "unknown" (never
+      // non_billable); the worker reconciles instead of resubmitting blindly.
       throw new AlibabaSubmissionError("Alibaba submission outcome is unknown.", "unknown", false);
     }
 
@@ -241,13 +286,15 @@ export class AlibabaVideoGenerationPort implements VideoGenerationPort {
   }
 
   async getStatus(taskId: string): Promise<ProviderTaskStatus> {
-    const response = await this.getTask(taskId);
+    const response = await this.getTask(taskId, effectiveTimeoutMs(
+      this.options.statusTimeoutMs, this.options.timeoutMs, ALIBABA_STATUS_TIMEOUT_MS));
     if (!response.ok) throw new Error(`Alibaba status request failed (${response.status}).`);
     return parseStatus(await response.json());
   }
 
   async getResult(taskId: string): Promise<ProviderResult> {
-    const response = await this.getTask(taskId);
+    const response = await this.getTask(taskId, effectiveTimeoutMs(
+      this.options.resultTimeoutMs, this.options.timeoutMs, ALIBABA_RESULT_TIMEOUT_MS));
     if (!response.ok) throw new Error(`Alibaba result request failed (${response.status}).`);
     const body = await response.json();
     const root = record(body);
@@ -280,12 +327,28 @@ export class AlibabaVideoGenerationPort implements VideoGenerationPort {
     };
   }
 
-  private getTask(taskId: string): Promise<Response> {
+  private async getTask(taskId: string, timeoutMs: number): Promise<Response> {
     if (!/^[A-Za-z0-9_-]+$/.test(taskId)) throw new Error("Alibaba task ID is invalid.");
-    return this.fetchImpl(`${this.baseUrl}/api/v1/tasks/${encodeURIComponent(taskId)}`, {
-      method: "GET",
-      headers: { Authorization: `Bearer ${this.options.apiKey}` },
-    });
+    let signal: AbortSignal;
+    try {
+      signal = alibabaTimeoutSignal(timeoutMs);
+    } catch {
+      throw new AlibabaSubmissionError("Alibaba task query outcome is unknown.", "unknown", false);
+    }
+    // A bounded-timeout abort surfaces as certainty "unknown" (never
+    // non_billable), never as success: the poller reconciles the task ID.
+    try {
+      return await this.fetchImpl(`${this.baseUrl}/api/v1/tasks/${encodeURIComponent(taskId)}`, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${this.options.apiKey}` },
+        signal,
+      });
+    } catch (error) {
+      if (isAlibabaTimeoutError(error)) {
+        throw new AlibabaSubmissionError("Alibaba task query timed out; outcome is unknown.", "unknown", false);
+      }
+      throw error;
+    }
   }
 }
 
