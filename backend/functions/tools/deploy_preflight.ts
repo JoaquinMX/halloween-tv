@@ -16,11 +16,21 @@ import { join, resolve } from "node:path";
 import { Storage } from "@google-cloud/storage";
 import {
   EXPECTED_NORMALIZATION,
+  EXPECTED_SCENARIO_COUNT,
+  PACKAGED_SCENARIO_DIR,
+  SCENARIO_CATALOG_FILENAME,
+  SCENARIO_CATALOG_VERSION,
+  SCENARIO_REF_FILENAMES,
+  SITUATIONS_CATALOG_VERSION,
+  SITUATIONS_FILENAME,
   assertLinuxX64Executable,
   assertMp4Container,
+  assertSafePackagedPath,
   readRuntimeManifest,
   sha256Hex,
   validateFixtureBytes,
+  validateScenarioInventory,
+  validateScenarioReferenceBytes,
   type RuntimeManifest,
 } from "./runtime_artifact";
 
@@ -328,6 +338,93 @@ export async function runPreflight(): Promise<Record<string, unknown>> {
         }
       }
     });
+
+    // Cartoon scenario inventory: both versioned catalogs plus all 16
+    // reference stills ship inside the artifact and hash-match their records.
+    record(() => {
+      const scenarios = runtime!.scenarios;
+      if (!scenarios) throw new Error("Prepared runtime is missing the scenarios section; run npm run runtime:prepare.");
+      if (scenarios.catalogVersion !== SCENARIO_CATALOG_VERSION) {
+        throw new Error(`Prepared scenario catalog version must be ${SCENARIO_CATALOG_VERSION} (found ${String(scenarios.catalogVersion)}).`);
+      }
+      if (scenarios.situationsVersion !== SITUATIONS_CATALOG_VERSION) {
+        throw new Error(`Prepared situations version must be ${SITUATIONS_CATALOG_VERSION} (found ${String(scenarios.situationsVersion)}).`);
+      }
+      if (scenarios.catalogPath !== `${PACKAGED_SCENARIO_DIR}/${SCENARIO_CATALOG_FILENAME}` ||
+          scenarios.situationsPath !== `${PACKAGED_SCENARIO_DIR}/${SITUATIONS_FILENAME}`) {
+        throw new Error("Prepared scenario catalog paths must live under runtime/scenarios so the artifact is self-contained.");
+      }
+      const records = scenarios.records;
+      if (!Array.isArray(records) || records.length !== EXPECTED_SCENARIO_COUNT) {
+        throw new Error(`Prepared runtime must contain exactly ${EXPECTED_SCENARIO_COUNT} scenario records.`);
+      }
+      const seenFilenames = new Set<string>();
+      for (const record of records) {
+        assertSafePackagedPath(record.referencePath, `Scenario ${record.id} referencePath`);
+        if (seenFilenames.has(record.sourceFilename)) throw new Error(`Duplicate prepared scenario file: ${record.sourceFilename}.`);
+        seenFilenames.add(record.sourceFilename);
+        const packaged = join(functionsRoot, PACKAGED_SCENARIO_DIR, "scenario_refs", record.sourceFilename);
+        if (!existsSync(packaged)) throw new Error(`Prepared scenario reference is missing: ${packaged}.`);
+        validateScenarioReferenceBytes(readFileSync(packaged), record);
+      }
+      for (const name of SCENARIO_REF_FILENAMES) {
+        if (!seenFilenames.has(name)) throw new Error(`Prepared runtime is missing allowlisted scenario file: ${name}.`);
+      }
+    });
+    record(() => {
+      // Catalog JSONs are verified structurally against the same inventory
+      // contract the packager used; structural form + byte digests together
+      // prove the artifact matches the reviewed catalogs.
+      const readJson = (relativePath: string, label: string): unknown => {
+        assertSafePackagedPath(relativePath, label);
+        const absolute = join(functionsRoot, relativePath);
+        if (!existsSync(absolute)) throw new Error(`${label} is missing: ${relativePath}.`);
+        try {
+          return JSON.parse(readFileSync(absolute, "utf8")) as unknown;
+        } catch {
+          throw new Error(`${label} at ${relativePath} is not valid JSON.`);
+        }
+      };
+      const scenarios = runtime!.scenarios;
+      if (!scenarios) throw new Error("Prepared runtime is missing the scenarios section; run npm run runtime:prepare.");
+      const catalog = readJson(scenarios.catalogPath ?? "", "Scenario catalog");
+      const situations = readJson(scenarios.situationsPath ?? "", "Situations catalog");
+      const inventoried = validateScenarioInventory(catalog, situations);
+      for (const record of inventoried) {
+        const pinned = scenarios.records?.find((entry) => entry.id === record.id);
+        if (!pinned || pinned.sha256 !== record.sha256 || pinned.sizeBytes !== record.sizeBytes) {
+          throw new Error(`Scenario ${record.id} catalog digest disagrees with the prepared runtime manifest.`);
+        }
+      }
+      // Owner-reviewable sample batch: every sample resolves to known ids and
+      // the pair is explicitly compatible, so p2 can stage it without edits.
+      const samples = (catalog as { reviewBatch?: { samples?: Array<{ scenarioId?: string; situationId?: string }> } }).reviewBatch?.samples;
+      if (!Array.isArray(samples) || samples.length === 0) {
+        throw new Error("Scenario catalog reviewBatch must list at least one owner-reviewable sample.");
+      }
+      const events = (situations as { events?: Array<{ id?: string; compatibleScenarios?: string[] }> }).events ?? [];
+      for (const sample of samples) {
+        const scenario = inventoried.find((entry) => entry.id === sample.scenarioId);
+        const event = events.find((entry) => entry.id === sample.situationId);
+        if (!scenario) throw new Error(`Review batch references unknown scenario: ${String(sample.scenarioId)}.`);
+        if (!event) throw new Error(`Review batch references unknown situation: ${String(sample.situationId)}.`);
+        if (!event.compatibleScenarios?.includes(scenario.id)) {
+          throw new Error(`Review batch pairs incompatible scenario/situation: ${scenario.id} + ${String(sample.situationId)}.`);
+        }
+      }
+    });
+    record(() => {
+      // Relocated-artifact loader: the compiled scenario catalog module must
+      // ship so entries resolve from runtime/scenarios without the repo root.
+      const compiledCatalog = join(functionsRoot, "lib", "src", "scenario_catalog.js");
+      if (!existsSync(compiledCatalog)) {
+        throw new Error("Compiled scenario catalog is missing (lib/src/scenario_catalog.js); run npm run build first.");
+      }
+      const source = readFileSync(compiledCatalog, "utf8");
+      if (!source.includes("runtime/scenarios")) {
+        throw new Error("Compiled scenario catalog does not resolve the packaged runtime/scenarios copy; relocated artifacts would need the repo checkout.");
+      }
+    });
   }
 
   const compiledMainPath = mainEntry ? resolve(functionsRoot, mainEntry) : undefined;
@@ -376,13 +473,27 @@ export async function runPreflight(): Promise<Record<string, unknown>> {
     const firebaseConfigPath = join(configRoot, "firebase.json");
     if (!existsSync(firebaseConfigPath)) throw new Error(`backend/firebase.json is missing at ${firebaseConfigPath}.`);
     const firebaseConfig = JSON.parse(readFileSync(firebaseConfigPath, "utf8")) as {
-      functions?: { source?: string; runtime?: string; predeploy?: string[] };
+      functions?: { source?: string; runtime?: string; predeploy?: string[]; ignore?: string[] };
     };
     if (firebaseConfig.functions?.source !== "functions" || firebaseConfig.functions.runtime !== "nodejs22") {
       throw new Error("backend/firebase.json Functions source/runtime does not match this Node.js 22 package.");
     }
     if (!firebaseConfig.functions.predeploy?.some((hook) => hook.includes("run predeploy"))) {
       throw new Error("backend/firebase.json must run the package predeploy validation before uploading Functions.");
+    }
+    // Packaging guard: the scenario refs + catalog JSONs (assets/ and the
+    // prepared runtime/scenarios copy) must ship in the Functions artifact.
+    // Any ignore rule matching those trees breaks the relocated artifact.
+    // (The cartoons_scenarios_reference owner-checkout name is ignored by
+    // construction so a duplicate source directory can never deploy.)
+    for (const pattern of firebaseConfig.functions.ignore ?? []) {
+      const normalized = pattern.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
+      const hitsTree = (tree: string): boolean =>
+        normalized === tree || normalized.startsWith(`${tree}/`) ||
+        normalized === `${tree}/**` || normalized === "**" || normalized === "*.json";
+      if (hitsTree("assets") || hitsTree("runtime")) {
+        throw new Error(`backend/firebase.json ignore pattern ${JSON.stringify(pattern)} would exclude packaged scenario catalog assets.`);
+      }
     }
   });
 
@@ -453,6 +564,14 @@ export async function runPreflight(): Promise<Record<string, unknown>> {
       ffprobe: runtime?.binaries?.ffprobeSha256,
     },
     fixtureDirectory: runtime?.fixtureDirectory,
+    scenarioCatalogVersion: runtime?.scenarios?.catalogVersion,
+    situationsVersion: runtime?.scenarios?.situationsVersion,
+    scenarioCount: runtime?.scenarios?.count,
+    budgetGate: {
+      providerSpendAuthorized: "0 (none) for catalog preparation and verification",
+      generationOptIn: liveBatchApprovalRef ? "live-batch" : (allowGeneration ? "fake-only-rehearsal" : "disabled"),
+      note: "No live provider calls, cloud migrations, or deploys run in this check; --allow-live-batch=<owner-approval-ref> stays the only live opt-in.",
+    },
     functionsEntry: mainEntry,
     generationOptIn: liveBatchApprovalRef ? "live-batch" : (allowGeneration ? "fake-only-rehearsal" : "disabled"),
     liveBatch: Boolean(liveBatchApprovalRef),

@@ -1,0 +1,497 @@
+{
+  "catalog": "scenario_catalog",
+  "version": "v1",
+  "formatVersion": 1,
+  "provenance": {
+    "sourceDir": "cartoons_scenarios_reference/",
+    "sourceNote": "Owner checkout directory (read-only, originals stay untracked there). Reference bytes copied verbatim to backend/functions/assets/scenario_refs/.",
+    "method": "Orchestrator viewed all 16 JPGs via image tool 2026-10-31; observed/style/scenario/confidence/constraint strings are that verbatim ground truth. sha256/sizeBytes below are re-verified locally 2026-10-31 against the packaged bytes (zero provider spend).",
+    "hashDiscrepancy": "13 of the 16 transcribed digests in the task brief disagree with the actual source bytes (most are not valid 64-hex; two differ by single transcription characters; one entry appears truncated). The catalog records the actual verified byte hashes; packaging validators hash the real files.",
+    "consentScope": "Owner-provided cartoon reference stills for the cartoon pipeline. No private photos or personal media; no faces of non-consenting persons; no secrets or credentials in records, tests, fixtures, logs, or docs."
+  },
+  "records": [
+    {
+      "id": "attic-computer-corner",
+      "version": 1,
+      "sourceFilename": "2938c25f-4772-415d-bab0-941b2521be3d.JPG",
+      "referencePath": "assets/scenario_refs/2938c25f-4772-415d-bab0-941b2521be3d.JPG",
+      "sha256": "8d9a6a667f5c1a354b1b121edf0198c29aeb676f4d9d43e5866f2c31a12880f9",
+      "sizeBytes": 114543,
+      "observedNote": "Wooden attic room, steep plank walls/floor in saturated orange-brown with heavy grain; small purple night window, child desk with CRT + lamp + chair + printer. Thick irregular ink, warm wood vs cool purple. Courage attic/computer-room direction.",
+      "observed": {
+        "scene": "Empty crooked attic computer corner at night",
+        "layout": "Cramped attic room; steep plank walls/floor; child desk with CRT, lamp, chair, printer; small night window",
+        "palette": "Saturated orange-brown wood against cool purple night window",
+        "linework": "Thick irregular ink outlines",
+        "textures": "Heavy plank wood grain",
+        "light": "CRT glow plus purple night-window spill",
+        "era": "Early-2000s Cartoon Network spooky farmhouse"
+      },
+      "identification": "Courage-era CN farmhouse interior (attic/computer-room direction)",
+      "confidence": "high",
+      "confidenceNote": "high: Courage-era CN farmhouse interior",
+      "stylePrompt": "Early-2000s Cartoon Network spooky farmhouse attic, warped wood planks, thick irregular black ink, flat warm browns against purple night window",
+      "scenarioPrompt": "Empty crooked attic computer corner at night; CRT glow, single chair, no people",
+      "situationConstraints": "Small indoor room; chase must be cramped stumble, no vehicles, no crowds",
+      "compatibleSituations": [
+        "cramped-stumble-chase",
+        "mask-lunge-scare"
+      ]
+    },
+    {
+      "id": "boy-genius-lab",
+      "version": 1,
+      "sourceFilename": "3f2db6e1-7b6b-4bb9-992d-a1f3584fbad0.JPG",
+      "referencePath": "assets/scenario_refs/3f2db6e1-7b6b-4bb9-992d-a1f3584fbad0.JPG",
+      "sha256": "49aa8df1200e468e8e9b66311adc6b37ffaa84b19a6177cfdae5e05562b761eb",
+      "sizeBytes": 73126,
+      "observedNote": "Bright laboratory, pale cyan/white, wall of beakers/flasks, black chalkboard with formula gags (SUGAR/SPICE), angular retro-future benches. Clean thin outlines, flat vector fills. Dexter's Laboratory direction.",
+      "observed": {
+        "scene": "Vast empty high-tech boy-genius laboratory",
+        "layout": "Wall of beakers/flasks; black chalkboard with formula gags; angular retro-future benches; stairs",
+        "palette": "Pale cyan and white, icy retro-future",
+        "linework": "Clean thin outlines",
+        "textures": "Flat vector fills",
+        "light": "Bright even laboratory light",
+        "era": "Late-90s/early-2000s Cartoon Network retro-future"
+      },
+      "identification": "Dexter's Laboratory direction (boy-genius lab)",
+      "confidence": "high",
+      "confidenceNote": "high: Dexter's lab",
+      "stylePrompt": "Dexter's Laboratory clean retro-future cartoon lab, icy cyan-white palette, thin precise outlines, flat geometric fills",
+      "scenarioPrompt": "Vast empty high-tech boy-genius lab with chalkboard, workbenches, glassware, stairs",
+      "situationConstraints": "Sterile lab; slapstick chase weaves between benches, knock over flasks, no gore",
+      "compatibleSituations": [
+        "lab-bench-slapstick"
+      ]
+    },
+    {
+      "id": "pink-mansion-foyer",
+      "version": 1,
+      "sourceFilename": "52398ea0-a1f8-4639-aa74-1671ce6c276b.JPG",
+      "referencePath": "assets/scenario_refs/52398ea0-a1f8-4639-aa74-1671ce6c276b.JPG",
+      "sha256": "23d702cc92e7281e1a542d87d735f8755bbda37fe5c8f9e2fe69107c31be739a",
+      "sizeBytes": 61739,
+      "observedNote": "Grand pink mansion foyer, symmetrical double staircase, dark carved banisters, tall stained-glass window, red patterned rug. Flat saturated pinks/maroons, bold graphic shapes. Foster's Home direction.",
+      "observed": {
+        "scene": "Empty palatial pink staircase hall",
+        "layout": "Symmetrical double staircase; dark carved banisters; tall stained-glass window; long red patterned rug",
+        "palette": "Flat saturated pinks and deep maroon wood",
+        "linework": "Bold graphic shapes",
+        "textures": "Flat fills",
+        "light": "Bright theatrical hall light through tall windows",
+        "era": "2000s Cartoon Network mansion era"
+      },
+      "identification": "Foster's Home mansion foyer direction (observation, not confirmed credit)",
+      "confidence": "medium-high",
+      "confidenceNote": "medium-high: Foster's Home mansion foyer (observation, not confirmed credit)",
+      "stylePrompt": "Foster's-style grand cartoon mansion foyer, flat saturated pinks and deep maroon wood, bold graphic banisters, theatrical symmetry",
+      "scenarioPrompt": "Empty palatial pink staircase hall with tall windows and long rug",
+      "situationConstraints": "Wide staircase allows upstairs-down chase; keep both characters on stairs/rug, no gore",
+      "compatibleSituations": [
+        "grand-staircase-chase",
+        "clock-chime-scare"
+      ]
+    },
+    {
+      "id": "storybook-kitchen",
+      "version": 1,
+      "sourceFilename": "5c0e9bf8-864a-4146-b2f7-4e04f5c2520e.JPG",
+      "referencePath": "assets/scenario_refs/5c0e9bf8-864a-4146-b2f7-4e04f5c2520e.JPG",
+      "sha256": "fd6a42315e77ea8992ce255a1bae6a97a5317e4c98bd0860204403d7780ea9b1",
+      "sizeBytes": 811504,
+      "observedNote": "Chowder-style kitchen: round lavender cook in magenta robe and tall purple hat holds fork+knife, open-mouth cheer; ochre stone kitchen, cauldron over fire, sketchy brown underdrawing. Wobbly hand-drawn lines, textured washes.",
+      "observed": {
+        "scene": "Bustling storybook kitchen with hearth cauldron (people cleared)",
+        "layout": "Ochre stone kitchen; cauldron over open fire; stone arches",
+        "palette": "Textured ochre and magenta washes",
+        "linework": "Wobbly hand-drawn lines with sketchy brown underdrawing",
+        "textures": "Textured watercolor-style washes",
+        "light": "Warm hearth-fire glow",
+        "era": "Late-2000s Cartoon Network Chowder era"
+      },
+      "identification": "Chowder-era Cartoon Network storybook kitchen",
+      "confidence": "high",
+      "confidenceNote": "high: Chowder-era CN",
+      "stylePrompt": "Chowder Marzipan-City cartoon kitchen, wobbly hand-inked lines, textured ochre/magenta washes, squishy round shapes",
+      "scenarioPrompt": "Bustling storybook kitchen with hearth cauldron and stone arches, no people",
+      "situationConstraints": "Kitchen chase: slip on pots, hide behind cauldron; food gags only",
+      "compatibleSituations": [
+        "kitchen-slapstick-chase"
+      ]
+    },
+    {
+      "id": "tv-living-room",
+      "version": 1,
+      "sourceFilename": "78b5c629-0ce2-4944-9ce1-7eb9b8570ddf.JPG",
+      "referencePath": "assets/scenario_refs/78b5c629-0ce2-4944-9ce1-7eb9b8570ddf.JPG",
+      "sha256": "2ddeb5c8d326b56f4287c3ed138de684e537650b53cf2ec59e40738089f8fced",
+      "sizeBytes": 42322,
+      "observedNote": "Simpsons living room: grey couch, pink walls, teal carpet, sailboat painting, purple side table with green phone, floor TV set in foreground, floor lamp. Clean yellow-era primetime linework, flat cel fills.",
+      "observed": {
+        "scene": "Empty familiar TV living room",
+        "layout": "Grey couch; purple side table with phone; floor TV set; floor lamp; sailboat painting",
+        "palette": "Pink walls, teal carpet, grey couch, purple accents",
+        "linework": "Clean uniform yellow-era primetime outlines",
+        "textures": "Flat cel fills",
+        "light": "Warm domestic interior light",
+        "era": "90s primetime yellow-family cartoon"
+      },
+      "identification": "Yellow-family primetime cartoon living room (observation)",
+      "confidence": "high",
+      "confidenceNote": "high: Simpsons living room (observation)",
+      "stylePrompt": "Classic yellow-family primetime cartoon living room, clean uniform outlines, flat pink/teal/grey cel fills",
+      "scenarioPrompt": "Empty familiar TV living room with couch, lamps, side table and off TV",
+      "situationConstraints": "Domestic couch-gag chase: jump couch, trip on rug; keep living-room scale",
+      "compatibleSituations": [
+        "couch-gag-chase",
+        "toy-room-chase"
+      ]
+    },
+    {
+      "id": "red-gallery-hall",
+      "version": 1,
+      "sourceFilename": "7a712bff-0095-4610-9741-f9a380bce068.JPG",
+      "referencePath": "assets/scenario_refs/7a712bff-0095-4610-9741-f9a380bce068.JPG",
+      "sha256": "70dcaaf80349eb1544754f5fc20202a2f689eaa9bdc44a873e4039b7ee25b315",
+      "sizeBytes": 315288,
+      "observedNote": "Ornate red-orange hall with black gothic linework, F-monogram canopy, twin magenta chairs, sunburst windows, long serpent rug. UPA/graphic mid-century shapes. Foster's grand hall direction.",
+      "observed": {
+        "scene": "Empty eccentric red gallery hall",
+        "layout": "Long hall; F-monogram canopy; twin magenta chairs; sunburst windows; long coiled serpent rug",
+        "palette": "Burnt-orange and magenta with heavy black ornament",
+        "linework": "Heavy black gothic ornament linework; UPA/graphic mid-century shapes",
+        "textures": "Flat graphic fills",
+        "light": "Tall-window shafts down a long hall",
+        "era": "Mid-century graphic modern via 2000s Cartoon Network"
+      },
+      "identification": "Foster's-style grand interior (observation; F motif visible, show credit unconfirmed)",
+      "confidence": "medium",
+      "confidenceNote": "medium: Foster's-style grand interior (observation; F motif visible, show credit unconfirmed)",
+      "stylePrompt": "Mid-century graphic cartoon mansion hall, burnt-orange and magenta, heavy black ornament linework, UPA shapes",
+      "scenarioPrompt": "Empty eccentric red gallery hall with tall windows, thrones and coiled rug",
+      "situationConstraints": "Long hall suits run-through chase; use rug/windows, no new monogram lore",
+      "compatibleSituations": [
+        "grand-staircase-chase"
+      ]
+    },
+    {
+      "id": "halloween-graveyard",
+      "version": 1,
+      "sourceFilename": "96cf7a63-7d8e-485e-a7cc-9e6654b920e6.JPG",
+      "referencePath": "assets/scenario_refs/96cf7a63-7d8e-485e-a7cc-9e6654b920e6.JPG",
+      "sha256": "c6defa106f8d331e3f9aca21f39571ba16aba4d83bcffd15b6ec4295e9d5da35",
+      "sizeBytes": 175224,
+      "observedNote": "Billy & Mandy Halloween: graveyard night, green horde of carved pumpkin minions, scythe silhouette on rock, skull-faced reaper in black/red cloak, two kids and spilled pink candy pile. Sickly green/purple night, thick CN outlines.",
+      "observed": {
+        "scene": "Crowded spooky graveyard at night (mob cleared for staging)",
+        "layout": "Tombstones; glowing jack-o-lantern mound; scythe silhouette rock; night sky",
+        "palette": "Sickly green night glow over flat purple stone",
+        "linework": "Thick Cartoon Network outlines",
+        "textures": "Flat stone fills with carved pumpkin detail",
+        "light": "Green night glow plus lantern light",
+        "era": "2000s Cartoon Network Halloween special"
+      },
+      "identification": "Grim-Adventures Halloween cartoon graveyard (observation)",
+      "confidence": "high",
+      "confidenceNote": "high: Billy & Mandy Halloween (observation)",
+      "stylePrompt": "Grim-Adventures Halloween cartoon graveyard, sickly green night glow, thick black outlines, flat purple stone",
+      "scenarioPrompt": "Crowded spooky graveyard at night with glowing jack-o-lantern mound and tombstones",
+      "situationConstraints": "Outdoor horde chase fits perfectly; monster can join pumpkin mob; keep candy/graves, no gore",
+      "compatibleSituations": [
+        "horde-swarm-chase"
+      ]
+    },
+    {
+      "id": "mystery-van-road",
+      "version": 1,
+      "sourceFilename": "98a6182f-1de7-46a4-8013-f7e501e85d21.JPG",
+      "referencePath": "assets/scenario_refs/98a6182f-1de7-46a4-8013-f7e501e85d21.JPG",
+      "sha256": "54667763f9584f2add81e4fad58ff532a20aebf06c18cdaa48672c177a4a0095",
+      "sizeBytes": 159013,
+      "observedNote": "Mystery Machine van three-quarter front, lime/teal with orange flowers, parked by split-rail fence at blue-purple dusk, dark trees. Clean Hanna-Barbera îndreptare lines, flat cel shading.",
+      "observed": {
+        "scene": "Lonely country road at dusk with parked groovy van",
+        "layout": "Three-quarter van; split-rail fence; dark treeline; dusky field",
+        "palette": "Lime/teal van with orange flowers against blue-purple dusk",
+        "linework": "Clean Hanna-Barbera outlines",
+        "textures": "Flat cel shading",
+        "light": "Blue-purple dusk",
+        "era": "Classic Saturday-morning mystery cartoon"
+      },
+      "identification": "Classic Saturday-morning mystery cartoon van (observation)",
+      "confidence": "high",
+      "confidenceNote": "high: Scooby-Doo Mystery Machine (observation)",
+      "stylePrompt": "Classic Saturday-morning mystery cartoon, clean HB outlines, flat lime/teal/orange cel, dusky blue field",
+      "scenarioPrompt": "Lonely country road at dusk with parked groovy van, fences and dark treeline",
+      "situationConstraints": "Vehicle gag: chase around/into van, doors slam; keep van livery, no real plates/text",
+      "compatibleSituations": [
+        "horde-swarm-chase",
+        "van-door-slam-gag"
+      ]
+    },
+    {
+      "id": "furnace-kitchen-pass",
+      "version": 1,
+      "sourceFilename": "9b8b9749-da46-4782-b34f-72137f9f5f00.JPG",
+      "referencePath": "assets/scenario_refs/9b8b9749-da46-4782-b34f-72137f9f5f00.JPG",
+      "sha256": "3904d9ec8f38f0103de01343ef59d097d5c7f3973e9257a68f6743cd582e9c6e",
+      "sizeBytes": 56274,
+      "observedNote": "Fiery kitchen close-up: green blob diners in steel tub, grey cat-like waiter with bowl through hatch, orange-red heat wash, white motion marks. Chowder furnace frenzy.",
+      "observed": {
+        "scene": "Cramped roaring kitchen pass (diners cleared)",
+        "layout": "Tight galley; serving hatch; steel stew tub",
+        "palette": "Hot orange-red heat wash",
+        "linework": "Sketchy outlines with white speed-line marks",
+        "textures": "Rubbery blob shapes; heat-wash gradients",
+        "light": "Fiery furnace glow",
+        "era": "Late-2000s Cartoon Network"
+      },
+      "identification": "Chowder-era frantic kitchen pass (observation)",
+      "confidence": "high",
+      "confidenceNote": "high: Chowder kitchen (observation)",
+      "stylePrompt": "Chowder frantic kitchen close-up, hot orange-red wash, sketchy white speed lines, rubbery blobs",
+      "scenarioPrompt": "Cramped roaring kitchen pass with serving hatch and stew tub",
+      "situationConstraints": "Tight galley chase; steam/pot lids as cover; no burns/gore",
+      "compatibleSituations": [
+        "cramped-stumble-chase",
+        "kitchen-slapstick-chase"
+      ]
+    },
+    {
+      "id": "farmhouse-sitting-room",
+      "version": 1,
+      "sourceFilename": "IMG_3924.JPG",
+      "referencePath": "assets/scenario_refs/IMG_3924.JPG",
+      "sha256": "74ce527a8422fa771c7c34d645024e07db1e3291e215b3e2d19c2c14d080101d",
+      "sizeBytes": 405004,
+      "observedNote": "Courage farmhouse living room: pink dog bares teeth beside tall green snarling mask-monster with mismatched eyes, red armchair, floral rug, sunny windows behind. Crunchy 2000s CN horror-comedy linework.",
+      "observed": {
+        "scene": "Quaint farmhouse sitting room (characters cleared)",
+        "layout": "Red armchair; rocker; floral rug; sunny windows behind",
+        "palette": "Dusty rose and red wood with garish green monster accents",
+        "linework": "Crunchy 2000s horror-comedy ink",
+        "textures": "Painted farmhouse textures; floral rug",
+        "light": "Sunny daylight through windows",
+        "era": "Early-2000s Cartoon Network horror-comedy"
+      },
+      "identification": "Courage-era farmhouse sitting room (observation)",
+      "confidence": "high",
+      "confidenceNote": "high: Courage living room (observation)",
+      "stylePrompt": "Courage-the-Cowardly-Dog farmhouse living room, crunchy ink, dusty rose/red wood, garish green monster accents",
+      "scenarioPrompt": "Quaint farmhouse sitting room with red armchair, rocker, rug and daylight windows",
+      "situationConstraints": "Classic mask-scare beat fits; monster lunges, guest recoils; keep one monster only",
+      "compatibleSituations": [
+        "couch-gag-chase",
+        "mask-lunge-scare"
+      ]
+    },
+    {
+      "id": "retro-computer-core",
+      "version": 1,
+      "sourceFilename": "a840217b-d807-4e2f-9476-370443e83bbc.JPG",
+      "referencePath": "assets/scenario_refs/a840217b-d807-4e2f-9476-370443e83bbc.JPG",
+      "sha256": "141d0ae5f4e15232442da8425b44813ad4b1b6e0a22d23eeb384eda57c1091ab",
+      "sizeBytes": 72687,
+      "observedNote": "Retro computer close-up: bulky white CRT/workstation, blue keyboard, tiny chair, blue grid floor extending to domed lab towers. Cool monochrome teal, crisp geometric vector style.",
+      "observed": {
+        "scene": "Giant vintage computer terminal alone on grid floor",
+        "layout": "Bulky white CRT/workstation; blue keyboard; tiny chair; blue grid floor; domed lab towers",
+        "palette": "Cool monochrome teal-blue",
+        "linework": "Crisp geometric vector outlines",
+        "textures": "Flat geometric fills",
+        "light": "Cool terminal glow",
+        "era": "90s retro-future cartoon"
+      },
+      "identification": "Dexter-style retro-future computer core (observation)",
+      "confidence": "medium-high",
+      "confidenceNote": "medium-high: Dexter's lab computer core (observation)",
+      "stylePrompt": "Dexter-style retro-future computer bay, monochrome teal-blue, crisp geometric vector fills",
+      "scenarioPrompt": "Giant vintage computer terminal alone on grid floor with lab skyline",
+      "situationConstraints": "Tech chase: duck under cables, keyboard as springboard; no readable code/text",
+      "compatibleSituations": [
+        "cramped-stumble-chase",
+        "lab-bench-slapstick"
+      ]
+    },
+    {
+      "id": "suburb-house-day",
+      "version": 1,
+      "sourceFilename": "bd75cef5-bd11-4fb9-8ac7-89498a765f93.JPG",
+      "referencePath": "assets/scenario_refs/bd75cef5-bd11-4fb9-8ac7-89498a765f93.JPG",
+      "sha256": "e084a2bee6de1761a6d9900d6b3784d1794d540b0bc49ec488042efe09a4cf75",
+      "sizeBytes": 30713,
+      "observedNote": "Suburban house exterior day: white two-storey with brown roof, green lawn, bushes, red mesas behind, CN bug in corner. Flat limited-animation TV background.",
+      "observed": {
+        "scene": "Quiet suburban house front with lawn and driveway",
+        "layout": "White two-storey house; brown roof; green lawn; bushes; red mesas behind",
+        "palette": "Flat warm daylight fills",
+        "linework": "Limited-animation TV background outlines; CN bug in corner",
+        "textures": "Flat fills; simple bush blobs",
+        "light": "Bright warm daylight",
+        "era": "2000s Cartoon Network suburb"
+      },
+      "identification": "2000s Cartoon Network suburb exterior (exact credit unconfirmed)",
+      "confidence": "medium",
+      "confidenceNote": "medium: 2000s CN suburb (Dexter/Toon show era; exact credit unconfirmed)",
+      "stylePrompt": "2000s TV-cartoon suburb exterior, flat fills, simple bush blobs, warm daylight",
+      "scenarioPrompt": "Quiet suburban house front with lawn and driveway in daylight",
+      "situationConstraints": "Daylight porch chase; keep house shape, no address text",
+      "compatibleSituations": [
+        "van-door-slam-gag",
+        "porch-daylight-gag"
+      ]
+    },
+    {
+      "id": "nowhere-farmhouse",
+      "version": 1,
+      "sourceFilename": "cb10e539-fec1-4416-8717-50a427e46dda.JPG",
+      "referencePath": "assets/scenario_refs/cb10e539-fec1-4416-8717-50a427e46dda.JPG",
+      "sha256": "afd8aeed95b7020e89688b52dee8cfcaee1124dfdcaba9dd1be13d907dcb06b3",
+      "sizeBytes": 28635,
+      "observedNote": "Beige Nowhere farmhouse with dark shingle roof, crooked dead tree, path, satellite field, CN bug. Lonely midwestern gothic, flat dusty fills.",
+      "observed": {
+        "scene": "Isolated farmhouse on dirt path with dead tree",
+        "layout": "Beige farmhouse; dark shingle roof; crooked dead tree; dirt path; satellite field",
+        "palette": "Dusty beige and olive fills",
+        "linework": "Simple outlines; crooked silhouette; CN bug in corner",
+        "textures": "Flat dusty fills",
+        "light": "Lonely overcast daylight; night variant allowed",
+        "era": "Early-2000s Cartoon Network midwestern gothic"
+      },
+      "identification": "Nowhere Kansas farmhouse exterior (observation; CN bug visible)",
+      "confidence": "medium-high",
+      "confidenceNote": "medium-high: Courage farmhouse exterior (observation; CN bug visible)",
+      "stylePrompt": "Nowhere Kansas farmhouse exterior, dusty beige/olive fills, crooked silhouette, lonely gothic calm",
+      "scenarioPrompt": "Isolated farmhouse on dirt path with dead tree and empty fields",
+      "situationConstraints": "Opening approach gag then indoor scare; night variant allowed, keep silhouette",
+      "compatibleSituations": [
+        "mask-lunge-scare",
+        "horde-swarm-chase",
+        "porch-daylight-gag"
+      ]
+    },
+    {
+      "id": "culdesac-house",
+      "version": 1,
+      "sourceFilename": "d317360a-7db0-4a19-a778-c1e35c46aa18.JPG",
+      "referencePath": "assets/scenario_refs/d317360a-7db0-4a19-a778-c1e35c46aa18.JPG",
+      "sha256": "d0bda5eb60aa0e6d2bf6c551f222d298d959463ab5dcbd1ada55dd55e55d0881",
+      "sizeBytes": 36200,
+      "observedNote": "Pink cul-de-sac house with red shingle roof, green shutters, garage, bright lawn and trees. Ed-Edd-n-Eddy wobbly-line suburb.",
+      "observed": {
+        "scene": "Cheerful suburban house front with garage and wide lawn",
+        "layout": "Pink house; red shingle roof; green shutters; garage; bright lawn and trees; tall sky",
+        "palette": "Juicy pink, green and red fills",
+        "linework": "Wobbly Ed-style outlines",
+        "textures": "Flat fills",
+        "light": "Cheerful daylight",
+        "era": "Late-90s/early-2000s Cartoon Network suburb"
+      },
+      "identification": "Ed-style cul-de-sac suburb (observation)",
+      "confidence": "medium-high",
+      "confidenceNote": "medium-high: Ed-Edd-n-Eddy suburb (observation)",
+      "stylePrompt": "Ed-style cul-de-sac suburb, wobbly outlines, juicy pink/green/red fills, tall sky",
+      "scenarioPrompt": "Cheerful suburban house front with garage and wide lawn",
+      "situationConstraints": "Jawbreaker Porch-chase: trip on lawn, garage door gag; keep palette, no text",
+      "compatibleSituations": [
+        "van-door-slam-gag",
+        "porch-daylight-gag"
+      ]
+    },
+    {
+      "id": "clock-manor-hall",
+      "version": 1,
+      "sourceFilename": "f92785a5-c171-40e8-846d-76ba366446f1.JPG",
+      "referencePath": "assets/scenario_refs/f92785a5-c171-40e8-846d-76ba366446f1.JPG",
+      "sha256": "c8286299ebdd89e42725d9ee91c74f694e5d26449fd2ed6580de4d8ca069f79e",
+      "sizeBytes": 234071,
+      "observedNote": "Lavender clock hall: walls of cuckoo/grandfather clocks, black H-monogram cabinet, pink curtains, blue settee, small white sheet-ghost drifting. Graphic gothic-pastel, visible brush texture.",
+      "observed": {
+        "scene": "Haunted clock gallery with cabinet and settee",
+        "layout": "Walls of cuckoo/grandfather clocks; black H-monogram cabinet; pink curtains; blue settee; drifting sheet ghost",
+        "palette": "Lavender, ink-black and pink gothic-pastel",
+        "linework": "Graphic outlines; stylized clock faces",
+        "textures": "Visible brush texture",
+        "light": "Eerie pastel hall light",
+        "era": "2000s Cartoon Network gothic"
+      },
+      "identification": "Foster's-style haunted interior (H motif visible, exact show unconfirmed)",
+      "confidence": "medium",
+      "confidenceNote": "medium: Foster's-style haunted interior; H motif visible, exact show unconfirmed",
+      "stylePrompt": "Graphic gothic-pastel clock manor, lavender/ink-black/pink, stylized clock faces, brushed texture",
+      "scenarioPrompt": "Haunted clock gallery with cabinet, settee and drifting sheet ghost",
+      "situationConstraints": "Clock-chime scare: clocks bong, ghost drifts; no occult symbols beyond clocks",
+      "compatibleSituations": [
+        "mask-lunge-scare",
+        "clock-chime-scare"
+      ]
+    },
+    {
+      "id": "pink-bedroom",
+      "version": 1,
+      "sourceFilename": "ff03626f-fe41-40b0-9d12-92ba6a9aaa5a.JPG",
+      "referencePath": "assets/scenario_refs/ff03626f-fe41-40b0-9d12-92ba6a9aaa5a.JPG",
+      "sha256": "45e9cc3677286d96315fce0897e1d4a45dc4a505ae1845c27f7693594f623905",
+      "sizeBytes": 55111,
+      "observedNote": "Bubblegum-pink girl bedroom: heart headboard/ rug, green/blue bedding, round windows, toy shelves with plush/bots, tiny red-haired doll by bed. Dee-Dee hyper-femme lab-sister style.",
+      "observed": {
+        "scene": "Empty frilly pink bedroom with heart bed and toys",
+        "layout": "Heart headboard bed; green/blue bedding; heart rug; round windows; toy shelves with plush/bots",
+        "palette": "Bubblegum pink walls with green/blue bedding accents",
+        "linework": "Soft round outlines",
+        "textures": "Soft fills",
+        "light": "Soft warm bedroom light",
+        "era": "90s Cartoon Network hyper-femme"
+      },
+      "identification": "Dee-Dee hyper-femme lab-sister bedroom style (observation)",
+      "confidence": "medium-high",
+      "confidenceNote": "medium-high: Dexter's Dee-Dee bedroom (observation)",
+      "stylePrompt": "Dee-Dee hyper-pink cartoon bedroom, bubblegum walls, heart motifs, soft round shapes",
+      "scenarioPrompt": "Empty frilly pink bedroom with heart bed, toys and round windows",
+      "situationConstraints": "Toy-room chase: trip on plush, hide under bed; keep sweet, no menace beyond spooky twist",
+      "compatibleSituations": [
+        "cramped-stumble-chase",
+        "toy-room-chase"
+      ]
+    }
+  ],
+  "reviewBatch": {
+    "purpose": "Concrete owner-reviewable sample batch for the cartoon pipeline (p2). Zero provider calls authorized for preparation or verification.",
+    "stillModel": "qwen-image-3.0-pro",
+    "stillRegion": "singapore",
+    "videoModel": "wan3.0-video",
+    "videoTier": "STANDARD",
+    "videoControls": {
+      "secondsOut": 2,
+      "resolution": "480P",
+      "audio": false,
+      "watermark": false,
+      "promptExtend": false
+    },
+    "samples": [
+      {
+        "scenarioId": "attic-computer-corner",
+        "situationId": "cramped-stumble-chase",
+        "note": "Tight indoor night still-to-video; portrait+style refs compose the generated still, then it is animated."
+      },
+      {
+        "scenarioId": "halloween-graveyard",
+        "situationId": "horde-swarm-chase",
+        "note": "Outdoor night horde; monster joins the pumpkin mob."
+      },
+      {
+        "scenarioId": "mystery-van-road",
+        "situationId": "van-door-slam-gag",
+        "note": "Dusk exterior vehicle gag; keeps van livery, no plates/text."
+      }
+    ],
+    "providerCallsAuthorized": 0,
+    "approvalRequired": "Explicit owner approval reference before any live still/video call; preflight --allow-live-batch=<approval-ref> stays the only opt-in."
+  },
+  "budgetGate": {
+    "providerSpendAuthorized": "0 (none) for catalog preparation and verification",
+    "verification": "Local-only: TypeScript build, unit tests over real packaged bytes, and offline preflight checks. No live provider calls, cloud migrations, or deploys.",
+    "gate": "Preflight requires VIDEO_GENERATION_PROVIDER=fake with GENERATION_ENABLED unset/false; any live batch needs --allow-live-batch=<owner-approval-ref> plus GENERATION_ENABLED=true and redeploy restore afterwards."
+  }
+}

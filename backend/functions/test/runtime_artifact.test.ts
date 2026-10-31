@@ -5,13 +5,22 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import {
+  EXPECTED_SCENARIO_COUNT,
+  SCENARIO_CATALOG_FILENAME,
+  SCENARIO_CATALOG_VERSION,
+  SCENARIO_REF_FILENAMES,
+  SITUATIONS_CATALOG_VERSION,
+  SITUATIONS_FILENAME,
   assertLinuxX64Executable,
   assertMp4Container,
+  assertSafePackagedPath,
   installedPackageVersion,
   isLinuxX64Elf,
   readRuntimeManifest,
   sha256Hex,
   validateFixtureBytes,
+  validateScenarioInventory,
+  validateScenarioReferenceBytes,
 } from "../tools/runtime_artifact";
 
 const PACKAGE_ROOT = process.cwd();
@@ -78,6 +87,82 @@ test("fixture byte validation matches the real manifest and rejects tampering", 
   assert.throws(() => validateFixtureBytes(Buffer.from("plain text, not mp4"), first), /MP4|metadata/);
   assert.throws(() => validateFixtureBytes(bytes, { ...first, sha256: "0".repeat(64) }), /does not match its bytes/);
   assert.throws(() => readRuntimeManifest(join(tmpdir(), "no-such-runtime-manifest.json")), /missing/);
+});
+
+test("scenario inventory accepts the real catalogs and rejects tampering", () => {
+  const catalog = JSON.parse(readFileSync(resolve(PACKAGE_ROOT, "assets", SCENARIO_CATALOG_FILENAME), "utf8")) as {
+    version: string;
+    records: Array<Record<string, unknown>>;
+  };
+  const situations = JSON.parse(readFileSync(resolve(PACKAGE_ROOT, "assets", SITUATIONS_FILENAME), "utf8")) as {
+    version: string;
+    events: Array<{ id: string }>;
+  };
+  assert.equal(catalog.version, SCENARIO_CATALOG_VERSION);
+  assert.equal(situations.version, SITUATIONS_CATALOG_VERSION);
+  const inventoried = validateScenarioInventory(catalog, situations);
+  assert.equal(inventoried.length, EXPECTED_SCENARIO_COUNT);
+  assert.deepEqual(
+    inventoried.map((record) => record.sourceFilename).sort(),
+    [...SCENARIO_REF_FILENAMES].sort(),
+  );
+  // Real bytes hash to the inventoried digests; a flipped bit is rejected.
+  for (const record of inventoried) {
+    const bytes = readFileSync(resolve(PACKAGE_ROOT, "assets", "scenario_refs", record.sourceFilename));
+    validateScenarioReferenceBytes(bytes, record);
+    const tampered = Buffer.from(bytes);
+    tampered[tampered.length - 1] ^= 0xff;
+    assert.throws(() => validateScenarioReferenceBytes(tampered, record), /do not match the catalog/);
+    assert.throws(
+      () => validateScenarioReferenceBytes(bytes, { ...record, sha256: "0".repeat(64) }),
+      /do not match the catalog/,
+    );
+  }
+  const wrongVersion = { ...catalog, version: "v999" };
+  assert.throws(() => validateScenarioInventory(wrongVersion, situations), /version/);
+  const dropped = { ...catalog, records: catalog.records.slice(0, EXPECTED_SCENARIO_COUNT - 1) };
+  assert.throws(() => validateScenarioInventory(dropped, situations), /exactly 16/);
+  const dup = JSON.parse(JSON.stringify(catalog)) as typeof catalog;
+  dup.records[1] = { ...dup.records[0] };
+  assert.throws(() => validateScenarioInventory(dup, situations), /Duplicate or empty scenario id/);
+  const badFile = JSON.parse(JSON.stringify(catalog)) as typeof catalog;
+  badFile.records[0] = { ...(badFile.records[0] as Record<string, unknown>), sourceFilename: "owner-screenshot.JPG" };
+  assert.throws(() => validateScenarioInventory(badFile, situations), /non-allowlisted/);
+  const badLink = JSON.parse(JSON.stringify(catalog)) as typeof catalog;
+  (badLink.records[0] as Record<string, unknown>).compatibleSituations = ["no-such-situation"];
+  assert.throws(() => validateScenarioInventory(badLink, situations), /unknown or empty/);
+});
+
+test("packaged-path gate rejects host-absolute and escaping scenario paths", () => {
+  assertSafePackagedPath("assets/scenario_refs/IMG_3924.JPG", "probe");
+  assertSafePackagedPath("runtime/scenarios/scenario_catalog.v1.json", "probe");
+  for (const hostile of ["/tmp/evil.JPG", "/Users/someone/evil.JPG", "~/evil.JPG", "C:\\evil.JPG", "../outside.JPG", "assets/../outside.JPG", "assets//x.JPG", ""]) {
+    assert.throws(() => assertSafePackagedPath(hostile, "probe"), /repo-relative|escapes|non-empty/);
+  }
+});
+
+test("prepared runtime packages all 16 scenario references when present", () => {
+  const manifestPath = join(PACKAGE_ROOT, "runtime", "runtime-manifest.json");
+  if (!existsSync(manifestPath)) {
+    console.warn("runtime manifest not prepared; scenario packaging check skipped (run npm run runtime:prepare).");
+    return;
+  }
+  const manifest = readRuntimeManifest(manifestPath);
+  const scenarios = manifest.scenarios;
+  assert.ok(scenarios, "prepared runtime must carry a scenarios section");
+  assert.equal(scenarios!.catalogVersion, SCENARIO_CATALOG_VERSION);
+  assert.equal(scenarios!.situationsVersion, SITUATIONS_CATALOG_VERSION);
+  assert.equal(scenarios!.count, EXPECTED_SCENARIO_COUNT);
+  assert.equal(scenarios!.records?.length, EXPECTED_SCENARIO_COUNT);
+  for (const record of scenarios!.records ?? []) {
+    const packaged = join(PACKAGE_ROOT, "runtime", "scenarios", "scenario_refs", record.sourceFilename);
+    assert.ok(existsSync(packaged), `packaged scenario reference is missing: ${record.sourceFilename}`);
+    validateScenarioReferenceBytes(readFileSync(packaged), record);
+  }
+  for (const relativePath of ["runtime/scenarios/scenario_catalog.v1.json", "runtime/scenarios/situations.v1.json"]) {
+    assertSafePackagedPath(relativePath, "packaged catalog");
+    assert.ok(existsSync(join(PACKAGE_ROOT, relativePath)), `${relativePath} must ship in the artifact`);
+  }
 });
 
 test("pinned installer packages resolve to the exact locked versions", () => {
