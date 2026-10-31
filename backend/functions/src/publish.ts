@@ -261,7 +261,7 @@ export async function publishManifest(
       : undefined;
     const guestRef = guestBinding
       ? store.db.doc(`parties/${partyId}/guestMedia/${guestBinding.submissionId}`)
-      : portraitSubmissionId && !seedBinding
+      : portraitSubmissionId
         ? store.db.doc(`parties/${partyId}/guestMedia/${portraitSubmissionId}`)
         : undefined;
     const seedRef = seedBinding ? store.db.doc(`parties/${partyId}/seedVideos/${seedBinding.seedId}`) : undefined;
@@ -291,7 +291,7 @@ export async function publishManifest(
       // surfaces them as INTERNAL, never as "no binding").
       const replayGuest = (guestSnapshot && guestSnapshot.exists ? guestSnapshot.data() : undefined) as GuestMediaDoc | undefined;
       const replaySeed = (seedSnapshot && seedSnapshot.exists ? seedSnapshot.data() : undefined) as Record<string, unknown> | undefined;
-      const needsGuestDoc = guestBinding !== undefined || (portraitSubmissionId !== undefined && seedBinding === undefined);
+      const needsGuestDoc = guestBinding !== undefined || portraitSubmissionId !== undefined;
       const needsSeedDoc = seedBinding !== undefined;
       if (needsGuestDoc && !replayGuest) {
         throw new BackendError("FORBIDDEN", "[authorization] Guest consent is no longer eligible for publication.");

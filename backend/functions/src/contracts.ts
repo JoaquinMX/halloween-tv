@@ -296,6 +296,8 @@ export interface GenerateHostVideoInput extends Identity {
   idempotencyKey: string;
   presetId: typeof CHEAP_DEMO_PRESET.presetId | typeof CAMEO_DEMO_PRESET.presetId;
   guestMediaId?: string;
+  /** Offline-rehearsal marker: when present must be true; persisted on the job. */
+  rehearsalOnly?: true;
 }
 
 export interface GenerateHostVideoResult {
@@ -381,21 +383,28 @@ export function parseGenerateHostVideoInput(value: unknown): GenerateHostVideoIn
     throw new BackendError("INVALID_ARGUMENT", "Only the fixed generation presets are supported.");
   }
   const presetId = (value.presetId ?? CHEAP_DEMO_PRESET.presetId) as GenerateHostVideoInput["presetId"];
+  let rehearsalOnly: true | undefined;
+  if ("rehearsalOnly" in value) {
+    if (value.rehearsalOnly !== true) {
+      throw new BackendError("INVALID_ARGUMENT", "rehearsalOnly must be true when present.");
+    }
+    rehearsalOnly = true;
+  }
   if (presetId === CAMEO_DEMO_PRESET.presetId) {
     if (typeof value.guestMediaId !== "string" || !value.guestMediaId) {
       throw new BackendError("INVALID_ARGUMENT", "The cameo_demo preset requires a consent-bound guestMediaId.");
     }
     validateId(value.guestMediaId, "guestMediaId");
-    return { ...identity, seedId, idempotencyKey, presetId, guestMediaId: value.guestMediaId };
+    return { ...identity, seedId, idempotencyKey, presetId, guestMediaId: value.guestMediaId, ...(rehearsalOnly ? { rehearsalOnly } : {}) };
   }
   if (value.guestMediaId !== undefined) {
     if (typeof value.guestMediaId !== "string" || !value.guestMediaId) {
       throw new BackendError("INVALID_ARGUMENT", "guestMediaId is invalid.");
     }
     validateId(value.guestMediaId, "guestMediaId");
-    return { ...identity, seedId, idempotencyKey, presetId, guestMediaId: value.guestMediaId };
+    return { ...identity, seedId, idempotencyKey, presetId, guestMediaId: value.guestMediaId, ...(rehearsalOnly ? { rehearsalOnly } : {}) };
   }
-  return { ...identity, seedId, idempotencyKey, presetId };
+  return { ...identity, seedId, idempotencyKey, presetId, ...(rehearsalOnly ? { rehearsalOnly } : {}) };
 }
 
 export function parseGetHostVideoPreviewInput(value: unknown): GetHostVideoPreviewInput {
@@ -817,6 +826,53 @@ function assertSeedProvenance(
     throw deliveryFailure("authorization", "FORBIDDEN", "Seed artifact is not an explicitly supported legacy authorization.");
   }
 }
+
+/**
+ * Durable pending cartoon-generation intent (cycle-13 fix-5a).
+ *
+ * One doc per eligible portrait at
+ * `parties/{partyId}/pendingGenerations/{submissionId}`, created in the same
+ * transactional path as eligibility. The plan is immutable (server-selected
+ * once, never rerolled); dispatch reuses it. Status is pending until the job
+ * is queued, queued once enqueued, unavailable when queue admission
+ * terminally fails. Withdrawn/expired intents are deleted, never dispatched.
+ */
+export interface PendingCartoonIntentPlan {
+  scenarioId: string;
+  situationId: string;
+  portraitSubmissionId: string;
+  stillPlanId: string;
+  videoPlanId: string;
+  version: number;
+  seed: number;
+}
+
+export interface PendingCartoonIntent {
+  partyId: string;
+  deviceId: string;
+  channelId: string;
+  submissionId: string;
+  consentRevision: string;
+  sourceHash: string;
+  plan: PendingCartoonIntentPlan;
+  status: "pending" | "queued" | "unavailable";
+  errorCode?: string;
+  attempts: number;
+  createdAt: unknown;
+  updatedAt: unknown;
+}
+
+export function pendingCartoonIntentPath(partyId: string, submissionId: string): string {
+  return `parties/${partyId}/pendingGenerations/${submissionId}`;
+}
+
+/** Queue state surfaced on guest media status (never silent eligible-forever). */
+export type GenerationQueueState =
+  | "pending"
+  | "queued"
+  | "ready"
+  | "failed"
+  | "unavailable";
 
 /**
  * Pins the cartoon video controls to the proven cheap_demo envelope plus the
