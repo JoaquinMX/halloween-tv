@@ -24,10 +24,7 @@
     "model": "wan3.0-video",
     "input": {
       "prompt": "A two-second, silent 16:9 Halloween security-camera scene for CAM-01.",
-      "reference_image": {
-        "url": "https://signed.invalid/guest-photo.jpg",
-        "sha256": "990113ea6cec90564cdc9e64917fd5fc2b1172a6220d20f8848225c084eb316a"
-      }
+      "media": "https://signed.invalid/guest-photo.jpg"
     },
     "parameters": {
       "resolution": "480P",

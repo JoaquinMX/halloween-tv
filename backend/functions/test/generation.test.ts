@@ -9,6 +9,7 @@ import { FakeVideoGenerationPort } from "../src/providers/fake";
 import { ProviderResult, ProviderTaskStatus, VideoGenerationRequest } from "../src/video_generation_port";
 import { reconcileUsage, usageLedgerId } from "../src/usage";
 import { buildCheapDemoRequest, validateCheapDemoControls, validateFetchableReferenceImage, validateVideoGenerationRequest } from "../src/video_generation_port";
+import { buildAlibabaSubmitBody } from "../src/providers/alibaba";
 import {
   HAS_FIRESTORE_EMULATOR,
   clearParty,
@@ -303,6 +304,93 @@ test("request idempotency cannot be rebound to another device", { skip: !HAS_FIR
     await disposeEmulatorContext(app);
   }
 });
+
+test("submit body uses the media-field form for references (no network)", () => {
+  // Offline regression for the live r2v defect: the signed URL rides as
+  // input.media; sha256 / reference_image never enter the submitted JSON.
+  const reference = {
+    objectPath: "parties/pilot/guests/p-1/ingest/gsub-1/photo.jpg",
+    sha256: "c".repeat(64),
+    consentRevision: "v1:2026-10-30T00:00:00.000Z",
+    url: "https://signed.invalid/media-photo.jpg",
+  };
+  const body = buildAlibabaSubmitBody(buildCheapDemoRequest("job-media", "idem-media", "CAM-01", { ...reference }));
+  assert.equal((body.input as Record<string, unknown>).media, "https://signed.invalid/media-photo.jpg");
+  assert.ok(!("reference_image" in (body.input as Record<string, unknown>)));
+  assert.ok(!JSON.stringify(body).includes("c".repeat(64)));
+});
+
+test("worker surfaces a provider FAILED reason in the error and on the job doc", {
+  skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
+}, async () => {
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  const deviceId = "tv-fail-reason";
+  const channelId = "main";
+  const jobId = "job-fail-reason";
+  const idempotencyKey = "idem-fail-reason";
+  try {
+    await seedParty(db, partyId, deviceId, channelId);
+    const failingProvider = {
+      async submit(_request: VideoGenerationRequest) { return { taskId: "CAM-01__failreason000000000001" }; },
+      async getStatus(_taskId: string): Promise<ProviderTaskStatus> {
+        return { state: "FAILED", errorCode: "InvalidParameter", errorMessage: "Field required: input.media" };
+      },
+      async getResult(_taskId: string): Promise<ProviderResult> {
+        throw new BackendError("PROVIDER_UNAVAILABLE", "unreachable");
+      },
+    };
+    const services = createGenerationServices({
+      db, bucket, provider: failingProvider, pollIntervalMs: 1, sleep: async () => undefined,
+    });
+    await services.requestGeneration({ partyId, deviceId, channelId, jobId, idempotencyKey, presetId: "cheap_demo" });
+    await assert.rejects(services.runGeneration({ partyId, deviceId, channelId, jobId, idempotencyKey }),
+      (error: unknown) => error instanceof BackendError
+        && error.errorCode === "PROVIDER_UNAVAILABLE"
+        && /Field required: input\.media/.test(error.message));
+    const job = (await db.doc(`parties/${partyId}/jobs/${jobId}`).get()).data()!;
+    assert.equal(job.state, "failed");
+    assert.ok(typeof job.providerErrorCode === "string" && job.providerErrorCode.includes("InvalidParameter"));
+    assert.ok(job.providerErrorCode.includes("Field_required"));
+    assert.ok(!JSON.stringify(job).includes("https://"));
+  } finally {
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+  }
+});
+
+test("worker keeps the generic mapping when a FAILED task carries no reason", {
+  skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
+}, async () => {
+  const { app, db, bucket } = await createEmulatorContext();
+  const partyId = randomPartyId();
+  const deviceId = "tv-fail-empty";
+  const channelId = "main";
+  const jobId = "job-fail-empty";
+  const idempotencyKey = "idem-fail-empty";
+  try {
+    await seedParty(db, partyId, deviceId, channelId);
+    const emptyProvider = {
+      async submit(_request: VideoGenerationRequest) { return { taskId: "CAM-01__failempty000000000001" }; },
+      async getStatus(_taskId: string): Promise<ProviderTaskStatus> { return { state: "FAILED" }; },
+      async getResult(_taskId: string): Promise<ProviderResult> {
+        throw new BackendError("PROVIDER_UNAVAILABLE", "unreachable");
+      },
+    };
+    const services = createGenerationServices({
+      db, bucket, provider: emptyProvider, pollIntervalMs: 1, sleep: async () => undefined,
+    });
+    await services.requestGeneration({ partyId, deviceId, channelId, jobId, idempotencyKey, presetId: "cheap_demo" });
+    await assert.rejects(services.runGeneration({ partyId, deviceId, channelId, jobId, idempotencyKey }),
+      (error: unknown) => error instanceof BackendError
+        && error.errorCode === "PROVIDER_UNAVAILABLE"
+        && error.message === "Provider task failed.");
+  } finally {
+    await clearParty(db, bucket, partyId);
+    await disposeEmulatorContext(app);
+  }
+});
+
 
 test("lazy provider fallback threads fixtureDirectory through both construction paths", {
   skip: !HAS_FIRESTORE_EMULATOR || !process.env.STORAGE_EMULATOR_HOST,
