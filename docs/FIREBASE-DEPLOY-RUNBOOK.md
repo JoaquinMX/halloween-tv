@@ -4,10 +4,10 @@ This is a command and evidence checklist. Commands containing placeholders are e
 
 ## Current stop checks
 
-The repository contains the generation and delivery service modules plus the TV Firebase client adapters, but the current production composition is not ready to deploy end to end:
+The repository contains the generation and delivery service modules plus the TV Firebase client adapters, but the current production composition is not deployed end to end and no cloud deploy was performed in this cycle:
 
-- `backend/functions/src/index.ts` still builds the task handler with the older `createDeliveryServices` service and its default runner returns `PROVIDER_UNAVAILABLE`. It does not connect `createGenerationServices`, and it does not declare a task `timeoutSeconds`. The new predeploy gate intentionally fails until both are connected and the configured worker deadline is present in that handler.
-- `backend/functions/src/providers/fake.ts` defaults to the repository path `../../apps/tv_app/assets`; deployed packages only contain `runtime/fixtures`. Wire the packaged fixture directory into the worker's fake-provider construction before deploying.
+- `backend/functions/src/index.ts` now builds the task handler through the `createRuntimeServices` composition root (wrapping `createDeliveryServices` + `createGenerationServices`), declares the task `timeoutSeconds: 900` matching `GENERATION_WORKER_TIMEOUT_SECONDS`, declares `GENERATION_WORKER_MEMORY` (1GiB), passes the packaged `runtime/fixtures` directory to the fake-provider construction, and pins the storage trigger to `STORAGE_TRIGGER_REGION` (`us-east1`). The predeploy/preflight gate verifies all of these against the compiled artifact and fails on drift.
+- `backend/functions/src/providers/fake.ts` still defaults to the repository path `../../apps/tv_app/assets` when constructed without an argument, but the deployed worker factory passes `runtime/fixtures` explicitly (preflight blocks deployment if the compiled entry point no longer passes `runtime/fixtures` to the fake provider).
 - `apps/tv_app/lib/main.dart` still boots the local `WallBoot` with bundled assets and `PrefsManifestStore`. The Firebase manifest, callable delivery, and settings adapters exist in packages, but the TV entry point does not yet select or construct them. There is no supported `--dart-define` live switch in this checkout. Do not mark a TV as live or use guessed compile flags.
 
 Keep the wall in offline mode until the relevant app/runtime owners land those composition changes and their tests. Once wired, use the exact values in the TV configuration section below and capture the runtime evidence before enabling devices.
@@ -94,7 +94,7 @@ npm run preflight -- --target=cloud --project="$PROJECT_ID" --bucket='<EXISTING_
 
 Expected evidence from `runtime:prepare`: `target=linux-x64`, both executable paths, four fixture hashes/sizes, and the H.264/yuv420p/24fps/480P/two-second normalization profile. Expected evidence from preflight: compiled `package.json` entry point, exact bucket and project, fixture digests, and worker deadline matching the task handler.
 
-With the current `src/index.ts`, the final preflight command must stop and report the missing `createGenerationServices` task binding and `timeoutSeconds`; resolve those source integration checks before any deploy command. A successful TypeScript build alone is not deployment readiness.
+Preflight verifies the connected generation runtime, the packaged `runtime/fixtures` binding, and the `timeoutSeconds` match against `GENERATION_WORKER_TIMEOUT_SECONDS`; it fails on any drift. A successful TypeScript build alone is not deployment readiness.
 
 ## 5. Configure runtime environment and verify worker deadlines
 
@@ -121,14 +121,31 @@ Do not set an Alibaba provider mode, live-spend switch, provider API key, or Sec
 
 ## 6. Apply rules and indexes
 
-Review the rules and the collection-group `jobs.expiresAt` index in the branch, then deploy them before Functions:
+Review the rules and the collection-group `jobs`/`guestMedia`/`hostInvites` `expiresAt` indexes (TTL enabled only on `hostInvites`) in the branch, then deploy them before Functions:
 
 ```sh
 cd backend
 firebase --config firebase.json deploy --project "$PROJECT_ID" --only firestore:rules,firestore:indexes,storage
 ```
 
-Expected evidence: Firebase CLI reports Firestore rules, the `jobs.expiresAt` collection-group index, and Storage rules deployed. Verify in Firebase Console that clients cannot read/write manifests, jobs, ACKs, cost logs, or Storage objects directly; registered-device reads remain the only direct client exception.
+Expected evidence: Firebase CLI reports Firestore rules, the three `expiresAt` collection-group indexes, and Storage rules deployed. Verify in Firebase Console that clients cannot read/write manifests, jobs, ACKs, cost logs, or Storage objects directly; registered-device reads remain the only direct client exception. Verify the `hostInvites.expiresAt` TTL policy shows active and the index shows enabled; record both states in §6b.
+
+## 6b. Cycle-13 rollout (deployment metadata only — no deploy in this cycle)
+
+No cloud deploy, migration, or spend was performed in cycle 13. When a deploy is separately authorized, use exactly these targets and this order (generation-disabled first):
+
+- Project: `halloween-tv`. Functions region: `us-central1`; storage trigger pinned to `us-east1` via `STORAGE_TRIGGER_REGION` (§4 preflight verifies the trigger region against the deploy bucket location).
+- Firebase deploy targets: `functions`, `firestore:rules`, `firestore:indexes`, `storage` (indexes/rules/storage via the §6 command, Functions via §8 after all gates pass).
+- `hostInvites` retention: collection-group `hostInvites.expiresAt` ASCENDING index plus TTL policy (`ttl: true`) declared in `backend/firestore.indexes.json`; `jobs`/`guestMedia` `expiresAt` overrides are unchanged (TTL stays off). Firestore TTL deletes lapsed invite docs outright; the scheduled sweeper marks lapsed pending invites `expired` defense-in-depth and redemption rechecks expiry transactionally, so a stale invite can never redeem even before TTL propagation completes.
+- Validation order: predeploy + cloud preflight with `GENERATION_ENABLED` unset/false and `VIDEO_GENERATION_PROVIDER=fake` (no `--allow-generation`); then rules/indexes/storage (§6–§7), then Functions (§8) with fake rehearsal only as an explicit opt-in (§8b). Live providers stay owner-gated under the existing budget/deploy approvals — no new approval gate is introduced here.
+
+Post-apply state (fill only after an authorized apply; leave blank until then):
+
+- `hostInvites.expiresAt` index state: ___ (e.g. ENABLED + console timestamp)
+- `hostInvites.expiresAt` TTL policy state: ___ (e.g. ACTIVE + console timestamp)
+- `jobs`/`guestMedia` TTL state (expected off): ___
+- Rules/storage deploy confirmation + revision: ___
+- Deployed revision / approval ref: ___
 
 ## 7. Apply and read back Storage lifecycle policy
 
