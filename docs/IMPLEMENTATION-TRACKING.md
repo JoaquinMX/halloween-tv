@@ -120,5 +120,12 @@ This dated closeout supersedes older operational blockers above; those sections 
 - Backend deployed; all 20 exports ACTIVE. `hostInvites.expiresAt` TTL ACTIVE and collection-group index READY. Final cloud configuration is generation-disabled/fake, with zero queued tasks/pending intents and an idle budget.
 - Original bounded batch reconciled: two confirmed stills/videos delivered; the first still POST has unknown outcome and consumes the third still allowance. No retry/fourth case. Actual Token Plan Credits remain UNKNOWN, not zero.
 - Registered-TV ACK/manifest hashes and all eight retained preview byte hashes match; eight delivery objects are purged. Parent directly observed the cached cartoon still playing on the TV after purge. This is not a new network-isolation test.
-- Remaining hardware boundary: phone flow UNVERIFIED until owner unlocks/reconnects the Pixel. No lock bypass or TV Wi-Fi toggle was used. No further paid batch is active.
+- At rollout closeout the phone was unverified; the subsequent phone acceptance below supersedes that boundary. No lock bypass or TV Wi-Fi toggle was used. No further paid batch is active.
 - Detailed scope, source/review distinctions, evidence hashes, and limitations: [catalog runbook](CYCLE-13-CATALOG-PIPELINE-RUNBOOK.md) and [final acceptance](cycle13/verification-f6cde52.json). Authorized main integration preserves branches, owner files, and stash.
+
+## Phone pairing / View follow-up (2026-10-31 local)
+
+- Integrated companion source `5e3423d` fixes dropped host pairing codes and route pushes above `MaterialApp`. Parent independent full suite: **168/168**, zero failures/skips; analysis clean. Real standalone app route and payload regressions cover both defects.
+- Owner optical host scan succeeded. Hardware screenshots independently inspected: case-2 and case-3 CAM-01 previews play, guest lineup v3 and explicit unchecked consent/upload-disabled screen work; no photo selection/upload, generation or deletion. Phone returned to host panel.
+- TV remains **partially recovered**, not fully validated: CAM-01 cartoon, CAM-03 fixture, CAM-02/04 blank; further cache/restart investigation is active. Purged delivery alone is not an established root cause.
+- One diagnostic mirror host remains active (reported capacity 3/3); no revocation requested/performed. Installed APK byte match and source-provenance boundary, checks and private evidence hashes: [phone acceptance](cycle13/verification-5e3423d-phone.json). Closed generation window and UNKNOWN actual Credits unchanged.

@@ -1,0 +1,117 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-11-01T00:33:00.523226+00:00",
+  "acceptance": "Phone host-pairing and View fixes independently source-reviewed and tested; actual phone playback/consent screenshots inspected. TV recovery is incomplete and continues separately.",
+  "testedHead": "5e3423dd26a0e1224ad9184b74971bd706672a2a",
+  "base": "77c1ef16944734c93e186fd395f116d945f7f5ca",
+  "sourceTree": "72515eff00908021342b05d991dd672992d824ff",
+  "independentVerification": [
+    {
+      "command": "flutter test --no-pub --reporter json",
+      "workingDirectory": "apps/companion_app",
+      "sourceSha": "5e3423dd26a0e1224ad9184b74971bd706672a2a",
+      "sourceTree": "72515eff00908021342b05d991dd672992d824ff",
+      "exitCode": 0,
+      "logName": "parent-companion-tests.jsonl",
+      "sha256": "9c7a0f9a83373583283e15d9273a1e04de75e8ab6d80181800462c27fc787a1a",
+      "counts": {
+        "tests": 168,
+        "pass": 168,
+        "fail": 0,
+        "skipped": 0,
+        "hiddenRunnerEvents": 21
+      },
+      "runnerSuccess": true
+    },
+    {
+      "command": "flutter analyze --no-pub",
+      "workingDirectory": "apps/companion_app",
+      "sourceSha": "5e3423dd26a0e1224ad9184b74971bd706672a2a",
+      "sourceTree": "72515eff00908021342b05d991dd672992d824ff",
+      "exitCode": 0,
+      "logName": "parent-companion-analyze.log",
+      "sha256": "a2215dabc9149661691022d803ea4a3a3063f178aa5a5ac9c97a11c82e91a63e",
+      "analysisSummary": "Analyzing companion_app...                                      \nNo issues found! (ran in 4.0s)"
+    }
+  ],
+  "closedFindings": [
+    {
+      "id": "PHONE-HOST-PAIRING-CODE-DROPPED",
+      "resolution": "App binds HostEntryScreen.onHostJoinWithCode; validated pairingCode flows through HostSession.join to HostJoinClient.redeem.",
+      "coverage": "Real standalone CompanionApp entry to callable payload; scan/paste equivalence, legacy compatibility and malformed-code rejection."
+    },
+    {
+      "id": "PHONE-NAVIGATOR-ABOVE-MATERIALAPP",
+      "resolution": "MaterialApp owns a stable navigator key used by host-preview, host-photo and guest-photo pushes; camera scanner uses descendant invocation context.",
+      "coverage": "Standalone CompanionApp View pushes HostVideoPreviewScreen and loads camera rows; host photo pushes GuestPhotoScreen, no Flutter exception."
+    }
+  ],
+  "physicalEvidence": {
+    "hostPairing": "Owner optical scan and successful host panel with three existing cases; case-1 Failed remains unchanged.",
+    "case2And3Previews": "Parent inspected distinct spaced frames from each retained cartoon; both screens show Playing for CAM-01. Other preview cameras are not claimed physically tested.",
+    "guestConsent": "Parent inspected latest lineup manifest v3, explicit unchecked photo consent and disabled Review and upload; no photo selected or submitted; guest session exited.",
+    "finalPhoneState": "Host panel, case-1 Failed and cases-2/3 Ready; Generate and Delete untouched.",
+    "screenshotsPrivate": true,
+    "screenshotSha256": {
+      "cycle13-ph-p1.png": "ab2ccc0753e5998b8e7a251d6b96db83062dc62f1f5f673e1b54b66ddfea77a1",
+      "cycle13-ph-p2.png": "57746cf6e0bfd94916088c2c67a3061bec1c5fac310d323dd957c3d87432bf56",
+      "cycle13-ph-c3a.png": "67050acb5395b392045fb7362379c7c0ea01dd885736f3ca7451197c44ac7805",
+      "cycle13-ph-c3b.png": "46fc412800fe7478af6298a259ce2e3c1e83157895441cd0442f7b06fc69ad7e",
+      "phone-22-20261101.png": "8420d4bdaec9af03794b2d0b70a91d09425c3cee9389f8c56bd6ce8e9608c72e",
+      "phone-23-20261101.png": "6364a3078d19ed327c7cc6bbbf179a5c59255a26b52feefe6683fcf50dfa16e4",
+      "phone-24-20261101.png": "ae41d3d51935f3a36b37537821a46262fa91b2fba4f5c15ccca75eca9a9168ec",
+      "phone-26-20261101.png": "ea9d9f08c714dd5caf95816dd30a653a34137a15ad87e0f18ad48d1d57e2bd84",
+      "tv-18-20261101.png": "bbb82e6a4274e942a87f11d87b4240451025381cc3e1c92c505f8b892f94813d"
+    }
+  },
+  "installedArtifact": {
+    "observedAt": "2026-11-01T00:32:13.717488+00:00",
+    "package": "com.joaquinmx.companion_app",
+    "apkSha256": "c302080415bc81118ad6c087c53e6fb7d9c7a9008070649543650898dac184c4",
+    "bytes": 70218963,
+    "installedMatchesChildArtifact": true,
+    "acceptedSourceSha": "5e3423dd26a0e1224ad9184b74971bd706672a2a",
+    "sourceBindingBoundary": "Installed APK byte match verified independently. Exact build-time source provenance requested separately; current reviewed companion source bytes were preserved unchanged during integration.",
+    "phoneStateChanged": false
+  },
+  "reviewScope": {
+    "parentSourceReview": true,
+    "freshThreeRoleHarnessReviewOfThisDiff": false,
+    "previousReviewsDoNotApproveThisDiff": true
+  },
+  "tvRecovery": {
+    "status": "INCOMPLETE - continued separately",
+    "lastObserved": "CAM-01 case-3 cartoon; CAM-03 fixture color bars; CAM-02/04 blank; no Signal Lost text.",
+    "purgedDeliveryIsNotEstablishedRootCause": "All v3 clips were verified and ACKed before purge; cache/renderer/public boot investigation continues using existing approved media.",
+    "fourPlayableTilesNotClaimed": true,
+    "networkIsolatedPlaybackNotClaimed": true
+  },
+  "constraints": {
+    "newProviderSubmissions": 0,
+    "newPhotoUploads": 0,
+    "generateActions": 0,
+    "deleteActions": 0,
+    "cloudRedeployments": 0,
+    "clearDataOrCache": false,
+    "uninstall": false,
+    "tvWifiToggled": false,
+    "liveBatchRemainsClosed": true,
+    "realizedCredits": "UNKNOWN, unchanged"
+  },
+  "diagnosticSideEffect": "Child diagnostic mirror host redemption left one disposable host active. Host capacity reported 3/3; no device revoked because deletion/revocation was not requested.",
+  "externalEvidence": [
+    {
+      "name": "phone-source-before-integration.json",
+      "sha256": "9cdd03e2764242caf770fe38fe3dedfc8948ac96e44fc700121aff29988c73c2"
+    },
+    {
+      "name": "parent-companion-verification.json",
+      "sha256": "f71e1a345179e0781c0fccc2f769de14995b359fc41304697144509478da8273"
+    },
+    {
+      "name": "parent-installed-apk-verification.json",
+      "sha256": "ea0a79bef9b72649b54afbb82def8505d04afeca297103918e0cda929659c14a"
+    }
+  ],
+  "evidenceLocation": "Private workspace reports/halloween-phone-recovery-20261031/ and screenshots outside git."
+}

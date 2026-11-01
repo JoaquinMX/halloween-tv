@@ -1,6 +1,6 @@
 # Cycle 13 catalog pipeline runbook
 
-Current status (2026-10-31): the authorized live rollout is closed; two cartoon clips were delivered and ACKed. Generation is now disabled/fake, the queue is empty, and host-invite TTL/index are active. Phone hardware verification remains pending unlock/reconnect. See the final independent acceptance section and [verification-f6cde52.json](cycle13/verification-f6cde52.json). Earlier offline verification below is historical, not a description of the post-rollout cloud state.
+Current status (2026-10-31): the authorized live rollout is closed; two cartoon clips were delivered and ACKed. Generation is now disabled/fake, the queue is empty, and host-invite TTL/index are active. Phone host pairing, both retained CAM-01 previews, and guest consent UI are now physically verified after two companion fixes (168/168 independent tests; analysis clean). TV recovery remains incomplete: two blank tiles are still under investigation. See [phone acceptance](cycle13/verification-5e3423d-phone.json) and the final independent rollout acceptance [verification-f6cde52.json](cycle13/verification-f6cde52.json). Earlier offline verification below is historical, not a description of the post-rollout cloud state.
 
 ## Scope and safety
 
@@ -194,14 +194,14 @@ Each item below was observed live and is now closed in code (see behavior notes 
 - HOST QR panel: invite + pairing code panel rendered (contents not recorded here).
 - GUEST CODES / LIST: 6 seeded guests displayed.
 - Wall v3 cartoon CAM-01 rendered on hardware; cached post-purge playback observed (preview retention path).
-- Phone proof blocked twice by external prerequisites (no bypass attempted, TV Wi-Fi untouched): first attempt the phone was locked (owner unlock needed); second attempt the USB device disappeared from `adb` (reconnect prerequisite). Phone proof remains pending owner unlock + reconnect.
+- Phone proof blocked twice by external prerequisites (no bypass attempted, TV Wi-Fi untouched): first attempt the phone was locked (owner unlock needed); second attempt the USB device disappeared from `adb` (reconnect prerequisite). At that rollout check, phone proof remained pending owner unlock + reconnect; the subsequent phone acceptance below supersedes that boundary.
 
 ### 6. Limitations (honest)
 
 - Case-1 unknown POST is counted as spent without proof of execution (no confirmed submit, no artifact; conservative accounting against the ceiling).
 - Credits UNKNOWN: ledger null everywhere; no console reconciliation performed, so realized spend is unstated.
 - No further paid generations were submitted after safe closure. Final-source parent verification passed 234/234 full backend emulator tests and 104/104 TV tests, with clean TV analysis; these are distinct from the earlier live-provider evidence.
-- Phone proof pending owner unlock + reconnect (see section 5).
+- At the rollout check, phone proof was pending unlock/reconnect; subsequently verified in the phone acceptance below.
 
 
 ## Final independent rollout acceptance (2026-10-31)
@@ -210,6 +210,15 @@ Each item below was observed live and is now closed in code (see behavior notes 
 - Parent source review closed the two missing-image-config/definitive-cartoon-FAILED findings and verified the unknown-outcome no-fail/no-resubmit boundary. No fresh three-role harness review covers the final rollout diff; earlier verdicts keep their original scope.
 - Independent read-only cloud checks found all **20** exports ACTIVE (19 in the primary region plus the ingest trigger), none generation-enabled, video provider `fake`, image provider absent, zero queue tasks/pending intents, and an idle generation budget. `hostInvites.expiresAt` TTL is ACTIVE and its collection-group index READY.
 - Both registered-TV ACKs (v2/v3) match the independently recomputed canonical manifest hashes and all clip hashes. All eight delivery objects are absent after purge; all eight retained preview objects were downloaded read-only and independently byte/size-hashed against those manifests. Local CAM-01 videos were independently probed as silent H.264/yuv420p, 854x480, 24fps, 48 frames, 2.0 seconds.
-- Parent reconnected only the already-authorized TV and directly observed the cartoon playing after cloud delivery purge (`WALL UPDATED · v3`); no Wi-Fi toggle, new paid request, or device-state bypass occurred. The installed release package is not debuggable, so direct extraction/hashing of its private cache was unavailable; evidence is the hash-bearing registered-TV ACK plus independently matched retained bytes and actual post-purge playback. This is not a network-isolation test. Physical phone proof remains UNVERIFIED pending owner unlock and USB reconnect.
+- Parent reconnected only the already-authorized TV and directly observed the cartoon playing after cloud delivery purge (`WALL UPDATED · v3`); no Wi-Fi toggle, new paid request, or device-state bypass occurred. The installed release package is not debuggable, so direct extraction/hashing of its private cache was unavailable; evidence is the hash-bearing registered-TV ACK plus independently matched retained bytes and actual post-purge playback. This is not a network-isolation test. At that audit, physical phone proof was UNVERIFIED pending owner unlock and USB reconnect; the subsequent phone acceptance below supersedes that boundary.
 - Budget accounting remains **two confirmed stills + one uncertain-reserved still**, **two videos**; no fourth case, blind retry, or ledger reset. Case-1's final cost rows are null-task/null-charge placeholders, not evidence of zero provider contact. Actual Credits remain **UNKNOWN**; no console reconciliation was performed.
 - Machine-checkable, sanitized acceptance and external log hashes: [verification-f6cde52.json](cycle13/verification-f6cde52.json). Private portraits, generated media, screenshots, signed URLs, and credentials remain outside git. All existing branches, owner untracked files, and the stash are retained during the authorized main integration.
+
+## Phone pairing and View acceptance (2026-10-31 local)
+
+- Source `5e3423dd26a0e1224ad9184b74971bd706672a2a`, based on already-pushed `77c1ef1`: fixed the dropped six-digit pairing code and app route pushes from a context above `MaterialApp`. The host panel, preview, host-photo and guest-photo routes use the app-owned Navigator.
+- Parent independently ran the full companion suite on integrated main: **168/168 passed**, zero failures/skips, 21 hidden runner events excluded; analysis clean. Regression tests enter the real standalone app and assert the actual destination screens and callable payload, not just helper behavior. This diff has parent review, not fresh three-role harness approval.
+- Owner scanned the TV Host QR successfully. Parent inspected the subsequent physical evidence: both retained cartoon CAM-01 previews show distinct moving frames and Playing status; latest guest lineup is v3; photo screen shows explicit unchecked consent and disabled upload, with no selection/submission. Phone returned to the host panel; no Generate or Delete actions.
+- Installed release APK is independently byte-hashed against the child build artifact. Exact build-time source provenance is reported separately from byte equality; no unsupported artifact/source claim. See [sanitized acceptance](cycle13/verification-5e3423d-phone.json) for source, checks, log hashes and artifact boundary.
+- TV recovery is **not complete**: the inspected wall has CAM-01 cartoon, CAM-03 fixture, CAM-02/04 blank. The disappearance of Signal Lost text does not prove four playable tiles. Cache/renderer/restart investigation continues using existing approved media, with no paid generation or data/cache clearing.
+- Diagnostic side effect: one disposable mirror host remains active, reportedly filling host capacity (3/3). No device was revoked. No cloud redeployment or additional paid-media submission occurred; the closed batch and UNKNOWN realized Credits are unchanged.
