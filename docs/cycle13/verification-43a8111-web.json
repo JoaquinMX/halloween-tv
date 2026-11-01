@@ -1,0 +1,100 @@
+{
+  "observedAt": "2026-11-01T01:18:52.574180+00:00",
+  "sourceCommit": "43a8111",
+  "site": "https://halloween-tv.web.app",
+  "hostingRelease": {
+    "name": "projects/halloween-tv/sites/halloween-tv/channels/live/releases/1793495770962000",
+    "releaseTime": "2026-11-01T01:16:10.962Z",
+    "version": "projects/halloween-tv/sites/halloween-tv/versions/52e406e9f394e73f",
+    "status": "FINALIZED"
+  },
+  "companionTests": {
+    "counts": {
+      "success": 171
+    },
+    "hiddenExcluded": 22,
+    "done": [
+      {
+        "success": true,
+        "type": "done",
+        "time": 6685
+      }
+    ]
+  },
+  "analysis": "No issues found",
+  "liveAssets": {
+    "index.html": {
+      "status": 200,
+      "sha256": "ee5c75ac99f5438085376917a93e0f8de2917c0f5e883fd4b5b1e467f27a23fb",
+      "localMatches": true
+    },
+    "main.dart.js": {
+      "status": 200,
+      "sha256": "4c315c084b2f4ebc10a49facd8f473553edacf5e48590e08d031dafe106dcaec",
+      "localMatches": true
+    },
+    "flutter_bootstrap.js": {
+      "status": 200,
+      "sha256": "2bfdb4edef9fd6662fb7376a52607ffc9739e4e6168739f1070a675936508b1b",
+      "localMatches": true
+    }
+  },
+  "liveBrowser": {
+    "guestJoin": "actual live callable and manifest v3",
+    "viewport": "390x844",
+    "photoSelection": "actual image_picker browser PNG chooser and memory preview",
+    "consent": "required before Review; explicit confirmation dialog shown",
+    "outcome": "Cancel; zero requestGuestUpload/completeGuestUpload/generation/deletion calls",
+    "pageErrors": []
+  },
+  "uploadTransport": "exact bytes, MIME, persisted receipt, consent gates, completion-failure recovery verified via real HttpGuestMediaTransport with MockClient; not a real cloud PUT",
+  "cors": {
+    "priorRules": 0,
+    "origins": [
+      "https://halloween-tv.web.app",
+      "https://halloween-tv.firebaseapp.com"
+    ],
+    "methods": [
+      "GET",
+      "HEAD",
+      "PUT"
+    ],
+    "preflight": "actual OPTIONS returned 200 + matching allow-origin/method/headers; no object uploaded"
+  },
+  "boundaries": [
+    "Generation remains disabled/fake; no new paid allowance",
+    "Host browser registration blocked at 3/3 capacity until owner decision; native paired host remains usable",
+    "TV 30-second overflow rotation is required and in progress, not accepted by this web record",
+    "No fresh three-role review of this final web diff; parent source review/full tests/browser evidence stated separately"
+  ],
+  "privateEvidenceHashes": {
+    "web-fix-tests.jsonl": {
+      "sha256": "abdbcf298834f1ec5b3cf85a8fcc0ea94f6f61dd3bab2e49e03651b220c872d5",
+      "bytes": 99737
+    },
+    "web-fix-analyze.log": {
+      "sha256": "e170131f4bb25a9e9b62ff3f454bc441fce808f4aab8f3d9380b3e310fa1b112",
+      "bytes": 1505
+    },
+    "web-build.log": {
+      "sha256": "0f853d620e67a4cc16723d3abe7984dea8c030920ba9acec371914a0988142eb",
+      "bytes": 2204
+    },
+    "web-deploy.log": {
+      "sha256": "9f8c8c2cec130524ea3841ada7da40247a300e9f58bc016b0145cc7c7e63bb22",
+      "bytes": 574
+    },
+    "web-guest-smoke.log": {
+      "sha256": "59bb9038d883d516abdb4b316f215329a3380359fceecea00b44ceacea1523a8",
+      "bytes": 716
+    },
+    "web-guest-live-lineup.png": {
+      "sha256": "abacc8d0b1bfd9220f039ebe25962fee370d654480f244b407b3263368caeeac",
+      "bytes": 79654
+    },
+    "web-photo-consent-confirmation.png": {
+      "sha256": "d53551d74520aa0496da242afba0ce75c48a21819b1caeab8e5883b02367ce12",
+      "bytes": 61349
+    }
+  }
+}
