@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:image_picker/image_picker.dart';
 
@@ -15,7 +16,19 @@ abstract interface class GuestPhotoPicker {
   String contentTypeFor(File file);
 }
 
-final class NativeGuestPhotoPicker implements GuestPhotoPicker {
+/// Browser-compatible selection; bytes remain local until explicit upload.
+final class GuestPhotoBytes {
+  const GuestPhotoBytes(this.bytes, this.contentType);
+  final Uint8List bytes;
+  final String contentType;
+}
+
+abstract interface class GuestPhotoBytesPicker {
+  Future<GuestPhotoBytes?> pickPhotoBytes();
+}
+
+final class NativeGuestPhotoPicker
+    implements GuestPhotoPicker, GuestPhotoBytesPicker {
   NativeGuestPhotoPicker({ImagePicker? picker})
     : _picker = picker ?? ImagePicker();
   final ImagePicker _picker;
@@ -28,4 +41,20 @@ final class NativeGuestPhotoPicker implements GuestPhotoPicker {
   @override
   String contentTypeFor(File file) =>
       file.path.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg';
+
+  @override
+  Future<GuestPhotoBytes?> pickPhotoBytes() async {
+    final XFile? photo = await _picker.pickImage(source: ImageSource.gallery);
+    if (photo == null) return null;
+    final String? mime = photo.mimeType;
+    final String contentType =
+        mime ??
+        (photo.name.toLowerCase().endsWith('.png')
+            ? 'image/png'
+            : 'image/jpeg');
+    if (contentType != 'image/jpeg' && contentType != 'image/png') {
+      throw const FormatException('Choose a JPEG or PNG photo.');
+    }
+    return GuestPhotoBytes(await photo.readAsBytes(), contentType);
+  }
 }

@@ -4,6 +4,7 @@ import 'package:companion_app/src/media/guest_photo_picker.dart';
 import 'package:companion_app/src/session/guest_media_session.dart';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 
 final class GuestPhotoScreen extends StatefulWidget {
   const GuestPhotoScreen({
@@ -19,6 +20,8 @@ final class GuestPhotoScreen extends StatefulWidget {
 
 final class _GuestPhotoScreenState extends State<GuestPhotoScreen> {
   File? photo;
+  GuestPhotoBytes? browserPhoto;
+  bool get hasPhoto => photo != null || browserPhoto != null;
   bool consent = false;
   String? message;
   @override
@@ -56,6 +59,36 @@ final class _GuestPhotoScreenState extends State<GuestPhotoScreen> {
   }
 
   Future<void> choose() async {
+    if (widget.session.busy) return;
+    if (kIsWeb) {
+      setState(() {
+        browserPhoto = null;
+        consent = false;
+        message = null;
+      });
+      try {
+        final picker = widget.picker;
+        if (picker is! GuestPhotoBytesPicker) {
+          throw StateError('Browser photo selection is unavailable.');
+        }
+        final selected = await (picker as GuestPhotoBytesPicker)
+            .pickPhotoBytes();
+        if (!mounted) return;
+        setState(() {
+          browserPhoto = selected;
+          consent = false;
+          message = selected == null ? 'Photo selection cancelled.' : null;
+        });
+      } catch (_) {
+        if (mounted) {
+          setState(
+            () => message =
+                'Could not select photo. Choose a JPEG or PNG and retry.',
+          );
+        }
+      }
+      return;
+    }
     final selected = await widget.picker.pickPhoto();
     if (!mounted) {
       if (selected != null && await selected.exists()) await selected.delete();
@@ -76,7 +109,8 @@ final class _GuestPhotoScreenState extends State<GuestPhotoScreen> {
 
   Future<void> submit() async {
     final selected = photo;
-    if (selected == null || !consent) return;
+    final selectedBytes = browserPhoto;
+    if ((selected == null && selectedBytes == null) || !consent) return;
     final confirmed =
         await showDialog<bool>(
           context: context,
@@ -99,20 +133,34 @@ final class _GuestPhotoScreenState extends State<GuestPhotoScreen> {
         ) ??
         false;
     if (!confirmed) {
-      if (await selected.exists()) await selected.delete();
-      if (mounted) setState(() => photo = null);
+      if (selected != null && await selected.exists()) await selected.delete();
+      if (mounted) {
+        setState(() {
+          photo = null;
+          browserPhoto = null;
+        });
+      }
       return;
     }
     setState(() => message = 'Uploading…');
     String contentType = 'image/jpeg';
     try {
-      contentType = widget.picker.contentTypeFor(selected);
-      await widget.session.submit(
-        selected,
-        consent: consent,
-        confirmed: confirmed,
-        contentType: contentType,
-      );
+      if (selectedBytes != null) {
+        await widget.session.submitBytes(
+          selectedBytes.bytes,
+          consent: consent,
+          confirmed: confirmed,
+          contentType: selectedBytes.contentType,
+        );
+      } else if (selected != null) {
+        contentType = widget.picker.contentTypeFor(selected);
+        await widget.session.submit(
+          selected,
+          consent: consent,
+          confirmed: confirmed,
+          contentType: contentType,
+        );
+      }
       if (mounted) setState(() => message = 'Photo submitted.');
     } catch (_) {
       if (mounted) {
@@ -122,8 +170,13 @@ final class _GuestPhotoScreenState extends State<GuestPhotoScreen> {
         );
       }
     } finally {
-      if (await selected.exists()) await selected.delete();
-      if (mounted) setState(() => photo = null);
+      if (selected != null && await selected.exists()) await selected.delete();
+      if (mounted) {
+        setState(() {
+          photo = null;
+          browserPhoto = null;
+        });
+      }
     }
   }
 
@@ -143,11 +196,16 @@ final class _GuestPhotoScreenState extends State<GuestPhotoScreen> {
           style: TextStyle(fontSize: 17),
         ),
         const SizedBox(height: 16),
-        OutlinedButton(onPressed: choose, child: const Text('Choose photo')),
+        OutlinedButton(
+          onPressed: widget.session.busy ? null : choose,
+          child: const Text('Choose photo'),
+        ),
         if (photo != null) Image.file(photo!, height: 220, fit: BoxFit.contain),
+        if (browserPhoto != null)
+          Image.memory(browserPhoto!.bytes, height: 220, fit: BoxFit.contain),
         CheckboxListTile(
           value: consent,
-          onChanged: photo == null
+          onChanged: !hasPhoto
               ? null
               : (v) => setState(() => consent = v ?? false),
           title: const Text(
@@ -155,7 +213,7 @@ final class _GuestPhotoScreenState extends State<GuestPhotoScreen> {
           ),
         ),
         FilledButton(
-          onPressed: photo == null || !consent || widget.session.busy
+          onPressed: !hasPhoto || !consent || widget.session.busy
               ? null
               : submit,
           child: const Text('Review and upload'),

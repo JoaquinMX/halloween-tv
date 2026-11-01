@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:http/http.dart' as http;
@@ -36,18 +37,25 @@ abstract interface class GuestMediaTransport {
   Future<void> put(Uri uri, File file, String contentType);
 }
 
-final class HttpGuestMediaTransport implements GuestMediaTransport {
+/// Byte transport avoids filesystem and temporary-directory APIs on web.
+abstract interface class GuestMediaBytesTransport {
+  Future<void> putBytes(Uri uri, Uint8List bytes, String contentType);
+}
+
+final class HttpGuestMediaTransport
+    implements GuestMediaTransport, GuestMediaBytesTransport {
   HttpGuestMediaTransport({http.Client? client})
     : _client = client ?? http.Client();
   final http.Client _client;
   @override
   Future<void> put(Uri uri, File file, String contentType) async {
+    await putBytes(uri, await file.readAsBytes(), contentType);
+  }
+
+  @override
+  Future<void> putBytes(Uri uri, Uint8List bytes, String contentType) async {
     final response = await _client
-        .put(
-          uri,
-          body: await file.readAsBytes(),
-          headers: {'content-type': contentType},
-        )
+        .put(uri, body: bytes, headers: {'content-type': contentType})
         .timeout(const Duration(seconds: 45));
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw StateError('Photo upload failed (${response.statusCode})');
@@ -142,6 +150,19 @@ final class GuestMediaClient {
 
   Future<void> upload(GuestUploadCapability capability, File file) =>
       _transport.put(capability.uploadUrl, file, capability.contentType);
+
+  Future<void> uploadBytes(GuestUploadCapability capability, Uint8List bytes) {
+    final transport = _transport;
+    if (transport is! GuestMediaBytesTransport) {
+      throw StateError('Photo byte upload transport is unavailable');
+    }
+    return (transport as GuestMediaBytesTransport).putBytes(
+      capability.uploadUrl,
+      bytes,
+      capability.contentType,
+    );
+  }
+
   Future<void> complete({
     required String partyId,
     required String deviceId,

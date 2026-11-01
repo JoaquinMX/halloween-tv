@@ -1,1 +1,35 @@
-{"flutter":{"platforms":{"android":{"default":{"projectId":"halloween-tv","appId":"1:897751802522:android:fe5c604831cb7753173523","fileOutput":"android/app/google-services.json"}},"dart":{"lib/firebase_options.dart":{"projectId":"halloween-tv","configurations":{"web":"1:897751802522:web:def02160cd2616a2173523"}}}}}}
+{
+  "flutter": {
+    "platforms": {
+      "android": {
+        "default": {
+          "projectId": "halloween-tv",
+          "appId": "1:897751802522:android:fe5c604831cb7753173523",
+          "fileOutput": "android/app/google-services.json"
+        }
+      },
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "halloween-tv",
+          "configurations": {
+            "web": "1:897751802522:web:def02160cd2616a2173523"
+          }
+        }
+      }
+    }
+  },
+  "hosting": {
+    "site": "halloween-tv",
+    "public": "build/web",
+    "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
+    "rewrites": [{"source": "**", "destination": "/index.html"}],
+    "headers": [{
+      "source": "**",
+      "headers": [
+        {"key": "Cache-Control", "value": "no-cache"},
+        {"key": "X-Content-Type-Options", "value": "nosniff"},
+        {"key": "Referrer-Policy", "value": "strict-origin-when-cross-origin"}
+      ]
+    }]
+  }
+}

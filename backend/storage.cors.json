@@ -1,0 +1,11 @@
+[
+  {
+    "origin": [
+      "https://halloween-tv.web.app",
+      "https://halloween-tv.firebaseapp.com"
+    ],
+    "method": ["GET", "HEAD", "PUT"],
+    "responseHeader": ["Content-Type", "Content-Length"],
+    "maxAgeSeconds": 3600
+  }
+]

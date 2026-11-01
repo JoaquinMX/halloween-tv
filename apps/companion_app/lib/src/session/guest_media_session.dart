@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -146,6 +147,52 @@ final class GuestMediaSession {
       }
     }
     await _persistReceipts();
+  }
+
+  /// Web upload: identical consent and durable receipt gates, no File I/O.
+  Future<void> submitBytes(
+    Uint8List bytes, {
+    required bool consent,
+    required bool confirmed,
+    required String contentType,
+  }) async {
+    if (!consent || !confirmed) {
+      throw StateError(
+        'Affirmative consent and upload confirmation are required',
+      );
+    }
+    if (busy) return;
+    busy = true;
+    try {
+      final capability = await client.requestUpload(
+        partyId: partyId,
+        deviceId: deviceId,
+        channelId: channelId,
+        contentType: contentType,
+        byteSize: bytes.length,
+        affirmativeConsent: consent,
+      );
+      submissionIds.add(capability.submissionId);
+      await _persistReceipts();
+      await client.uploadBytes(capability, bytes);
+      await client.complete(
+        partyId: partyId,
+        deviceId: deviceId,
+        channelId: channelId,
+        submissionId: capability.submissionId,
+      );
+      statuses[capability.submissionId] = 'complete';
+      _terminalStatus = null;
+    } catch (_) {
+      if (submissionId != null) {
+        statuses.putIfAbsent(submissionId!, () => 'recovery-required');
+      } else {
+        _terminalStatus ??= 'recovery-required';
+      }
+      rethrow;
+    } finally {
+      busy = false;
+    }
   }
 
   /// Withdraws [submissionId] (defaults to the latest outstanding one) and,
