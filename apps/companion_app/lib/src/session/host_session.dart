@@ -175,7 +175,12 @@ final class HostSession {
   /// Throws a sanitized [HostJoinException] when the invite cannot be
   /// redeemed (the emitted state carries the same fixed message). Guest
   /// payloads are rejected before any network call.
-  Future<void> join(GuestJoinData data) async {
+  ///
+  /// The 6-digit [pairingCode] shown next to the Host QR is forwarded to
+  /// [HostJoinClient.redeem] (server `joinHost` requires it); a missing code
+  /// preserves the legacy call shape and the server denies generically.
+  /// The code is never logged.
+  Future<void> join(GuestJoinData data, {String? pairingCode}) async {
     if (_disposed) return;
     if (data.role != JoinRole.host || data.inviteToken == null) {
       throw const HostJoinException(
@@ -199,6 +204,7 @@ final class HostSession {
         deviceId: data.deviceId.value,
         channelId: data.channelId,
         inviteToken: data.inviteToken!,
+        pairingCode: pairingCode,
       );
     } on Object catch (error) {
       if (generation == _generation && !_disposed) {

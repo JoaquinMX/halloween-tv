@@ -109,6 +109,12 @@ final class CompanionApp extends StatefulWidget {
 
 final class _CompanionAppState extends State<CompanionApp>
     with WidgetsBindingObserver {
+  /// Navigator owned by the app, below [MaterialApp].
+  ///
+  /// Route pushes must go through this key: this State's own [context] lives
+  /// above [MaterialApp] and has no [Navigator] ancestor, so
+  /// `Navigator.of(context)` throws a FlutterError and never navigates.
+  final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
   GuestSession? _session;
   HostSession? _hostSession;
   StreamSubscription<GuestSessionState>? _statesSubscription;
@@ -243,7 +249,20 @@ final class _CompanionAppState extends State<CompanionApp>
   ///
   /// Throws a sanitized message (via [HostJoinException]) when redemption or
   /// the catalog load fails, so the entry screen fails visibly.
-  Future<void> _handleHostJoin(GuestJoinData data) async {
+  ///
+  /// Legacy path: no pairing code (older callers). The server still
+  /// requires the code, so this denies generically without it.
+  Future<void> _handleHostJoin(GuestJoinData data) =>
+      _redeemHost(data, null);
+
+  /// Preferred path: redeems a host payload together with its validated
+  /// 6-digit pairing code. The code is forwarded, never logged.
+  Future<void> _handleHostJoinWithCode(
+    GuestJoinData data,
+    String pairingCode,
+  ) => _redeemHost(data, pairingCode);
+
+  Future<void> _redeemHost(GuestJoinData data, String? pairingCode) async {
     if (data.role != JoinRole.host) {
       throw StateError(
         'Host entry needs a Host QR invitation. Join as a guest instead.',
@@ -295,7 +314,7 @@ final class _CompanionAppState extends State<CompanionApp>
     });
     // Throws sanitized HostJoinException on denial/failure: the panel is
     // entered only after the scope validates.
-    await session.join(data);
+    await session.join(data, pairingCode: pairingCode);
     if (!mounted) return;
     setState(() {
       _mode = _EntryMode.hostPanel;
@@ -319,8 +338,9 @@ final class _CompanionAppState extends State<CompanionApp>
 
   void _openHostPreview(String seedId) {
     final HostSession? session = _hostSession;
-    if (session == null) return;
-    Navigator.of(context).push(
+    final NavigatorState? navigator = _navigatorKey.currentState;
+    if (session == null || navigator == null) return;
+    navigator.push(
       MaterialPageRoute<void>(
         builder: (_) =>
             HostVideoPreviewScreen(session: session, seedId: seedId),
@@ -332,7 +352,13 @@ final class _CompanionAppState extends State<CompanionApp>
     final HostSession? session = _hostSession;
     final GuestJoinData? binding = session?.binding;
     final GuestMediaClient? client = _baseDependencies?.guestMediaClient;
-    if (session == null || binding == null || client == null) return;
+    final NavigatorState? navigator = _navigatorKey.currentState;
+    if (session == null ||
+        binding == null ||
+        client == null ||
+        navigator == null) {
+      return;
+    }
     final GuestMediaSession mediaSession = GuestMediaSession(
       client: client,
       partyId: binding.partyId.value,
@@ -341,7 +367,7 @@ final class _CompanionAppState extends State<CompanionApp>
       receiptsKey: GuestMediaSession.hostReceiptsKey,
       receiptKey: GuestMediaSession.hostReceiptKey,
     );
-    Navigator.of(context).push(
+    navigator.push(
       MaterialPageRoute<void>(
         builder: (_) => GuestPhotoScreen(
           session: mediaSession,
@@ -398,6 +424,7 @@ final class _CompanionAppState extends State<CompanionApp>
     return MaterialApp(
       title: 'Halloween TV - Guests',
       theme: CctvTheme.dark(),
+      navigatorKey: _navigatorKey,
       home: _home(),
     );
   }
@@ -439,7 +466,7 @@ final class _CompanionAppState extends State<CompanionApp>
           onJoin: _handleGuestJoin,
           onBack: () => setState(() => _mode = _EntryMode.hostEntry),
           configurationIssue: _unavailableReason,
-          scanner: CameraJoinPayloadScanner(contextOf: () => context),
+          scanner: CameraJoinPayloadScanner(),
         );
       }
       final GuestSessionState snapshot = session.state;
@@ -448,7 +475,7 @@ final class _CompanionAppState extends State<CompanionApp>
           onJoin: _handleGuestJoin,
           onBack: () => setState(() => _mode = _EntryMode.hostEntry),
           configurationIssue: _unavailableReason,
-          scanner: CameraJoinPayloadScanner(contextOf: () => context),
+          scanner: CameraJoinPayloadScanner(),
         );
       }
       return NowPlayingScreen(
@@ -458,6 +485,9 @@ final class _CompanionAppState extends State<CompanionApp>
         onGuestPhoto: _baseDependencies?.guestMediaClient == null
             ? null
             : () {
+                final NavigatorState? navigator =
+                    _navigatorKey.currentState;
+                if (navigator == null) return;
                 final join = snapshot.join!;
                 final mediaSession = GuestMediaSession(
                   client: _baseDependencies!.guestMediaClient!,
@@ -465,7 +495,7 @@ final class _CompanionAppState extends State<CompanionApp>
                   deviceId: join.deviceId.value,
                   channelId: join.channelId,
                 );
-                Navigator.of(context).push(
+                navigator.push(
                   MaterialPageRoute<void>(
                     builder: (_) => GuestPhotoScreen(
                       session: mediaSession,
@@ -478,9 +508,10 @@ final class _CompanionAppState extends State<CompanionApp>
     }
     return HostEntryScreen(
       onHostJoin: _handleHostJoin,
+      onHostJoinWithCode: _handleHostJoinWithCode,
       onJoinAsGuest: () => setState(() => _mode = _EntryMode.guestJoin),
       configurationIssue: _unavailableReason,
-      scanner: CameraJoinPayloadScanner(contextOf: () => context),
+      scanner: CameraJoinPayloadScanner(),
     );
   }
 }
