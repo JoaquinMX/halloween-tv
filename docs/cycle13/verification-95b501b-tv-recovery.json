@@ -1,0 +1,157 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-11-01T00:57:01.356446+00:00",
+  "sourceHead": "95b501baefa1a85187d0447832dfe8ffcecc3b0c",
+  "followupRun": "cfad037e-737d-4f43-a528-a05e50440892",
+  "acceptance": "Phone fixes accepted previously; v3 cached TV playback recovered and visible content independently matched to retained bytes. Four-cartoon-wall acceptance is not claimed.",
+  "tvSourceChanged": false,
+  "tvApkBuiltOrInstalled": false,
+  "sourceTrees": {
+    "apps/tv_app": "10917572f5fe5d2ea369256933e8a37ebb261172",
+    "apps/companion_app": "72515eff00908021342b05d991dd672992d824ff",
+    "packages/kernel_app": "e22adb8bb6e8e1a0ce80294bfbce1364ebd03132",
+    "backend": "f10943540715b778ff50eba24ce0b6fe4eb32b34"
+  },
+  "existingSourceVerification": "Companion source 5e3423d: 168/168 independent tests, analysis clean; no source change since those checks. Documentation-only closure checks JSON parsing, byte mappings and git diff --check; no unnecessary suite rerun.",
+  "contentProvenance": {
+    "generatedCameras": [
+      "CAM-01"
+    ],
+    "localFixtureCameras": [
+      "CAM-02",
+      "CAM-03",
+      "CAM-04"
+    ],
+    "source": "backend/functions/src/cartoon_pipeline.ts:9",
+    "approvalRecord": "docs/CYCLE-13-CATALOG-PIPELINE-RUNBOOK.md:153",
+    "providerFailureClaimRejected": true
+  },
+  "retainedMedia": {
+    "entries": 8,
+    "uniqueFiles": 5,
+    "allHashesAndSizesMatchPriorAckPreviewEvidence": true,
+    "allUniqueFilesDecode": true,
+    "decodedFramesPerFile": 48,
+    "rows": [
+      {
+        "case": "hv-cartoon-case-2",
+        "camera": "CAM-01",
+        "bytes": 563257,
+        "sha256": "7091f48af79a624af684200f29a5fe397a481d4a4f5afaec103c7b3a9203252f",
+        "matchesAcknowledgedPreview": true,
+        "localDecodeExit": 0,
+        "decodedFrames": 48,
+        "content": "cartoon"
+      },
+      {
+        "case": "hv-cartoon-case-2",
+        "camera": "CAM-02",
+        "bytes": 96069,
+        "sha256": "fee970be0ab8fd956d49c93f6aa8ec672ec67202498390a194c4c2a1a42d6887",
+        "matchesAcknowledgedPreview": true,
+        "localDecodeExit": 0,
+        "decodedFrames": 48,
+        "content": "near-black local fixture"
+      },
+      {
+        "case": "hv-cartoon-case-2",
+        "camera": "CAM-03",
+        "bytes": 296569,
+        "sha256": "584968f304f4b963cbaa5985b67a18df15a5b656e51024750413f6017470236a",
+        "matchesAcknowledgedPreview": true,
+        "localDecodeExit": 0,
+        "decodedFrames": 48,
+        "content": "color-bar local fixture"
+      },
+      {
+        "case": "hv-cartoon-case-2",
+        "camera": "CAM-04",
+        "bytes": 406392,
+        "sha256": "9a65894555ead99623d5fabc36a03d79918eee93255e3c05f51b7d4fcbcff4b2",
+        "matchesAcknowledgedPreview": true,
+        "localDecodeExit": 0,
+        "decodedFrames": 48,
+        "content": "near-black local fixture"
+      },
+      {
+        "case": "hv-cartoon-case-3",
+        "camera": "CAM-01",
+        "bytes": 672987,
+        "sha256": "dc2d89ac90ef7969107c51dcea89405086658d69a93bcb287618edb79b5ea9d9",
+        "matchesAcknowledgedPreview": true,
+        "localDecodeExit": 0,
+        "decodedFrames": 48,
+        "content": "cartoon"
+      },
+      {
+        "case": "hv-cartoon-case-3",
+        "camera": "CAM-02",
+        "bytes": 96069,
+        "sha256": "fee970be0ab8fd956d49c93f6aa8ec672ec67202498390a194c4c2a1a42d6887",
+        "matchesAcknowledgedPreview": true,
+        "localDecodeExit": 0,
+        "decodedFrames": 48,
+        "content": "near-black local fixture"
+      },
+      {
+        "case": "hv-cartoon-case-3",
+        "camera": "CAM-03",
+        "bytes": 296569,
+        "sha256": "584968f304f4b963cbaa5985b67a18df15a5b656e51024750413f6017470236a",
+        "matchesAcknowledgedPreview": true,
+        "localDecodeExit": 0,
+        "decodedFrames": 48,
+        "content": "color-bar local fixture"
+      },
+      {
+        "case": "hv-cartoon-case-3",
+        "camera": "CAM-04",
+        "bytes": 406392,
+        "sha256": "9a65894555ead99623d5fabc36a03d79918eee93255e3c05f51b7d4fcbcff4b2",
+        "matchesAcknowledgedPreview": true,
+        "localDecodeExit": 0,
+        "decodedFrames": 48,
+        "content": "near-black local fixture"
+      }
+    ],
+    "blackDetection": "CAM-02/04: black_start 0, black_end 1.958333 at 24 fps (48 frames / 2 s); sampled frames independently inspected. Near-black fixture images contain noise, not missing frame surfaces.",
+    "privateAnalysisSha256": "28b14b28c4d86a5187485d24c49a2ed67fc3f962d638d2a399386bbafa747df5",
+    "privateContactSheetSha256": "bbc0aaf24933f64b5deb9ec405162e8a86d02a52ea51340efca20d7075977732"
+  },
+  "hardwareEvidence": {
+    "childReported": "All eight phone previews Playing, no errors; TV current v3 cold boot/retry/1-2-4-up/effects checks clean, four codec instances advancing. Earlier codec failures refer to stale v2 first-boot binds.",
+    "parentInspected": "Final TV screenshot matches local media: CAM-01 cartoon, CAM-02/04 near-black, CAM-03 bars, WALL UPDATED v3, no Signal Lost or panels. Final phone host panel has all three seeds, case-1 Failed and case-2/3 Ready.",
+    "privateScreenshotSha256": {
+      "tv-30-20261101.png": "07171a27e9ee163989493f7fd7e71f231bd15ca807ce5c6e0b23da61b2a57e0a",
+      "phone-27-20261101.png": "6fbb990b23dbc248e787a265cb011f6e0827a858073255947296c65f14006785",
+      "phone-c3cam2-20261101.png": "2957db78e486c5820e75cda51970715bca386e42ccd900cbcc29f400572761ae"
+    },
+    "boundary": "Parent independently decoded retained local bytes and inspected screenshots, not the child's entire live device exercise/current codec logs. Release private-cache bytes not extracted; cache integrity is supported by production all-clip verification/restore behavior plus observed playback. Network-isolated playback is not claimed."
+  },
+  "corrections": [
+    "Phone source is merged, not awaiting review.",
+    "Delivery object purge did not remove the committed TV cache.",
+    "Current dark/bars content is not established decoder rejection.",
+    "CAM-02..04 are planned local fixtures, not failed Alibaba-generated outputs."
+  ],
+  "finalDeviceState": {
+    "phone": "Host panel; three existing seeds preserved.",
+    "tv": "v3 four-up, effects on, CAM-01 cartoon plus three fixtures; no panels."
+  },
+  "constraints": {
+    "newProviderSubmissions": 0,
+    "newPhotoUploads": 0,
+    "generateActions": 0,
+    "deleteOrRevokeActions": 0,
+    "cloudRedeployments": 0,
+    "clearDataOrCache": false,
+    "uninstall": false,
+    "tvWifiToggled": false,
+    "liveBatchRemainsClosed": true,
+    "realizedCredits": "UNKNOWN, unchanged"
+  },
+  "remainingBoundary": "Four distinct cartoon-camera contents were outside the approved single-generated-camera batch. No regeneration or invented media performed.",
+  "hostCapacity": "Reported 3/3; diagnostic mirror host retained. Existing sessions unaffected, future new hosts require a free slot.",
+  "reviewScope": "Parent evidence/source audit; no fresh three-role harness review, no TV implementation diff.",
+  "evidenceLocation": "Private workspace reports/halloween-phone-recovery-20261031/; media/screenshots remain outside git."
+}

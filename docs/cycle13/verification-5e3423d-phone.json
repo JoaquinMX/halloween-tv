@@ -113,5 +113,6 @@
       "sha256": "ea0a79bef9b72649b54afbb82def8505d04afeca297103918e0cda929659c14a"
     }
   ],
-  "evidenceLocation": "Private workspace reports/halloween-phone-recovery-20261031/ and screenshots outside git."
+  "evidenceLocation": "Private workspace reports/halloween-phone-recovery-20261031/ and screenshots outside git.",
+  "subsequentTvRecoveryRecord": "verification-95b501b-tv-recovery.json supersedes the historical pending TV investigation in this acceptance record; original phone test/evidence claims are preserved."
 }
